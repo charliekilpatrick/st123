@@ -1,14 +1,21 @@
 # st123
 
-Tools for downloading JWST imaging from MAST, aligning frames with a
+`st123` is a **space-telescope** imaging toolkit intended for **HST, JWST, and
+Roman** (and related MAST-hosted missions), not a JWST-only package. It
+supports downloading imaging from MAST, aligning frames with a
 **custom, repository-local build of [JHAT](https://jhat.readthedocs.io/)**,
 building mosaics / coadds, and preparing DOLPHOT runs.
+
+Current workflows are strongest for JWST (and HST reference / MAST helpers);
+Roman support is part of the same generalized design as facility-specific
+pipelines are added.
 
 ## Provenance
 
 `st123` is a new repository whose code descends from earlier HST and JWST
-reduction toolchains. It is **not** a GitHub fork of either project; history
-starts with this repository. The main lineage is:
+reduction toolchains and is being generalized across space telescopes. It is
+**not** a GitHub fork of either project; history starts with this repository.
+The main lineage is:
 
 - [charliekilpatrick/hst123](https://github.com/charliekilpatrick/hst123) —
   original HST download / registration / drizzle / DOLPHOT tooling
@@ -17,7 +24,7 @@ starts with this repository. The main lineage is:
   the starting snapshot for `st123`)
 
 Package, module, and CLI names that previously used `jwst123` are renamed to
-`st123` in this tree.
+`st123` in this tree to reflect the broader HST / JWST / Roman scope.
 
 ## Repository layout
 
@@ -158,6 +165,7 @@ pip install -e .
 ```bash
 python -c "import jhat, st123; print(jhat.__version__, jhat.__file__); print(st123.__version__)"
 # jhat.__version__ should be 0.3.7+st123
+# st123.__version__ comes from git tags via setuptools-scm (see Versioning)
 download --help
 alignment-wrap --help
 ```
@@ -165,6 +173,29 @@ alignment-wrap --help
 This install path was validated with Python 3.12
 (`conda create -n st123 python=3.12 pip` then `pip install -e .`). The same
 steps apply on macOS and Linux/Ubuntu.
+
+## Versioning
+
+Package version is **dynamic** and derived from git tags with
+[setuptools-scm](https://setuptools-scm.readthedocs.io/):
+
+| State | Example `st123.__version__` |
+| --- | --- |
+| On tag `v0.1.0` | `0.1.0` |
+| N commits after `v0.1.0` | `0.1.1.devN+g<hash>` |
+| No git metadata (fallback) | `0.1.0` |
+
+Release a version by tagging (annotated tags preferred):
+
+```bash
+git tag -a v0.2.0 -m "st123 v0.2.0"
+git push origin v0.2.0
+```
+
+Then reinstall (`pip install -e .`) so the generated `st123/_version.py` and
+installed metadata pick up the new tag. Do not set `version` manually in
+`pyproject.toml`.
+
 ## Quick start
 
 ### Download JWST data
@@ -274,9 +305,13 @@ python st123/scripts/mosaic.py --basedir /path/to/reduction --object TARGET
 
 ## Notes
 
+- This repository targets **space telescopes in general** (HST, JWST, Roman).
+  Some CLIs and modules are still JWST-oriented (e.g. MIRI alignment wrap,
+  `jwst-download`) while shared MAST / alignment / mosaic / DOLPHOT paths are
+  meant to grow across facilities.
 - CRDS reference files are required for `jwst` pipeline steps; set `CRDS_PATH` /
   `CRDS_SERVER_URL` as recommended by STScI.
-- JHAT alignment parameters live in `st123/settings.py` (`strict_*` /
+- JHAT alignment parameters live in `st123/utils/settings.py` (`strict_*` /
   `relaxed_*` Gaia and JWST sets).
-- HST MAST helpers remain in `st123.mast` for reference-image queries, but the
-  legacy `hst123` reduction pipeline is not part of this repository.
+- HST MAST helpers remain in `st123.mast` for reference-image queries; the
+  legacy standalone `hst123` reduction pipeline is not vendored here.

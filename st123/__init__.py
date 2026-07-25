@@ -1,5 +1,5 @@
 """
-st123: JWST download, JHAT alignment, mosaicking, and DOLPHOT helpers.
+st123: space-telescope download, JHAT alignment, mosaicking, and DOLPHOT helpers.
 """
 
 from st123.alignment import (
@@ -20,6 +20,16 @@ from st123.alignment import (
     run_overlaps,
 )
 
+try:
+    from st123._version import version as __version__
+except ImportError:  # pragma: no cover - editable/source tree without build
+    try:
+        from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+        __version__ = _pkg_version('st123')
+    except PackageNotFoundError:
+        __version__ = '0.0.0+unknown'
+
 __all__ = [
     'add_bin_dq',
     'align_from_frames',
@@ -36,6 +46,5 @@ __all__ = [
     'run_alignment',
     'run_jhat',
     'run_overlaps',
+    '__version__',
 ]
-
-__version__ = '0.1.0'
