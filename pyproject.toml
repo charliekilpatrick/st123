@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "st123"
+version = "0.1.0"
+description = "JWST download, custom-JHAT alignment, mosaicking, and DOLPHOT helpers."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [
+    { name = "Charlie Kilpatrick" },
+    { name = "Aswin Suresh" },
+]
+keywords = [
+    "astronomy",
+    "jwst",
+    "nircam",
+    "miri",
+    "mast",
+    "photometry",
+    "dolphot",
+    "jhat",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+# Runtime dependencies are loaded from requirements.txt (pinned).
+dynamic = ["dependencies"]
+
+# Provenance: st123 is a new repository (not a GitHub fork) whose code descends
+# from charliekilpatrick/hst123 and aswinsuresh24/jwst123 (dev-cdk snapshot).
+# See README.md "Provenance" and the URLs below.
+
+[project.optional-dependencies]
+dev = [
+    "ipython",
+    "jupyter",
+    "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/charliekilpatrick/st123"
+Repository = "https://github.com/charliekilpatrick/st123"
+"Provenance (hst123)" = "https://github.com/charliekilpatrick/hst123"
+"Provenance (jwst123)" = "https://github.com/aswinsuresh24/jwst123"
+
+# Console entry points live under st123.scripts (library code stays in st123.*).
+[project.scripts]
+download = "st123.scripts.download:main"
+jwst-download = "st123.scripts.download:main_jwst_download"
+align = "st123.scripts.align:main"
+mosaic = "st123.scripts.mosaic:main"
+link-raw = "st123.scripts.link_raw:main"
+image-overlap = "st123.scripts.image_overlap:main"
+region = "st123.scripts.region:main"
+illuminated-s-region = "st123.scripts.region:main"
+relative-align = "st123.scripts.relative_align:main"
+alignment-wrap = "st123.scripts.alignment_wrap:main"
+apply-gwcs = "st123.scripts.apply_gwcs:main"
+catalog = "st123.scripts.catalog:main"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["st123*"]
+exclude = ["st123.notebooks*"]
+
+[tool.setuptools.package-data]
+st123 = [
+    "notebooks/*.ipynb",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]

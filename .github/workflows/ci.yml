@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    name: Build and test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12']
+
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: ${{ matrix.python-version }}
+          activate-environment: st123
+          auto-activate-base: false
+
+      - name: Install system libraries for tables / drizzlepac
+        run: |
+          conda install -y -c conda-forge hdf5 blosc pytables
+
+      - name: Install package (editable) with test extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Verify console scripts
+        run: |
+          download --help
+          align --help
+          mosaic --help
+          link-raw --help
+          image-overlap --help
+          illuminated-s-region --help
+          relative-align --help
+          apply-gwcs --help
+          catalog --help
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short

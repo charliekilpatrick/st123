@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jhat"
+version = "0.3.7+st123"
+description = "Custom JHAT build for st123 (not unmodified PyPI jhat)."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Armin Rest" },
+    { name = "Justin Pierel" },
+]
+
+[tool.setuptools.packages.find]
+include = ["jhat*"]
