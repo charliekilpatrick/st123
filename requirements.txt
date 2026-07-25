@@ -1,14 +1,16 @@
-# Pinned dependencies for jwst123 (Python 3.11–3.12).
+# Pinned dependencies for st123 (Python 3.11–3.12).
 # Referenced by pyproject.toml via [tool.setuptools.dynamic] dependencies.
-# Validated with: conda create -n jwst123 python=3.12 pip && pip install -e .
+# Validated with: conda create -n st123 python=3.12 pip && pip install -e .
 # Install from the repo root:
-#   conda create -n jwst123 python=3.12 pip
-#   conda activate jwst123
+#   conda create -n st123 python=3.12 pip
+#   conda activate st123
 #   conda install -c conda-forge hdf5 blosc pytables -y
-#   pip install -e ./extdeps/jhat -e .
+#   pip install -e .
+#   # or: pip install -e ".[dev]"
 #
-# JHAT is NOT pinned here: use the custom build under extdeps/jhat
+# Custom JHAT is installed from extdeps/jhat via the PEP 508 path line below
 # (see extdeps/jhat/README.md). Do not pip install jhat from PyPI for this repo.
+# tweakreg-hack is required at import time by extdeps/jhat.
 #
 # drizzlepac requires numpy>=2.
 
@@ -35,3 +37,7 @@ drizzlepac==3.11.0
 stwcs==1.7.7
 stpsf==2.2.0
 tables==3.11.1
+tweakreg-hack==0.1.1
+# Local custom JHAT (not PyPI). setuptools dynamic deps require PEP 508 form
+# (no pip -e flag). Installed automatically with: pip install -e .
+jhat @ file:./extdeps/jhat

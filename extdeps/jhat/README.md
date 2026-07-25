@@ -23,24 +23,26 @@ intentionally want upstream instead of this custom build.
 
 ## Install
 
-From the **st123 repository root**:
+From the **st123 repository root**, a normal editable install is enough.
+Custom JHAT is declared in the root `requirements.txt` as
+`jhat @ file:./extdeps/jhat` and is pulled in automatically:
+
+```bash
+pip install -e .
+# or: pip install -e ".[dev]"
+```
+
+Optional: install this tree alone (e.g. while hacking on JHAT):
 
 ```bash
 pip install -e ./extdeps/jhat
-pip install -e .
 ```
 
-Or in one step (recommended):
+Verify the custom build:
 
 ```bash
-pip install -e ./extdeps/jhat -e .
-```
-
-Verify the import resolves to this tree:
-
-```bash
-python -c "import jhat, pathlib; print(jhat.__file__)"
-# expect: .../st123/extdeps/jhat/jhat/__init__.py
+python -c "import jhat; print(jhat.__version__, jhat.__file__)"
+# jhat.__version__ should be 0.3.7+st123
 ```
 
 ## Version

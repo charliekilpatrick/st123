@@ -6,6 +6,6 @@ Vendored / customized third-party packages used by **st123**.
 | --- | --- | --- |
 | [`jhat/`](jhat/) | **jhat** (custom) | JWST/HST Alignment Tool used by `st123.alignment` |
 
-These packages are **not** installed from PyPI by default. Install them from this
-tree (see the root `README.md`) so the alignment pipeline gets the repository’s
-custom JHAT build.
+These packages are **not** installed from PyPI by default. The root
+`requirements.txt` pulls in the custom JHAT build via a PEP 508 path
+dependency (`jhat @ file:./extdeps/jhat`) when you run `pip install -e .`.

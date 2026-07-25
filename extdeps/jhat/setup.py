@@ -25,8 +25,9 @@ setup(
         'bin/run_st_wcs_align_batch.py',
     ],
     # Runtime libs are pinned by the parent st123 requirements.txt.
-    # Keep this list minimal so `pip install -e ./extdeps/jhat` does not
-    # fight the parent environment.
+    # Keep this list minimal so installing via
+    # `jhat @ file:./extdeps/jhat` / `pip install -e .` does not fight the
+    # parent environment.
     install_requires=[],
     python_requires='>=3.11',
     classifiers=[

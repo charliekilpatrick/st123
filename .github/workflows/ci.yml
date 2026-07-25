@@ -38,6 +38,7 @@ jobs:
       - name: Install package (editable) with test extras
         run: |
           python -m pip install --upgrade pip
+          # Custom JHAT comes from requirements.txt (jhat @ file:./extdeps/jhat).
           python -m pip install -e ".[dev]"
 
       - name: Verify console scripts
