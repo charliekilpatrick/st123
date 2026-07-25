@@ -1,11 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "st123"
-version = "0.1.0"
-description = "JWST download, custom-JHAT alignment, mosaicking, and DOLPHOT helpers."
+description = "Space-telescope imaging toolkit for HST, JWST, and Roman: MAST download, JHAT alignment, mosaicking, and DOLPHOT helpers."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
@@ -15,9 +14,14 @@ authors = [
 ]
 keywords = [
     "astronomy",
+    "space-telescope",
+    "hst",
     "jwst",
+    "roman",
     "nircam",
     "miri",
+    "wfc3",
+    "acs",
     "mast",
     "photometry",
     "dolphot",
@@ -32,11 +36,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
-# Runtime dependencies are loaded from requirements.txt (pinned).
-dynamic = ["dependencies"]
+# Version from git tags via setuptools-scm; runtime deps from requirements.txt.
+dynamic = ["version", "dependencies"]
 
-# Provenance: st123 is a new repository (not a GitHub fork) whose code descends
-# from charliekilpatrick/hst123 and aswinsuresh24/jwst123 (dev-cdk snapshot).
+# Scope: generalized space-telescope tooling (HST, JWST, Roman), not JWST-only.
+# Provenance: new repository (not a GitHub fork) descending from
+# charliekilpatrick/hst123 and aswinsuresh24/jwst123 (dev-cdk snapshot).
 # See README.md "Provenance" and the URLs below.
 
 [project.optional-dependencies]
@@ -69,6 +74,12 @@ catalog = "st123.scripts.catalog:main"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
+
+# Dynamic version from git tags (e.g. v0.1.0 → 0.1.0).
+# Between tags: 0.1.1.devN+gHASH (guess-next-dev). See README "Versioning".
+[tool.setuptools_scm]
+version_file = "st123/_version.py"
+fallback_version = "0.1.0"
 
 [tool.setuptools.packages.find]
 include = ["st123*"]

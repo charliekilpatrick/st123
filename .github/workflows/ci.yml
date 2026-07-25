@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, dev]
 
 jobs:
   build-and-test:
@@ -22,6 +22,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so setuptools-scm can resolve the package version.
+          fetch-depth: 0
 
       - name: Set up Miniconda
         uses: conda-incubator/setup-miniconda@v3
