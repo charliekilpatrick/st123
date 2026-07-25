@@ -44,7 +44,8 @@ def create_parser(
         description=(
             'Run MIRI/reference overlap matching then align each MIRI frame '
             'to its best-overlap reference. Dataset root is ``--data-dir`` '
-            'with layout <FILTER>/<obsid>/mastDownload/... plus reference/.'
+            'with layout JWST/MIRI/<FILTER>/<obsid>/mastDownload/... '
+            'plus reference/.'
         )
     )
     parser.add_argument(
@@ -58,7 +59,8 @@ def create_parser(
         type=Path,
         default=None,
         help=(
-            'Dataset root containing <FILTER>/<obsid>/mastDownload/... MIRI '
+            'Dataset root containing '
+            'JWST/MIRI/<FILTER>/<obsid>/mastDownload/... MIRI '
             'cals and reference/ coadds '
             f'(default: {default_data_dir}).'
         ),
@@ -86,7 +88,7 @@ def create_parser(
         default=None,
         help=(
             'Where to write overlap_summary.txt/json '
-            '(default: <data-dir>/overlap_output).'
+            '(default: <data-dir>/overlap).'
         ),
     )
     parser.add_argument(
@@ -309,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.align_only:
             json_path = args.overlap_json
             if json_path is None:
-                json_path = data_dir / 'overlap_output' / 'overlap_summary.json'
+                json_path = data_dir / 'overlap' / 'overlap_summary.json'
             json_path = Path(json_path).expanduser().resolve()
             if not json_path.is_file():
                 print(f'ERROR: overlap JSON not found: {json_path}', file=sys.stderr)
@@ -351,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             plot=args.plot,
             verbose=args.verbose,
             continue_on_error=args.continue_on_error,
-            cache_dir=data_dir / 'overlap_output' / 'ref_phot_cache',
+            cache_dir=data_dir / 'overlap' / 'ref_phot_cache',
             match_radius_arcsec=args.match_radius,
             clip_to_align_footprint=not args.no_clip_footprint,
             refine=not args.no_refine,

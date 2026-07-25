@@ -77,7 +77,19 @@ def test_download_parser_requires_core_args():
 
 
 def test_miri_download_layout_and_filter_normalization():
+    from st123.mast import normalize_instrument_dirname, normalize_telescope_dirname
+
     assert normalize_filter_name('F560W;CLEAR') == 'F560W'
+    assert normalize_telescope_dirname('JWST') == 'JWST'
+    assert normalize_instrument_dirname('MIRI/IMAGE') == 'MIRI'
+    assert normalize_instrument_dirname('NIRCAM') == 'NIRCam'
+    assert observation_download_subdir(
+        'F560W;CLEAR',
+        123,
+        layout='telescope/instrument/filter/obsid',
+        telescope='JWST',
+        instrument='MIRI',
+    ) == 'JWST/MIRI/F560W/123'
     assert observation_download_subdir('F560W;CLEAR', 123, layout='filter_obsid') == (
         'F560W_123'
     )
@@ -99,14 +111,14 @@ def test_download_parser_accepts_download_dir_and_layout():
             '--download-dir',
             '/tmp/out',
             '--layout',
-            'filter/obsid',
+            'telescope/instrument/filter/obsid',
             '--instruments',
             'MIRI',
             '--dry-run',
         ]
     )
     assert args.download_dir == '/tmp/out'
-    assert args.layout == 'filter/obsid'
+    assert args.layout == 'telescope/instrument/filter/obsid'
     assert args.dry_run is True
 
 

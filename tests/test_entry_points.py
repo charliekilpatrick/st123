@@ -20,6 +20,8 @@ EXPECTED_SCRIPTS = {
     'alignment-wrap': 'st123.scripts.alignment_wrap:main',
     'apply-gwcs': 'st123.scripts.apply_gwcs:main',
     'catalog': 'st123.scripts.catalog:main',
+    'dolphot-prep': 'st123.scripts.dolphot_prep:main',
+    'dolphot-warmstart': 'st123.scripts.dolphot_warmstart:main',
 }
 
 SCRIPT_MODULES = [
@@ -34,6 +36,8 @@ SCRIPT_MODULES = [
     'st123.scripts.alignment_wrap',
     'st123.scripts.apply_gwcs',
     'st123.scripts.catalog',
+    'st123.scripts.dolphot_prep',
+    'st123.scripts.dolphot_warmstart',
 ]
 
 

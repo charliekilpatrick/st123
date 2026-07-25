@@ -71,6 +71,8 @@ relative-align = "st123.scripts.relative_align:main"
 alignment-wrap = "st123.scripts.alignment_wrap:main"
 apply-gwcs = "st123.scripts.apply_gwcs:main"
 catalog = "st123.scripts.catalog:main"
+dolphot-prep = "st123.scripts.dolphot_prep:main"
+dolphot-warmstart = "st123.scripts.dolphot_warmstart:main"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }

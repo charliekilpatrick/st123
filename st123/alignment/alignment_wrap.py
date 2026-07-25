@@ -4,8 +4,11 @@ End-to-end MIRI–reference overlap + alignment pipeline.
 
 Expected dataset layout under ``--data-dir``::
 
-    <data-dir>/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits
+    <data-dir>/JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits
     <data-dir>/reference/group_*/ref_*/coadd*i2d.fits
+
+    Legacy layouts ``<FILTER>/<obsid>/...`` and ``<FILTER>_<obsid>/...`` are
+    still discovered for older trees.
 
 Steps
 -----
@@ -53,6 +56,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -405,14 +409,29 @@ def write_alignment_summary(
 
 
 def _looks_like_filter(token: str) -> bool:
-    """True for names like F560W / F1000W."""
-    t = str(token).upper()
-    return (
-        len(t) >= 3
-        and t.startswith('F')
-        and t.endswith('W')
-        and any(ch.isdigit() for ch in t)
-    )
+    """True for names like F560W / F1000W / F150W2."""
+    return bool(re.fullmatch(r'F\d+[WMN]\d*', str(token).upper()))
+
+
+# Path segments that are telescope/instrument roots, not filters.
+_PATH_SKIP_TOKENS = frozenset(
+    {
+        'JWST',
+        'HST',
+        'ROMAN',
+        'EUCLID',
+        'MIRI',
+        'NIRCAM',
+        'NIRISS',
+        'ACS',
+        'WFC3',
+        'WFPC2',
+        'WFI',
+        'VIS',
+        'NISP',
+        'MASTDOWNLOAD',
+    }
+)
 
 
 def discover_miri_images(data_dir: Path) -> list[str]:
@@ -421,21 +440,17 @@ def discover_miri_images(data_dir: Path) -> list[str]:
 
     Preferred layout::
 
+        <data-dir>/JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits
+
+    Also accepts older layouts::
+
         <data-dir>/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits
-
-    Also accepts the older combined directory name::
-
         <data-dir>/<FILTER>_<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits
     """
     data_dir = Path(data_dir)
-    patterns = (
-        '*/*/mastDownload/JWST/*_mirimage/*_cal.fits',
-        '*/mastDownload/JWST/*_mirimage/*_cal.fits',
-    )
     found: set[str] = set()
-    for pattern in patterns:
-        for path in data_dir.glob(pattern):
-            found.add(str(path.resolve()))
+    for path in data_dir.glob('**/mastDownload/JWST/*_mirimage/*_cal.fits'):
+        found.add(str(path.resolve()))
     return sorted(found)
 
 
@@ -470,6 +485,7 @@ def filter_name_from_miri_path(miri_path: str) -> str | None:
 
     Supports::
 
+        .../JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/...
         .../<FILTER>/<obsid>/mastDownload/JWST/...
         .../<FILTER>_<obsid>/mastDownload/JWST/...
     """
@@ -477,16 +493,20 @@ def filter_name_from_miri_path(miri_path: str) -> str | None:
     for i, part in enumerate(parts):
         if part != 'mastDownload' or i < 1:
             continue
-        parent = parts[i - 1]
-        # Preferred: <FILTER>/<obsid>/mastDownload
-        if i >= 2 and str(parent).isdigit():
-            cand = parts[i - 2].upper()
-            if _looks_like_filter(cand):
-                return cand
-        # Legacy: <FILTER>_<obsid>/mastDownload
-        token = parent.split('_', 1)[0].upper()
-        if _looks_like_filter(token):
-            return token
+        # Walk upward from the directory containing mastDownload.
+        for j in range(i - 1, -1, -1):
+            tok = str(parts[j])
+            if tok.isdigit():
+                continue
+            if tok.upper() in _PATH_SKIP_TOKENS:
+                continue
+            if _looks_like_filter(tok):
+                return tok.upper()
+            # Legacy: <FILTER>_<obsid>
+            head = tok.split('_', 1)[0]
+            if _looks_like_filter(head):
+                return head.upper()
+        break
     return None
 
 
@@ -777,7 +797,7 @@ def run_overlaps(
     if not miri_images:
         msg = (
             f'No MIRI *_cal.fits found under '
-            f'{data_dir}/<FILTER>/<obsid>/mastDownload/JWST/'
+            f'{data_dir}/JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/'
         )
         if filters:
             msg += f' for filters {",".join(filters)}'
@@ -803,7 +823,7 @@ def run_overlaps(
         compute_overlap=compute_overlap,
     )
     overlap_outdir = Path(
-        args.overlap_outdir or (data_dir / 'overlap_output')
+        args.overlap_outdir or (data_dir / 'overlap')
     ).expanduser().resolve()
     write_overlap_summaries(frames, overlap_outdir)
     return frames

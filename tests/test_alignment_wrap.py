@@ -92,6 +92,11 @@ def test_combine_dispersion_and_rank_parents():
 
 
 def test_filter_name_from_miri_path_layouts():
+    p0 = (
+        '/data/x/JWST/MIRI/F560W/144084448/mastDownload/JWST/'
+        'jw01783007001_02101_00001_mirimage/jw01783007001_02101_00001_mirimage_cal.fits'
+    )
+    assert wrap.filter_name_from_miri_path(p0) == 'F560W'
     p1 = (
         '/data/x/F560W/144084448/mastDownload/JWST/'
         'jw01783007001_02101_00001_mirimage/jw01783007001_02101_00001_mirimage_cal.fits'
@@ -110,6 +115,8 @@ def test_discover_and_filter_miri_images(tmp_path: Path):
     data_dir = tmp_path / 'NGC3310'
     cal = (
         data_dir
+        / 'JWST'
+        / 'MIRI'
         / 'F560W'
         / '123'
         / 'mastDownload'
@@ -233,7 +240,7 @@ def test_alignment_wrap_main_overlap_only(tmp_path: Path):
         ['--data-dir', str(data_dir), '--overlap-only', '--workers', '1']
     )
     assert rc == 0
-    overlap_json = data_dir / 'overlap_output' / 'overlap_summary.json'
+    overlap_json = data_dir / 'overlap' / 'overlap_summary.json'
     assert overlap_json.is_file()
     payload = json.loads(overlap_json.read_text())
     assert payload['frames']

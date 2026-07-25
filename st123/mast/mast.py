@@ -266,6 +266,48 @@ def normalize_filter_name(filt: str) -> str:
     return name or 'UNKNOWN'
 
 
+def normalize_telescope_dirname(obs_collection: object = None, *, default: str = 'JWST') -> str:
+    """Return a telescope directory name (e.g. ``JWST``, ``HST``, ``Roman``)."""
+    text = str(obs_collection or default).strip().upper()
+    if 'JWST' in text or text in ('JWST', 'JW'):
+        return 'JWST'
+    if text.startswith('HST') or 'HST' in text:
+        return 'HST'
+    if 'ROMAN' in text:
+        return 'Roman'
+    if 'EUCLID' in text:
+        return 'Euclid'
+    return (str(obs_collection or default).split('/')[0].strip() or default)
+
+
+def normalize_instrument_dirname(instrument_name: object = None) -> str:
+    """
+    Return an instrument directory name under the telescope root.
+
+    Examples: ``MIRI``, ``NIRCam``, ``NIRISS``, ``ACS``, ``WFC3``, ``WFI``.
+    """
+    text = str(instrument_name or 'UNKNOWN').upper()
+    if 'NIRCAM' in text:
+        return 'NIRCam'
+    if 'NIRISS' in text:
+        return 'NIRISS'
+    if 'MIRI' in text:
+        return 'MIRI'
+    if 'WFC3' in text:
+        return 'WFC3'
+    if 'WFPC2' in text:
+        return 'WFPC2'
+    if 'ACS' in text:
+        return 'ACS'
+    if 'WFI' in text or 'ROMAN' in text:
+        return 'WFI'
+    if 'VIS' in text and 'EUCLID' in text:
+        return 'VIS'
+    if 'NISP' in text:
+        return 'NISP'
+    return str(instrument_name).split('/')[0].strip() or 'UNKNOWN'
+
+
 def filter_jwst_products(
     product_list: Table,
     stage: int = 2,
@@ -289,26 +331,47 @@ def filter_jwst_products(
     return product_list[_combine_masks(masks)]
 
 
+# Canonical layout used for raw (and aligned-beside-raw) JWST/HST products.
+DEFAULT_DOWNLOAD_LAYOUT = 'telescope/instrument/filter/obsid'
+
+
 def observation_download_subdir(
     filt: str,
     obsid: object,
-    layout: str = 'filter_obsid',
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
+    *,
+    telescope: object = 'JWST',
+    instrument: object = None,
 ) -> str:
     """
     Return the per-observation subdirectory under the download root.
 
-    ``filter_obsid`` (default legacy): ``<FILTER>_<obsid>``
-    ``filter/obsid``: ``<FILTER>/<obsid>`` (preferred by ``alignment_wrap``)
+    Layouts
+    -------
+    ``telescope/instrument/filter/obsid`` (default / preferred)
+        ``JWST/MIRI/F560W/<obsid>``
+    ``filter/obsid``
+        ``<FILTER>/<obsid>`` (older alignment_wrap layout)
+    ``filter_obsid``
+        ``<FILTER>_<obsid>`` (legacy flat name)
     """
     filt_name = normalize_filter_name(filt)
     obsid_s = str(obsid)
+    if layout in (
+        'telescope/instrument/filter/obsid',
+        'tel/inst/filter/obsid',
+        'canonical',
+    ):
+        tel = normalize_telescope_dirname(telescope)
+        inst = normalize_instrument_dirname(instrument)
+        return os.path.join(tel, inst, filt_name, obsid_s)
     if layout in ('filter/obsid', 'filter_dir'):
         return os.path.join(filt_name, obsid_s)
     if layout in ('filter_obsid', 'legacy'):
         return f'{filt_name}_{obsid_s}'
     raise ValueError(
         f'Unsupported download layout {layout!r}; '
-        "use 'filter_obsid' or 'filter/obsid'"
+        "use 'telescope/instrument/filter/obsid', 'filter/obsid', or 'filter_obsid'"
     )
 
 
@@ -319,7 +382,7 @@ def download_jwst_observations(
     extension: str = 'fits',
     token: Optional[str] = None,
     *,
-    layout: str = 'filter_obsid',
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
     mirimage_only: bool = False,
     dry_run: bool = False,
 ) -> int:
@@ -332,8 +395,10 @@ def download_jwst_observations(
     Parameters
     ----------
     layout : str
-        ``filter_obsid`` → ``<outdir>/<FILTER>_<obsid>/mastDownload/...``
+        ``telescope/instrument/filter/obsid`` →
+            ``<outdir>/JWST/MIRI/<FILTER>/<obsid>/mastDownload/...``
         ``filter/obsid`` → ``<outdir>/<FILTER>/<obsid>/mastDownload/...``
+        ``filter_obsid`` → ``<outdir>/<FILTER>_<obsid>/mastDownload/...``
     mirimage_only : bool
         If True, keep only ``*mirimage*`` product filenames (MIRI imager).
     dry_run : bool
@@ -359,10 +424,20 @@ def download_jwst_observations(
     if dry_run:
         print('Dry run: no files will be downloaded')
 
+    has_collection = 'obs_collection' in obs_table.colnames
+    has_instrument = 'instrument_name' in obs_table.colnames
     for i, obs in enumerate(obs_table, start=1):
         filt = obs['filters']
         obsid = obs['obsid']
-        subdir = observation_download_subdir(filt, obsid, layout=layout)
+        telescope = obs['obs_collection'] if has_collection else 'JWST'
+        instrument = obs['instrument_name'] if has_instrument else None
+        subdir = observation_download_subdir(
+            filt,
+            obsid,
+            layout=layout,
+            telescope=telescope,
+            instrument=instrument,
+        )
         try:
             product_list = filter_jwst_products(
                 Observations.get_product_list(obs),

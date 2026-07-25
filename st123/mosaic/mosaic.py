@@ -632,28 +632,10 @@ def setup_paramfile(phot_outdir, refimage, files):
     -------
     None
     '''
-    
-    shutil.copy(refimage, phot_outdir)
-    for src_file in files:
-        shutil.copy(src_file, phot_outdir)
+    from st123.photometry.dolphot_prep import setup_paramfile as _setup_paramfile
 
-    phot_image_base = [os.path.basename(r).replace('.fits', '') for r in files]
-    phot_image_det = ['long' if 'long' in get_detector_chip(r) else 'short' for r in files]
-    N_img = len(files)
+    _setup_paramfile(phot_outdir, refimage, files, copy_files=True)
 
-    with open(f'{phot_outdir}/dolphot.param', 'w') as f:
-        f.write('Nimg = {}\n'.format(N_img))
-        f.write('img0_file = {}\n'.format(os.path.basename(refimage).replace('.fits', '')))
-        for i, (img, det) in enumerate(zip(phot_image_base, phot_image_det)):
-            f.write('img{}_file = {}\n'.format(i+1, img))
-            if det == 'short':
-                for key, val in short_params.items():
-                    f.write('img{}_{} = {}\n'.format(i+1, key, val))
-            if det == 'long':
-                for key, val in long_params.items():
-                    f.write('img{}_{} = {}\n'.format(i+1, key, val))
-        for key, val in base_params.items():
-            f.write('{} = {}\n'.format(key, val))
 
 def apply_nircammask(files):
     '''
@@ -669,14 +651,12 @@ def apply_nircammask(files):
     -------
     None
     '''
-    cmd = ['nircammask', '-etctime']
-    for fl in files:
-        # cmd += f' {fl}'
-        cmd.append(fl)
+    from st123.photometry.dolphot_prep import apply_nircammask as _apply_nircammask
 
-    subprocess.run(cmd)  
+    _apply_nircammask(files)
 
-def calc_sky(files):
+
+def calc_sky(files, instrument='nircam'):
     '''
     Calculate the sky for input files using calcsky in dolphot
 
@@ -684,24 +664,18 @@ def calc_sky(files):
     ----------
     files : list
         List of files to calculate the sky for
+    instrument : str
+        ``nircam`` (default) or ``miri`` for instrument-specific rin/rout.
 
     Returns
     -------
     None
     '''
-    cmd = 'calcsky {fits_base} {rin} {rout} {step} {sigma_low} {sigma_high}'
+    from st123.photometry.dolphot_prep import calc_sky as _calc_sky
+
     for fl in files:
-        #read params from options later
-        fits_base = fl.replace('.fits','')
-        print(fits_base)
-        rin = 15
-        rout = 25
-        step = -64
-        sigma_low = 2.25
-        sigma_high = 2.00
-        cmd_fl = cmd.format(fits_base=fits_base,rin=rin,rout=rout,
-                            step=step,sigma_low=sigma_low,sigma_high=sigma_high)
-        subprocess.run(cmd_fl,shell=True)
+        print(str(fl).replace('.fits', ''))
+    _calc_sky(files, instrument=instrument)
 
 def edit_spec_groups(table, spec_group_file):
     files = np.loadtxt(spec_group_file, dtype=str)

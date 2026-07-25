@@ -17,8 +17,10 @@ def create_parser() -> argparse.ArgumentParser:
         description=(
             'Download JWST imaging from MAST. Pass --token (or set MAST_API_TOKEN) '
             'to authenticate and include proprietary data, as in hst123. '
-            'For MIRI alignment_wrap layouts use '
-            '``--instruments MIRI --layout filter/obsid`` '
+            'Canonical layout is '
+            '``telescope/instrument/filter/obsid`` '
+            '(e.g. JWST/MIRI/F560W/<obsid>). '
+            'For MIRI use ``--instruments MIRI`` '
             '(or the repo-root ``jwst_download.py`` shim).'
         ),
     )
@@ -48,12 +50,17 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         '--layout',
-        choices=('filter_obsid', 'filter/obsid'),
-        default='filter_obsid',
+        choices=(
+            'telescope/instrument/filter/obsid',
+            'filter/obsid',
+            'filter_obsid',
+        ),
+        default='telescope/instrument/filter/obsid',
         help=(
             'Per-observation directory layout. '
-            '``filter/obsid`` matches alignment_wrap discovery '
-            '(default: filter_obsid legacy).'
+            'Default ``telescope/instrument/filter/obsid`` '
+            '(JWST/MIRI/F560W/<obsid>). '
+            'Legacy: ``filter/obsid``, ``filter_obsid``.'
         ),
     )
     parser.add_argument(
@@ -96,9 +103,12 @@ def main(argv=None) -> int:
     instruments = args.instruments
     mirimage_only = bool(args.mirimage_only)
     layout = args.layout
-    # Convenience: MIRI-only + filter/obsid implies imager products.
+    # Convenience: MIRI-only with a hierarchical layout implies imager products.
     if instruments is not None and len(instruments) == 1 and instruments[0].upper() == 'MIRI':
-        if layout == 'filter/obsid':
+        if layout in (
+            'telescope/instrument/filter/obsid',
+            'filter/obsid',
+        ):
             mirimage_only = True
 
     allowed = None
@@ -128,7 +138,7 @@ def main(argv=None) -> int:
 
 
 def normalize_jwst_download_argv(argv: list[str] | None = None) -> list[str]:
-    """Apply MIRI ``filter/obsid`` defaults used by ``scripts/jwst_download.py``."""
+    """Apply MIRI hierarchical-layout defaults used by ``jwst_download``."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
@@ -137,7 +147,7 @@ def normalize_jwst_download_argv(argv: list[str] | None = None) -> list[str]:
     if '--instruments' not in args:
         args.extend(['--instruments', 'MIRI'])
     if '--layout' not in args:
-        args.extend(['--layout', 'filter/obsid'])
+        args.extend(['--layout', 'telescope/instrument/filter/obsid'])
     return args
 
 

@@ -1,0 +1,119 @@
+"""Unit tests for DOLPHOT prep and warm-start helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from st123.photometry.dolphot_prep import (
+    classify_image_kind,
+    dolphot_command,
+    phot_to_xyt,
+    write_paramfile,
+)
+from st123.photometry.warmstart import discover_miri_jhat
+from st123.utils.helpers import get_detector_chip
+
+
+def test_get_detector_chip_miri():
+    assert get_detector_chip('jw03295_02101_00001_mirimage_jhat.fits') == 'mirimage'
+
+
+def test_classify_image_kind():
+    assert classify_image_kind('x_nrcb1_jhat.fits') == 'short'
+    assert classify_image_kind('x_nrcblong_jhat.fits') == 'long'
+    assert classify_image_kind('x_mirimage_jhat.fits') == 'miri'
+
+
+def test_phot_to_xyt(tmp_path: Path):
+    phot = tmp_path / 'run.phot'
+    # ext Z X Y chi SNR ... type(at col 11)
+    phot.write_text(
+        '1 1 10.5 20.5 1.0 50.0 0.0 0.0 0.0 0.0 1 1\n'
+        '1 1 11.0 21.0 1.0 5.0 0.0 0.0 0.0 0.0 2 1\n'
+        '1 1 12.0 22.0 1.0 9.0 0.0 0.0 0.0 0.0 4 1\n'
+    )
+    xyt = tmp_path / 'warmstart.xyt'
+    phot_to_xyt(phot, xyt)
+    lines = xyt.read_text().splitlines()
+    assert lines[0] == '1 1 10.5 20.5 1 50.0'
+    assert lines[1] == '1 1 11.0 21.0 2 5.0'
+    assert len(lines) == 3
+
+    phot_to_xyt(phot, xyt, types=[1])
+    assert xyt.read_text().splitlines() == ['1 1 10.5 20.5 1 50.0']
+
+
+def test_write_paramfile_includes_miri_and_xyt(tmp_path: Path):
+    ref = tmp_path / 'coadd.fits'
+    nircam = tmp_path / 'a_nrcb1_jhat.fits'
+    miri = tmp_path / 'b_mirimage_jhat.fits'
+    for p in (ref, nircam, miri):
+        p.write_text('')
+    xyt = tmp_path / 'warmstart.xyt'
+    xyt.write_text('1 1 1.0 2.0 1 10.0\n')
+    param = write_paramfile(
+        tmp_path / 'dolphot.param',
+        refimage=ref,
+        images=[nircam, miri],
+        xytfile=xyt,
+    )
+    text = param.read_text()
+    assert 'Nimg = 2' in text
+    assert 'img0_file = coadd' in text
+    assert 'img1_raper = 2' in text  # short NIRCam
+    assert 'img2_raper = 3' in text  # MIRI FitSky=2
+    assert 'img2_rsky2 = 4 10' in text
+    assert 'xytfile = warmstart.xyt' in text
+    assert 'UseWCS = 2' in text
+    assert 'MIRIvega = 0' in text
+    assert 'FlagMask = 4' in text
+
+
+def test_dolphot_command():
+    cmd = dolphot_command(
+        '/tmp/run',
+        phot_out='out.phot',
+        param_file='dolphot.param',
+        dolphot_bin='/data/software/dolphot/bin',
+    )
+    assert cmd.startswith('cd /tmp/run &&')
+    assert 'dolphot out.phot -pdolphot.param' in cmd
+    assert '/data/software/dolphot/bin' in cmd
+
+
+def test_discover_miri_jhat_from_summary(tmp_path: Path):
+    jhat = tmp_path / 'frame_mirimage_jhat.fits'
+    jhat.write_text('x')
+    summary = tmp_path / 'obj_alignment_summary.txt'
+    summary.write_text(
+        'miri_path filter status ref_overlap_frac n_calibrators '
+        'dispersion_mas align_mode aligned_path original_ref aligned_to\n'
+        f'/cal.fits F560W SUCCESS 0.95 10 1.0 REFERENCE {jhat} /ref.fits /ref.fits\n'
+        f'/cal2.fits F560W FAILURE 0.95 10 1.0 REFERENCE {jhat} /ref.fits /ref.fits\n'
+        f'/cal3.fits F560W SUCCESS 0.10 10 1.0 REFERENCE {jhat} /ref.fits /ref.fits\n'
+    )
+    found = discover_miri_jhat(tmp_path, alignment_summary=summary, min_overlap=0.5)
+    assert found == [jhat.resolve()] or found == [jhat]
+    assert len(found) == 1
+
+
+@mock.patch('st123.photometry.dolphot_prep.subprocess.run')
+def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
+    from st123.photometry.dolphot_prep import prepare_frames
+
+    fits = tmp_path / 'x_mirimage_jhat.fits'
+    fits.write_text('')
+    prepare_frames([fits], instrument='miri', dolphot_bin='/data/software/dolphot/bin')
+    assert mock_run.call_count == 2
+    mask_cmd = mock_run.call_args_list[0].args[0]
+    sky_cmd = mock_run.call_args_list[1].args[0]
+    assert mask_cmd[0].endswith('mirimask')
+    assert '-estnoise' in mask_cmd
+    assert '-noetctime' not in mask_cmd
+    assert sky_cmd[0].endswith('calcsky')
+    assert Path(sky_cmd[1]).name == 'x_mirimage_jhat'
+    assert [float(x) for x in sky_cmd[2:7]] == [10.0, 25.0, -64.0, 2.25, 2.0]
+    assert mock_run.call_args_list[1].kwargs.get('cwd') == fits.resolve().parent

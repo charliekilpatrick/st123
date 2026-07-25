@@ -137,14 +137,20 @@ def get_detector_chip(filename):
     Returns
     -------
     detector_chip : str
-        Detector chip
+        Detector chip (e.g. ``nrcb1``, ``nrcblong``, ``mirimage``)
     '''
-    fl_split = filename.split('_')
+    fl_split = os.path.basename(filename).split('_')
     mask = ['nrc' in x for x in fl_split]
     if any(mask):
         idx = mask.index(True)
         return fl_split[idx]
-    
+
+    # MIRI imager products use the ``mirimage`` detector token.
+    mask_miri = ['mirimage' in x.lower() for x in fl_split]
+    if any(mask_miri):
+        idx = mask_miri.index(True)
+        return fl_split[idx]
+
     return None
 
 def get_zpt(image, ccdchip=1, zptype='abmag'):

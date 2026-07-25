@@ -207,8 +207,9 @@ python st123/scripts/download.py \
   --outdir /path/to/NGC3310
 ```
 
-MIRI-only download into the `<FILTER>/<obsid>/mastDownload/...` layout used by
-`alignment_wrap` (same as the `jwst_RSGs` `jwst_download.py` workflow):
+MIRI-only download into the canonical
+`<telescope>/<instrument>/<filter>/<obsid>/mastDownload/...` layout used by
+`alignment_wrap` (e.g. `JWST/MIRI/F560W/<obsid>/...`):
 
 ```bash
 python -m st123.scripts.jwst_download \
@@ -223,13 +224,15 @@ or equivalently:
 python -m st123.scripts.download \
   --ra 159.694014 --dec 53.502851 --obj NGC3310 \
   --download-dir /data/rwisenbaker/jwst_data/NGC3310 \
-  --radius 3 --stage 2 --instruments MIRI --layout filter/obsid
+  --radius 3 --stage 2 --instruments MIRI \
+  --layout telescope/instrument/filter/obsid
 # after pip install -e .:  jwst-download ...   or   download ...
 ```
 
 ### MIRI ↔ NIRCam alignment pipeline
 
-With MIRI cals under `--data-dir/<FILTER>/<obsid>/mastDownload/...` and NIRCam
+With MIRI cals under
+`--data-dir/JWST/MIRI/<FILTER>/<obsid>/mastDownload/...` and NIRCam
 coadds under `--data-dir/reference/`:
 
 ```bash

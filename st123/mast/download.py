@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from st123.mast.mast import (
+    DEFAULT_DOWNLOAD_LAYOUT,
     download_jwst_observations,
     normalize_filter_name,
     query_jwst,
@@ -59,7 +60,7 @@ def query_mast_jwst(
     token=None,
     instruments=None,
     *,
-    layout: str = 'filter_obsid',
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
     mirimage_only: bool = False,
     dry_run: bool = False,
     allowed_filters: Optional[Sequence[str]] = None,
@@ -83,7 +84,10 @@ def query_mast_jwst(
     instruments : sequence of str or None
         Instrument name substrings (e.g. NIRCAM, MIRI). None uses defaults.
     layout : str
-        Per-observation directory layout (``filter_obsid`` or ``filter/obsid``).
+        Per-observation directory layout. Default
+        ``telescope/instrument/filter/obsid``
+        (``JWST/MIRI/F560W/<obsid>``). Also accepts ``filter/obsid`` and
+        ``filter_obsid``.
     mirimage_only : bool
         Restrict products to MIRI imager ``*mirimage*`` files.
     dry_run : bool
@@ -138,10 +142,10 @@ def query_and_download_miri(
     token: Optional[str] = None,
 ) -> int:
     """
-    Download public MIRI imager products into ``<download_dir>/<FILTER>/<obsid>/``.
+    Download public MIRI imager products into
+    ``<download_dir>/JWST/MIRI/<FILTER>/<obsid>/``.
 
-    This matches the ``jwst_RSGs`` ``jwst_download.py`` layout expected by
-    ``alignment_wrap``.
+    This is the canonical layout expected by ``alignment_wrap``.
     """
     download_dir = Path(download_dir).expanduser().resolve()
     print(f'Target: {obj}')
@@ -155,7 +159,7 @@ def query_and_download_miri(
         stage=stage,
         token=token,
         instruments=('MIRI',),
-        layout='filter/obsid',
+        layout=DEFAULT_DOWNLOAD_LAYOUT,
         mirimage_only=True,
         dry_run=dry_run,
         allowed_filters=allowed_filters,

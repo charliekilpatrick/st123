@@ -69,7 +69,7 @@ relaxed_jwst_params = { 'telescope' : 'jwst',
                         'binsize_px' : 1.0,
                         'savephottable' : 0 }
 
-#DOLPHOT params
+# DOLPHOT params (NIRCam defaults used by mosaic.setup_paramfile)
 base_params = {'FitSky' : '2',
                 'SigPSF' : '5.0',
                 'FlagMask' : '4',
@@ -114,3 +114,46 @@ long_params = {'shift' : '0 0',
                 'rsky2' : '4 10',
                 'rpsf' : '15',
                 'apsky' : '20 35'}
+
+# MIRI per-image params for FitSky=2 (dolphotMIRI.pdf §4.1).
+# img RAper=3, img RChi=2.0, img RSky=15 35, img RSky2=4 10, img RPSF=15,
+# img apsky=20 35. RAper/RPSF cannot exceed 24 for MIRI.
+miri_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '3',
+    'rchi': '2.0',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '4 10',
+    'rpsf': '15',
+    'apsky': '20 35',
+}
+
+# Global params when MIRI frames are present (UseWCS=2 required).
+# MIRIvega=0 matches NIRCAMvega=0 (AB mag / Jy) used in NIRCam runs.
+miri_base_params = {
+    **base_params,
+    'MIRIvega': '0',
+    'RCentroid': '1',
+}
+
+# calcsky: NIRCam (existing mosaic defaults) vs MIRI (dolphotMIRI.pdf §3.4).
+nircam_calcsky_params = {
+    'rin': 15,
+    'rout': 25,
+    'step': -64,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+miri_calcsky_params = {
+    'rin': 10,
+    'rout': 25,
+    'step': -64,  # quick sky; sufficient with FitSky != 0
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+# Default DOLPHOT binary directory for this installation.
+DEFAULT_DOLPHOT_BIN = '/data/software/dolphot/bin'
