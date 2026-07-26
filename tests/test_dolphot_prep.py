@@ -27,6 +27,65 @@ def test_classify_image_kind():
     assert classify_image_kind('x_mirimage_jhat.fits') == 'miri'
 
 
+def test_science_fits_paths_excludes_sky(tmp_path: Path):
+    from st123.photometry.dolphot_prep import science_fits_paths
+
+    (tmp_path / 'a_jhat.fits').write_text('')
+    (tmp_path / 'a_jhat.sky.fits').write_text('')
+    (tmp_path / 'b_jhat.fits').write_text('')
+    paths = science_fits_paths(tmp_path)
+    names = sorted(Path(p).name for p in paths)
+    assert names == ['a_jhat.fits', 'b_jhat.fits']
+
+
+def test_parse_dolphot_frame_list(tmp_path: Path):
+    from st123.photometry.dolphot_prep import parse_dolphot_frame_list
+
+    manifest = tmp_path / 'dolphot_frames.txt'
+    ref = tmp_path / 'coadd_i2d.fits'
+    f1 = tmp_path / 'a_jhat.fits'
+    f2 = tmp_path / 'b_jhat.fits'
+    for p in (ref, f1, f2):
+        p.write_text('')
+    manifest.write_text(
+        '# group=1 box=2\n'
+        f'# ref {ref}\n'
+        f'{f1}\n'
+        f'{f2}\n'
+    )
+    refimage, frames, group, box = parse_dolphot_frame_list(manifest)
+    assert refimage == ref
+    assert frames == [f1, f2]
+    assert group == 1
+    assert box == 2
+
+
+def test_parse_param_image_list(tmp_path: Path):
+    from st123.photometry.dolphot_prep import parse_param_image_list
+
+    param = tmp_path / 'dolphot.param'
+    param.write_text(
+        'Nimg = 2\n'
+        'img0_file = coadd\n'
+        'img1_file = a_nrcb1_jhat\n'
+        'img2_file = b_mirimage_jhat\n'
+    )
+    ref, images = parse_param_image_list(param)
+    assert ref == 'coadd'
+    assert images == ['a_nrcb1_jhat', 'b_mirimage_jhat']
+
+
+def test_per_image_params_kinds():
+    from st123.photometry.dolphot_prep import per_image_params
+    from st123.utils import settings
+
+    assert per_image_params('short') is settings.short_params
+    assert per_image_params('long') is settings.long_params
+    assert per_image_params('miri') is settings.miri_params
+    with pytest.raises(ValueError):
+        per_image_params('unknown')
+
+
 def test_phot_to_xyt(tmp_path: Path):
     phot = tmp_path / 'run.phot'
     # ext Z X Y chi SNR ... type(at col 11)
@@ -72,16 +131,52 @@ def test_write_paramfile_includes_miri_and_xyt(tmp_path: Path):
     assert 'FlagMask = 4' in text
 
 
-def test_dolphot_command():
+def test_dolphot_command(tmp_path: Path):
+    bin_dir = tmp_path / 'dolphot' / 'bin'
+    bin_dir.mkdir(parents=True)
     cmd = dolphot_command(
         '/tmp/run',
         phot_out='out.phot',
         param_file='dolphot.param',
-        dolphot_bin='/data/software/dolphot/bin',
+        dolphot_bin=bin_dir,
+        ncores=32,
     )
     assert cmd.startswith('cd /tmp/run &&')
-    assert 'dolphot out.phot -pdolphot.param' in cmd
-    assert '/data/software/dolphot/bin' in cmd
+    assert 'dolphot out.phot -pdolphot.param MaxThreads=32' in cmd
+    assert f'PATH={bin_dir.resolve()}:$PATH' in cmd
+
+    default_cmd = dolphot_command(
+        '/tmp/run',
+        phot_out='out.phot',
+        param_file='dolphot.param',
+        dolphot_bin=bin_dir,
+    )
+    assert 'MaxThreads=1' in default_cmd
+
+
+def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
+    from st123.photometry.dolphot_prep import resolve_dolphot_bin
+
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_dolphot = fake_bin / 'dolphot'
+    fake_dolphot.write_text('#!/bin/sh\n')
+    fake_dolphot.chmod(0o755)
+    monkeypatch.setenv('PATH', str(fake_bin))
+    assert resolve_dolphot_bin(required=False) == fake_bin.resolve()
+
+
+def test_resolve_dolphot_bin_missing_warns_and_required_raises(monkeypatch, caplog):
+    import logging
+
+    from st123.photometry.dolphot_prep import resolve_dolphot_bin
+
+    monkeypatch.setenv('PATH', '')
+    with caplog.at_level(logging.WARNING, logger='st123.photometry.dolphot_prep'):
+        assert resolve_dolphot_bin(required=False) is None
+    assert 'DOLPHOT not found on PATH' in caplog.text
+    with pytest.raises(FileNotFoundError, match='DOLPHOT not found'):
+        resolve_dolphot_bin(required=True)
 
 
 def test_discover_miri_jhat_from_summary(tmp_path: Path):
@@ -100,13 +195,15 @@ def test_discover_miri_jhat_from_summary(tmp_path: Path):
     assert len(found) == 1
 
 
-@mock.patch('st123.photometry.dolphot_prep.subprocess.run')
+@mock.patch('st123.photometry.dolphot_prep.run_logged_subprocess')
 def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
     from st123.photometry.dolphot_prep import prepare_frames
 
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
     fits = tmp_path / 'x_mirimage_jhat.fits'
     fits.write_text('')
-    prepare_frames([fits], instrument='miri', dolphot_bin='/data/software/dolphot/bin')
+    prepare_frames([fits], instrument='miri', dolphot_bin=bin_dir)
     assert mock_run.call_count == 2
     mask_cmd = mock_run.call_args_list[0].args[0]
     sky_cmd = mock_run.call_args_list[1].args[0]
@@ -119,14 +216,16 @@ def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
     assert mock_run.call_args_list[1].kwargs.get('cwd') == fits.resolve().parent
 
 
-@mock.patch('st123.photometry.dolphot_prep.subprocess.run')
+@mock.patch('st123.photometry.dolphot_prep.run_logged_subprocess')
 def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
     """Installed nircammask has no -etctime; ETC time is the default."""
     from st123.photometry.dolphot_prep import apply_nircammask
 
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
     fits = tmp_path / 'x_nrcb1_jhat.fits'
     fits.write_text('')
-    apply_nircammask([fits], dolphot_bin='/data/software/dolphot/bin')
+    apply_nircammask([fits], dolphot_bin=bin_dir)
     cmd = mock_run.call_args.args[0]
     assert cmd[0].endswith('nircammask')
     assert '-etctime' not in cmd

@@ -208,11 +208,13 @@ def test_science_fits_paths_excludes_sky_products(tmp_path: Path):
     assert names == {'a_jhat.fits', 'coadd_0_0_f150w2_i2d.fits'}
 
 
-@patch('st123.photometry.dolphot_prep.subprocess.run')
+@patch('st123.photometry.dolphot_prep.run_logged_subprocess')
 def test_apply_nircammask_command_has_no_etctime(mock_run, tmp_path: Path):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
     fits_path = tmp_path / 'x_nrcb1_jhat.fits'
     fits_path.write_text('')
-    apply_nircammask([fits_path], dolphot_bin='/data/software/dolphot/bin')
+    apply_nircammask([fits_path], dolphot_bin=bin_dir)
     cmd = mock_run.call_args.args[0]
     assert cmd[0].endswith('nircammask')
     assert '-etctime' not in cmd

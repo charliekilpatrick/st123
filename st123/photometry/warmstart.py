@@ -21,14 +21,32 @@ from st123.photometry.dolphot_prep import (
     prepare_frames,
     write_paramfile,
 )
-from st123.utils.settings import DEFAULT_DOLPHOT_BIN, miri_base_params
+from st123.utils.settings import miri_base_params
 
 PathLike = Union[str, os.PathLike]
 
 
 @dataclass
 class WarmStartResult:
-    """Paths and launch command for a prepared warm-start DOLPHOT run."""
+    """Paths and launch command for a prepared warm-start DOLPHOT run.
+
+    Attributes
+    ----------
+    outdir : pathlib.Path
+        Staging directory containing staged frames, sky maps, and parameter file.
+    param_file : pathlib.Path
+        Combined NIRCam+MIRI ``dolphot.param`` path.
+    xyt_file : pathlib.Path
+        Warm-start star list (``warmstart.xyt``).
+    phot_out : str
+        DOLPHOT output catalog basename for the combined run.
+    nircam_images : list of str
+        Basenames of staged NIRCam science frames.
+    miri_images : list of str
+        Basenames of staged MIRI ``*_jhat.fits`` frames.
+    command : str
+        Shell command to launch DOLPHOT (not executed by setup).
+    """
 
     outdir: Path
     param_file: Path
@@ -47,11 +65,28 @@ def discover_miri_jhat(
     require_success: bool = True,
 ) -> list[Path]:
     """
-    Find overlapping MIRI ``*_jhat.fits`` frames under *data_root*.
+    Find overlapping MIRI ``*_jhat.fits`` frames under a data root.
 
     Prefer ``*_alignment_summary.txt`` SUCCESS rows with
     ``ref_overlap_frac >= min_overlap``. Fall back to a recursive glob under
     ``JWST/MIRI`` when no summary is available.
+
+    Parameters
+    ----------
+    data_root : str or os.PathLike
+        JWST dataset root to search (contains ``JWST/MIRI`` or alignment outputs).
+    alignment_summary : str or os.PathLike or None, optional
+        Explicit alignment summary table path. When ``None``, the first
+        ``*_alignment_summary.txt`` under *data_root* is used if present.
+    min_overlap : float, optional
+        Minimum ``ref_overlap_frac`` for SUCCESS rows in the summary table.
+    require_success : bool, optional
+        If True (default), ignore summary rows whose status is not ``SUCCESS``.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Sorted MIRI ``*_jhat.fits`` paths (stable order by full path then basename).
     """
     root = Path(data_root)
     summary = Path(alignment_summary) if alignment_summary else None
@@ -168,8 +203,25 @@ def _stage_miri_jhat(
     return staged
 
 
-def find_phot_file(nircam_rundir: PathLike) -> Path:
-    """Locate the primary ``.phot`` catalog in a finished NIRCam DOLPHOT run."""
+def find_photfile(nircam_rundir: PathLike) -> Path:
+    """
+    Locate the primary ``.phot`` catalog in a finished NIRCam DOLPHOT run.
+
+    Parameters
+    ----------
+    nircam_rundir : str or os.PathLike
+        Directory containing a completed NIRCam DOLPHOT run.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the main ``.phot`` catalog (largest candidate when multiple exist).
+
+    Raises
+    ------
+    FileNotFoundError
+        If no suitable ``.phot`` catalog is found under *nircam_rundir*.
+    """
     rundir = Path(nircam_rundir)
     # Prefer a top-level *.phot that is not a sidecar (no extra dots before .phot)
     candidates = sorted(
@@ -197,13 +249,14 @@ def setup_miri_warmstart(
     miri_jhat: Optional[Sequence[PathLike]] = None,
     data_root: Optional[PathLike] = None,
     alignment_summary: Optional[PathLike] = None,
-    phot_file: Optional[PathLike] = None,
+    photfile: Optional[PathLike] = None,
     min_overlap: float = 0.0,
-    dolphot_bin: PathLike = DEFAULT_DOLPHOT_BIN,
+    dolphot_bin: Optional[PathLike] = None,
     phot_out: Optional[str] = None,
     prepare_miri: bool = True,
     use_hardlink: bool = True,
     xyt_types: Optional[Sequence[int]] = None,
+    ncores: int = 1,
 ) -> WarmStartResult:
     """
     Create a warm-start DOLPHOT directory with NIRCam + overlapping MIRI frames.
@@ -219,6 +272,52 @@ def setup_miri_warmstart(
        and ``xytfile = warmstart.xyt``.
 
     Does **not** run ``dolphot``; use :attr:`WarmStartResult.command`.
+    ``ncores`` sets ``MaxThreads`` on that launch command (same as ``--ncores``).
+
+    Parameters
+    ----------
+    nircam_rundir : str or os.PathLike
+        Completed NIRCam DOLPHOT run directory (contains ``dolphot.param``).
+    outdir : str or os.PathLike
+        Output directory for the combined warm-start staging tree.
+    miri_jhat : sequence of str or os.PathLike or None, optional
+        Explicit MIRI ``*_jhat.fits`` paths. When ``None``, frames are discovered
+        via :func:`discover_miri_jhat`.
+    data_root : str or os.PathLike or None, optional
+        JWST data root for MIRI discovery when *miri_jhat* is ``None``. Defaults
+        to a heuristic based on *nircam_rundir* layout.
+    alignment_summary : str or os.PathLike or None, optional
+        Alignment summary table forwarded to :func:`discover_miri_jhat`.
+    photfile : str or os.PathLike or None, optional
+        NIRCam ``.phot`` catalog for warm-start seeding. Defaults to
+        :func:`find_photfile`.
+    min_overlap : float, optional
+        Minimum reference overlap fraction for MIRI frame discovery.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory for MIRI prep.
+    phot_out : str or None, optional
+        Output catalog basename for the combined run. Defaults to
+        ``<nircam_stem>_nircam_miri.phot``.
+    prepare_miri : bool, optional
+        If True (default), run ``mirimask`` and MIRI ``calcsky`` on frames
+        missing ``.sky.fits`` sidecars.
+    use_hardlink : bool, optional
+        If True (default), hardlink NIRCam products into *outdir* when possible.
+    xyt_types : sequence of int or None, optional
+        DOLPHOT object types to retain in ``warmstart.xyt`` (forwarded to
+        :func:`phot_to_xyt`).
+    ncores : int, optional
+        ``MaxThreads`` for the generated DOLPHOT launch command.
+
+    Returns
+    -------
+    WarmStartResult
+        Staged paths, frame lists, and shell command for the combined run.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``dolphot.param``, photometry seed, or MIRI frames are missing.
     """
     nircam_dir = Path(nircam_rundir).resolve()
     out = Path(outdir).resolve()
@@ -229,7 +328,7 @@ def setup_miri_warmstart(
         raise FileNotFoundError(f'Missing {param_src}')
 
     ref_base, nircam_bases = parse_param_image_list(param_src)
-    phot_src = Path(phot_file) if phot_file else find_phot_file(nircam_dir)
+    phot_src = Path(photfile) if photfile else find_photfile(nircam_dir)
 
     if miri_jhat is not None:
         miri_sources = [Path(p) for p in miri_jhat]
@@ -299,6 +398,7 @@ def setup_miri_warmstart(
         phot_out=phot_out,
         param_file=param_path.name,
         dolphot_bin=dolphot_bin,
+        ncores=ncores,
     )
 
     # Record a small README with the launch command.

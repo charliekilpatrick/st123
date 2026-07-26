@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import glob
+import logging
 
 import numpy as np
 import pandas as pd
@@ -12,8 +13,12 @@ from st123.photometry.catalog import create_common_catalog
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    configure_logging_from_args,
     create_parser as build_parser,
 )
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -42,28 +47,32 @@ def create_parser():
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
-    photdir = args.base_dir
+    configure_logging_from_args(args, 'catalog')
+    try:
+        photdir = args.base_dir
 
-    csv_files = sorted(glob.glob(f'{photdir}/rsg*.csv'))
-    if not csv_files:
-        print(f'ERROR: no rsg*.csv files under {photdir}')
-        return 1
+        csv_files = sorted(glob.glob(f'{photdir}/rsg*.csv'))
+        if not csv_files:
+            logger.error('no rsg*.csv files under %s', photdir)
+            return 1
 
-    dfs = []
-    for file in csv_files:
-        df = pd.read_csv(file)
-        df.set_index('idx', inplace=True)
-        dfs.append(df)
+        dfs = []
+        for file in csv_files:
+            df = pd.read_csv(file)
+            df.set_index('idx', inplace=True)
+            dfs.append(df)
 
-    source_ids = []
-    for df in dfs:
-        source_ids.extend(df.index.values)
-    common_ids = np.unique(source_ids)
+        source_ids = []
+        for df in dfs:
+            source_ids.extend(df.index.values)
+        common_ids = np.unique(source_ids)
 
-    columns = sorted(glob.glob(f'{photdir}/*columns'))
-    create_common_catalog(common_ids, dfs, columns, args.outfile)
-    print(f'Wrote {args.outfile}')
-    return 0
+        columns = sorted(glob.glob(f'{photdir}/*columns'))
+        create_common_catalog(common_ids, dfs, columns, args.outfile)
+        logger.info('Wrote %s', args.outfile)
+        return 0
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

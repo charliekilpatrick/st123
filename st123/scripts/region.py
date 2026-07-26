@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -14,8 +15,12 @@ from st123.mosaic.region import (
 )
 from st123.scripts.utils.options import (
     add_common_runtime,
+    configure_logging_from_args,
     create_parser as build_parser,
 )
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -79,44 +84,54 @@ def create_parser():
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
-
-    s_region_polygon, region_mask, wcs, header, data, _ = illuminated_s_region_from_fits(
-        args.fits_file,
-        hdu_index=args.hdu,
-        simplify_tolerance=args.simplify,
-        adjacency_pixels=args.adjacency,
-        bridge_pixels=args.bridge,
-        dq_threshold=args.dq_threshold,
-    )
-
-    original_s_region = None
-    if 'S_REGION' in header:
-        original_s_region = SRegionPolygon.parse(header['S_REGION'])
-
-    print(s_region_polygon.to_string())
-    print(f'Illuminated pixels: {int(region_mask.sum())}')
-
-    output_path = args.output
-    if output_path is None:
-        output_path = args.fits_file.with_name(
-            f'{args.fits_file.stem}_illuminated_region.png'
+    configure_logging_from_args(args, 'region')
+    try:
+        (
+            s_region_polygon,
+            region_mask,
+            wcs,
+            header,
+            data,
+            _,
+        ) = illuminated_s_region_from_fits(
+            args.fits_file,
+            hdu_index=args.hdu,
+            simplify_tolerance=args.simplify,
+            adjacency_pixels=args.adjacency,
+            bridge_pixels=args.bridge,
+            dq_threshold=args.dq_threshold,
         )
 
-    save_illuminated_region_plot(
-        data,
-        s_region_polygon,
-        wcs,
-        output_path,
-        original_s_region=original_s_region,
-        title=args.fits_file.name,
-    )
-    print(f'Wrote plot to {output_path}')
+        original_s_region = None
+        if 'S_REGION' in header:
+            original_s_region = SRegionPolygon.parse(header['S_REGION'])
 
-    if args.show:
-        plt.show()
-    else:
-        plt.close('all')
-    return 0
+        logger.info('%s', s_region_polygon.to_string())
+        logger.info('Illuminated pixels: %d', int(region_mask.sum()))
+
+        output_path = args.output
+        if output_path is None:
+            output_path = args.fits_file.with_name(
+                f'{args.fits_file.stem}_illuminated_region.png'
+            )
+
+        save_illuminated_region_plot(
+            data,
+            s_region_polygon,
+            wcs,
+            output_path,
+            original_s_region=original_s_region,
+            title=args.fits_file.name,
+        )
+        logger.info('Wrote plot to %s', output_path)
+
+        if args.show:
+            plt.show()
+        else:
+            plt.close('all')
+        return 0
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

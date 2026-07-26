@@ -1,6 +1,12 @@
 """
-Compatibility helpers for mismatched ``jwst`` / ``photutils`` releases.
+Cross-package compatibility helpers.
 
+Home for small adapters that keep st123 working when pinned third-party
+stacks disagree (API renames, shape contracts, etc.). Add new package
+bridges here rather than scattering one-off shims.
+
+Current contents
+----------------
 ``jwst`` 1.20.x was written against photutils <3. With ``photutils>=3`` two
 failures show up in Image3 ``source_catalog``:
 
@@ -15,11 +21,14 @@ failures show up in Image3 ``source_catalog``:
    ``_aper_local_background`` (``TypeError: 'ApertureMask' object is not
    iterable``).
 
-This module patches both sites once so Image3 / SourceCatalogStep works with
-the pinned st123 stack (``jwst==1.20.2``, ``photutils==3.0.0``).
+:func:`patch_jwst_for_photutils3` patches both sites once so Image3 /
+SourceCatalogStep works with the pinned st123 stack (``jwst==1.20.2``,
+``photutils==3.0.0``).
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 _PATCHED = False
 
@@ -33,8 +42,20 @@ _PHOTUTILS3_ALIASES = {
 }
 
 
-def _translate_photutils3_kwargs(kwargs: dict) -> dict:
-    """Return a copy of kwargs with photutils>=3 names preferred."""
+def _translate_photutils3_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a copy of kwargs with photutils>=3 names preferred.
+
+    Parameters
+    ----------
+    kwargs : dict
+        Source-finder keyword arguments possibly using photutils<3 names.
+
+    Returns
+    -------
+    dict
+        Keyword arguments with legacy aliases translated or dropped.
+    """
     out = dict(kwargs)
     for old, new in _PHOTUTILS3_ALIASES.items():
         if new not in out and old in out:

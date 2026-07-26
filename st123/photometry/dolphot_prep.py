@@ -8,10 +8,10 @@ Independent of mosaicking: stage frames, write ``dolphot.param``, run
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, MutableMapping, Optional, Sequence, Union
@@ -19,8 +19,8 @@ from typing import Iterable, Mapping, MutableMapping, Optional, Sequence, Union
 from astropy.io import fits
 
 from st123.utils.helpers import get_detector_chip
+from st123.utils.logging import run_logged_subprocess
 from st123.utils.settings import (
-    DEFAULT_DOLPHOT_BIN,
     base_params,
     long_params,
     miri_base_params,
@@ -32,13 +32,37 @@ from st123.utils.settings import (
 
 PathLike = Union[str, os.PathLike]
 
+logger = logging.getLogger(__name__)
+
 _FRAME_LIST_NAME = 'dolphot_frames.txt'
 _GROUP_BOX_RE = re.compile(r'group_(\d+)/ref_(\d+)')
+_DOLPHOT_MISSING_MSG = (
+    'DOLPHOT not found on PATH (no `dolphot` executable from shutil.which). '
+    'Install DOLPHOT, add its bin/ directory to PATH, or pass '
+    '--dolphot-bin /path/to/dolphot/bin. DOLPHOT is required for photometry '
+    'prep (nircammask/mirimask/calcsky) and for running dolphot.'
+)
 
 
 @dataclass(frozen=True)
 class MosaicPhotJob:
-    """One mosaic box ready for DOLPHOT staging."""
+    """One mosaic box ready for DOLPHOT staging.
+
+    Attributes
+    ----------
+    group : int
+        Mosaic group index (``group_<n>`` directory name).
+    box : int
+        Reference box index within the group (``ref_<n>`` directory name).
+    refimage : pathlib.Path
+        Coadd or reference FITS for this box.
+    frames : tuple of pathlib.Path
+        Science frames listed for DOLPHOT (excluding the reference).
+    phot_outdir : pathlib.Path
+        Staging directory for mask/sky/param prep (typically ``phot_<group>_<box>``).
+    frame_list : pathlib.Path
+        ``dolphot_frames.txt`` manifest path (or placeholder when inferred).
+    """
 
     group: int
     box: int
@@ -48,16 +72,102 @@ class MosaicPhotJob:
     frame_list: Path
 
 
-def dolphot_bin_dir(dolphot_bin: Optional[PathLike] = None) -> Path:
-    """Return the DOLPHOT ``bin`` directory (default: local 3.1 install)."""
-    return Path(dolphot_bin or DEFAULT_DOLPHOT_BIN)
+def resolve_dolphot_bin(
+    dolphot_bin: Optional[PathLike] = None,
+    *,
+    required: bool = False,
+) -> Path | None:
+    """
+    Resolve the DOLPHOT ``bin`` directory.
+
+    Order
+    -----
+    1. Explicit ``dolphot_bin`` if provided.
+    2. Parent directory of ``shutil.which('dolphot')`` (PATH lookup).
+
+    Parameters
+    ----------
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the directory containing ``dolphot``, ``nircammask``,
+        ``mirimask``, and ``calcsky``.
+    required : bool, optional
+        If True and DOLPHOT cannot be resolved, raise ``FileNotFoundError``.
+        If False, log a warning and return ``None``.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Resolved DOLPHOT ``bin`` directory, or ``None`` when not found and
+        ``required`` is False.
+    """
+    if dolphot_bin is not None:
+        path = Path(dolphot_bin).expanduser().resolve()
+        if path.is_dir():
+            return path
+        msg = f'DOLPHOT bin directory does not exist: {path}'
+        if required:
+            raise FileNotFoundError(msg)
+        logger.warning('%s', msg)
+        return None
+
+    exe = shutil.which('dolphot')
+    if exe:
+        return Path(exe).resolve().parent
+
+    if required:
+        raise FileNotFoundError(_DOLPHOT_MISSING_MSG)
+    logger.warning('%s', _DOLPHOT_MISSING_MSG)
+    return None
+
+
+def dolphot_bin_dir(
+    dolphot_bin: Optional[PathLike] = None,
+    *,
+    required: bool = True,
+) -> Path:
+    """
+    Return the DOLPHOT ``bin`` directory.
+
+    Defaults to PATH discovery via :func:`resolve_dolphot_bin`. When
+    ``required`` is True (default), missing DOLPHOT raises
+    ``FileNotFoundError`` — use this before programmatically invoking
+    ``nircammask`` / ``mirimask`` / ``calcsky`` / ``dolphot``.
+
+    Parameters
+    ----------
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    required : bool, optional
+        If True (default), raise when DOLPHOT cannot be resolved.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved DOLPHOT ``bin`` directory.
+    """
+    resolved = resolve_dolphot_bin(dolphot_bin, required=required)
+    if resolved is None:
+        raise FileNotFoundError(_DOLPHOT_MISSING_MSG)
+    return resolved
 
 
 def science_fits_paths(directory: PathLike) -> list[str]:
     """
-    Return sorted ``*.fits`` paths under *directory*, excluding calcsky products.
+    Return sorted science ``*.fits`` paths under a directory.
 
-    ``*.sky.fits`` files must not be passed to ``nircammask`` / ``calcsky``.
+    ``*.sky.fits`` calcsky products are excluded because they must not be
+    passed to ``nircammask`` / ``mirimask`` / ``calcsky``.
+
+    Parameters
+    ----------
+    directory : str or os.PathLike
+        Directory to scan for ``*.fits`` files.
+
+    Returns
+    -------
+    list of str
+        Sorted absolute or relative FITS paths (as strings) excluding
+        ``*.sky.fits`` sidecars.
     """
     root = Path(directory)
     return sorted(
@@ -71,9 +181,26 @@ def parse_dolphot_frame_list(path: PathLike) -> tuple[Path, list[Path], int, int
     """
     Parse a ``dolphot_frames.txt`` manifest written by ``mosaic``.
 
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Path to the ``dolphot_frames.txt`` manifest.
+
     Returns
     -------
-    refimage, frames, group, box
+    refimage : pathlib.Path
+        Reference / coadd FITS path from the ``# ref`` header line.
+    frames : list of pathlib.Path
+        Science frame paths listed in the manifest body.
+    group : int
+        Mosaic group index from the ``# group=`` header or inferred from the path.
+    box : int
+        Reference box index from the ``# box=`` header or inferred from the path.
+
+    Raises
+    ------
+    ValueError
+        If the manifest lacks a ``# ref`` line or contains no frame paths.
     """
     path = Path(path)
     text = path.read_text()
@@ -117,6 +244,17 @@ def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
 
     Prefers ``dolphot_frames.txt`` manifests. If a coadd exists without a
     manifest, pairs it with all ``jhat/*jhat.fits`` under *reduction_dir*.
+
+    Parameters
+    ----------
+    reduction_dir : str or os.PathLike
+        Mosaic reduction root (contains ``reference/`` and optionally ``jhat/``).
+
+    Returns
+    -------
+    list of MosaicPhotJob
+        One job per mosaic box, sorted by manifest path. Empty when
+        ``reference/`` is missing or no boxes are found.
     """
     root = Path(reduction_dir)
     jobs: list[MosaicPhotJob] = []
@@ -173,10 +311,26 @@ def prepare_mosaic_phot_job(
     """
     Stage a mosaic box into ``phot_*``, write ``dolphot.param``, mask + sky.
 
+    Parameters
+    ----------
+    job : MosaicPhotJob
+        Mosaic box descriptor from :func:`discover_mosaic_phot_jobs`.
+    instrument : str, optional
+        ``'nircam'`` or ``'miri'``; selects mask and calcsky defaults.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    skip_mask : bool, optional
+        If True, skip ``nircammask`` / ``mirimask``.
+    skip_sky : bool, optional
+        If True, skip ``calcsky``.
+    copy_files : bool, optional
+        If True (default), copy reference and science frames into
+        ``job.phot_outdir`` before prep.
+
     Returns
     -------
-    Path
-        Path to ``dolphot.param``.
+    pathlib.Path
+        Path to the written ``dolphot.param`` file.
     """
     param = setup_paramfile(
         job.phot_outdir,
@@ -206,10 +360,23 @@ def _prepend_bin_env(env: Optional[MutableMapping[str, str]], bin_dir: Path) -> 
 
 def classify_image_kind(path: PathLike) -> str:
     """
-    Return ``'short'``, ``'long'``, or ``'miri'`` for per-image DOLPHOT params.
+    Classify a FITS frame for per-image DOLPHOT parameters.
 
-    Classification uses the detector token in the filename (``nrc*`` /
-    ``mirimage``) and, if needed, the ``INSTRUME`` FITS keyword.
+    Parameters
+    ----------
+    path : str or os.PathLike
+        FITS path to classify.
+
+    Returns
+    -------
+    str
+        One of ``'short'`` (NIRCam short-wavelength), ``'long'`` (NIRCam
+        long-wavelength), or ``'miri'`` (MIRI).
+
+    Raises
+    ------
+    ValueError
+        If the frame cannot be classified from the filename or FITS headers.
     """
     name = os.path.basename(str(path)).lower()
     chip = get_detector_chip(str(path))
@@ -241,7 +408,25 @@ def classify_image_kind(path: PathLike) -> str:
 
 
 def per_image_params(kind: str) -> Mapping[str, str]:
-    """Per-image parameter dict for ``short`` / ``long`` / ``miri``."""
+    """
+    Return the per-image DOLPHOT parameter dict for an image kind.
+
+    Parameters
+    ----------
+    kind : str
+        One of ``'short'``, ``'long'``, or ``'miri'``.
+
+    Returns
+    -------
+    dict
+        Mapping of DOLPHOT parameter names to string values for one image
+        extension.
+
+    Raises
+    ------
+    ValueError
+        If *kind* is not recognized.
+    """
     if kind == 'short':
         return short_params
     if kind == 'long':
@@ -276,24 +461,28 @@ def apply_nircammask(
     check: bool = True,
 ) -> None:
     """
-    Run ``nircammask`` on *files* (in-place), matching the mosaic NIRCam prep.
+    Run ``nircammask`` on science frames (in-place).
 
-    Current ``nircammask`` options (DOLPHOT NIRCam):
-    ``-estnoise``, ``-noetctime``. ETC exposure time is the default; there is
-    no ``-etctime`` flag.
+    Matches the mosaic NIRCam prep. Current ``nircammask`` options (DOLPHOT
+    NIRCam): ``-estnoise``, ``-noetctime``. ETC exposure time is the default;
+    there is no ``-etctime`` flag.
 
     Parameters
     ----------
-    files
-        FITS paths to mask.
-    dolphot_bin
-        Directory containing ``nircammask``.
-    estnoise
+    files : sequence of str or os.PathLike
+        FITS paths to mask in place.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    estnoise : bool, optional
         If True, pass ``-estnoise`` (readout noise from ``VAR_RNOISE``).
-    noetctime
+    noetctime : bool, optional
         If True, pass ``-noetctime`` to use ``EFFEXPTM`` instead of ETC time.
-    check
-        Raise if the subprocess exits non-zero.
+    check : bool, optional
+        If True (default), raise when the subprocess exits non-zero.
+
+    Returns
+    -------
+    None
     """
     bin_dir = dolphot_bin_dir(dolphot_bin)
     cwd, names = _run_cwd_for_files(files)
@@ -303,8 +492,13 @@ def apply_nircammask(
     if noetctime:
         cmd.append('-noetctime')
     cmd.extend(names)
-    subprocess.run(
-        cmd, check=check, env=_prepend_bin_env(None, bin_dir), cwd=cwd
+    run_logged_subprocess(
+        cmd,
+        check=check,
+        env=_prepend_bin_env(None, bin_dir),
+        cwd=cwd,
+        logger=logger,
+        label=f'nircammask ({len(names)} file(s))',
     )
 
 
@@ -318,11 +512,30 @@ def apply_mirimask(
     check: bool = True,
 ) -> None:
     """
-    Run ``mirimask`` on *files* (in-place) per ``dolphotMIRI.pdf`` §3.3.
+    Run ``mirimask`` on science frames (in-place).
 
-    Default flags follow the MIRI manual recommendations:
+    Default flags follow ``dolphotMIRI.pdf`` §3.3 recommendations:
     ``-estnoise`` on, ETC exposure time on (do **not** pass ``-noetctime``).
     Back up originals before calling; ``mirimask`` rewrites the FITS files.
+
+    Parameters
+    ----------
+    files : sequence of str or os.PathLike
+        FITS paths to mask in place.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    estnoise : bool, optional
+        If True (default), pass ``-estnoise``.
+    noetctime : bool, optional
+        If True, pass ``-noetctime`` to use ``EFFEXPTM`` instead of ETC time.
+    mask_lyot : bool, optional
+        If True, pass ``-mask_lyot`` to mask the Lyot stop region.
+    check : bool, optional
+        If True (default), raise when the subprocess exits non-zero.
+
+    Returns
+    -------
+    None
     """
     bin_dir = dolphot_bin_dir(dolphot_bin)
     cwd, names = _run_cwd_for_files(files)
@@ -334,8 +547,13 @@ def apply_mirimask(
     if mask_lyot:
         cmd.append('-mask_lyot')
     cmd.extend(names)
-    subprocess.run(
-        cmd, check=check, env=_prepend_bin_env(None, bin_dir), cwd=cwd
+    run_logged_subprocess(
+        cmd,
+        check=check,
+        env=_prepend_bin_env(None, bin_dir),
+        cwd=cwd,
+        logger=logger,
+        label=f'mirimask ({len(names)} file(s))',
     )
 
 
@@ -352,14 +570,40 @@ def calc_sky(
     check: bool = True,
 ) -> None:
     """
-    Run DOLPHOT ``calcsky`` on each frame.
+    Run DOLPHOT ``calcsky`` on each science frame.
 
     Defaults follow the instrument manuals:
+
     - NIRCam: rin=15, rout=25, step=-64, σ=2.25/2.00
     - MIRI: rin=10, rout=25, step=-64, σ=2.25/2.00 (``dolphotMIRI.pdf`` §3.4)
 
     When all frames share a directory, ``calcsky`` is invoked with basenames
     and ``cwd`` set to that directory to avoid C path-buffer overflows.
+
+    Parameters
+    ----------
+    files : sequence of str or os.PathLike
+        FITS paths for which to compute sky maps.
+    instrument : str, optional
+        ``'nircam'`` or ``'miri'``; selects default calcsky radii and sigmas.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    rin : float or None, optional
+        Inner sky annulus radius in pixels; instrument default when ``None``.
+    rout : float or None, optional
+        Outer sky annulus radius in pixels; instrument default when ``None``.
+    step : float or None, optional
+        Sky sampling step; instrument default when ``None``.
+    sigma_low : float or None, optional
+        Lower sigma-clipping threshold; instrument default when ``None``.
+    sigma_high : float or None, optional
+        Upper sigma-clipping threshold; instrument default when ``None``.
+    check : bool, optional
+        If True (default), raise when a subprocess exits non-zero.
+
+    Returns
+    -------
+    None
     """
     inst = instrument.lower()
     defaults = miri_calcsky_params if inst == 'miri' else nircam_calcsky_params
@@ -385,7 +629,14 @@ def calc_sky(
             str(sigma_low),
             str(sigma_high),
         ]
-        subprocess.run(cmd, check=check, env=env, cwd=cwd)
+        run_logged_subprocess(
+            cmd,
+            check=check,
+            env=env,
+            cwd=cwd,
+            logger=logger,
+            label=f'calcsky {fits_base}',
+        )
 
 
 def prepare_frames(
@@ -396,7 +647,31 @@ def prepare_frames(
     skip_mask: bool = False,
     skip_sky: bool = False,
 ) -> None:
-    """Mask then compute sky for *files* for ``nircam`` or ``miri``."""
+    """
+    Mask then compute sky for science frames.
+
+    Parameters
+    ----------
+    files : sequence of str or os.PathLike
+        FITS paths to prepare.
+    instrument : str
+        ``'nircam'`` or ``'miri'``; selects the mask utility and calcsky defaults.
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory.
+    skip_mask : bool, optional
+        If True, skip ``nircammask`` / ``mirimask``.
+    skip_sky : bool, optional
+        If True, skip ``calcsky``.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If *instrument* is not ``'nircam'`` or ``'miri'``.
+    """
     inst = instrument.lower()
     if not skip_mask:
         if inst == 'miri':
@@ -424,6 +699,34 @@ def write_paramfile(
     Image bases are basenames without ``.fits``. Per-image params are chosen
     from ``short`` / ``long`` / ``miri`` via :func:`classify_image_kind` unless
     *image_kinds* is provided.
+
+    Parameters
+    ----------
+    outfile : str or os.PathLike
+        Output path for ``dolphot.param``.
+    refimage : str or os.PathLike
+        Reference image path (basename written as ``img0_file``).
+    images : sequence of str or os.PathLike
+        Science image paths (basenames written as ``img1_file``, …).
+    global_params : dict or None, optional
+        Global DOLPHOT keywords merged into the parameter file. Defaults to
+        :data:`st123.utils.settings.base_params`, with MIRI keys added when
+        any MIRI frame is present.
+    xytfile : str or os.PathLike or None, optional
+        Warm-start star list; basename written as ``xytfile``.
+    image_kinds : sequence of str or None, optional
+        Explicit per-image kinds (``'short'``, ``'long'``, ``'miri'``). Must
+        match the length of *images* when provided.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written parameter file.
+
+    Raises
+    ------
+    ValueError
+        If ``image_kinds`` length does not match ``images``.
     """
     out = Path(outfile)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -472,9 +775,31 @@ def setup_paramfile(
     xytfile: Optional[PathLike] = None,
 ) -> Path:
     """
-    Stage images into *phot_outdir* and write ``dolphot.param``.
+    Stage images into a photometry directory and write ``dolphot.param``.
 
     Supports NIRCam and MIRI frames and an optional warm-start ``xytfile``.
+
+    Parameters
+    ----------
+    phot_outdir : str or os.PathLike
+        Directory to stage frames and write ``dolphot.param``.
+    refimage : str or os.PathLike
+        Reference / coadd FITS path.
+    files : sequence of str or os.PathLike
+        Science FITS paths to include after the reference.
+    copy_files : bool, optional
+        If True (default), copy *refimage* and *files* into *phot_outdir*
+        before writing the parameter file.
+    global_params : dict or None, optional
+        Global DOLPHOT keywords forwarded to :func:`write_paramfile`.
+    xytfile : str or os.PathLike or None, optional
+        Warm-start star list copied into *phot_outdir* when ``copy_files`` is
+        True.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written ``dolphot.param`` file.
     """
     outdir = Path(phot_outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -504,7 +829,7 @@ def setup_paramfile(
 
 
 def phot_to_xyt(
-    phot_file: PathLike,
+    photfile: PathLike,
     xyt_file: PathLike,
     *,
     types: Optional[Iterable[int]] = None,
@@ -514,8 +839,27 @@ def phot_to_xyt(
 
     Columns (1-based from the DOLPHOT manual): extension, Z, X, Y, type (col
     11), and SNR (col 6). Extension, Z, and type are written as integers.
+
+    Parameters
+    ----------
+    photfile : str or os.PathLike
+        Input DOLPHOT ``.phot`` catalog path.
+    xyt_file : str or os.PathLike
+        Output warm-start list path (typically ``warmstart.xyt``).
+    types : iterable of int or None, optional
+        If provided, keep only objects whose DOLPHOT type appears in this set.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written ``xyt`` file.
+
+    Raises
+    ------
+    ValueError
+        If no stars pass the type filter and are written to the output.
     """
-    phot_path = Path(phot_file)
+    phot_path = Path(photfile)
     out = Path(xyt_file)
     out.parent.mkdir(parents=True, exist_ok=True)
     type_set = set(int(t) for t in types) if types is not None else None
@@ -543,7 +887,26 @@ def phot_to_xyt(
 
 
 def parse_param_image_list(param_file: PathLike) -> tuple[str, list[str]]:
-    """Return ``(img0_file, [img1_file, ...])`` bases from a DOLPHOT param file."""
+    """
+    Parse image basenames from a DOLPHOT parameter file.
+
+    Parameters
+    ----------
+    param_file : str or os.PathLike
+        Path to ``dolphot.param``.
+
+    Returns
+    -------
+    ref_base : str
+        ``img0_file`` basename (without ``.fits``).
+    image_bases : list of str
+        ``img1_file``, ``img2_file``, … basenames in parameter-file order.
+
+    Raises
+    ------
+    ValueError
+        If ``img0_file`` is missing.
+    """
     ref = None
     images: list[str] = []
     nimg = None
@@ -575,16 +938,47 @@ def dolphot_command(
     phot_out: str,
     param_file: str = 'dolphot.param',
     dolphot_bin: Optional[PathLike] = None,
+    ncores: int = 1,
 ) -> str:
     """
-    Shell command to run DOLPHOT (does not execute it).
+    Build a shell command to run DOLPHOT (does not execute it).
 
-    Usage matches the binary: ``dolphot <output> -p<paramfile>``.
+    Usage matches the binary::
+
+        dolphot <output> -p<paramfile> MaxThreads=<ncores>
+
+    ``ncores`` is the same value as the CLI ``--ncores`` / ``--workers`` flag.
+    Resolves the DOLPHOT bin from ``dolphot_bin`` or ``PATH``; if missing,
+    warns and emits a command that relies on the caller's ``PATH`` alone.
+
+    Parameters
+    ----------
+    outdir : str or os.PathLike
+        Working directory for the DOLPHOT run (``cd`` target in the command).
+    phot_out : str
+        Output catalog basename passed as the first ``dolphot`` argument.
+    param_file : str, optional
+        Parameter file basename (default ``'dolphot.param'``).
+    dolphot_bin : str or os.PathLike or None, optional
+        Override path to the DOLPHOT ``bin`` directory prepended to ``PATH``.
+    ncores : int, optional
+        ``MaxThreads`` value for DOLPHOT (minimum 1).
+
+    Returns
+    -------
+    str
+        Shell command string ready to copy and run.
     """
-    bin_dir = dolphot_bin_dir(dolphot_bin)
     out = Path(outdir).resolve()
+    threads = max(1, int(ncores))
+    bin_dir = resolve_dolphot_bin(dolphot_bin, required=False)
+    if bin_dir is not None:
+        return (
+            f'cd {out} && '
+            f'PATH={bin_dir}:$PATH '
+            f'dolphot {phot_out} -p{param_file} MaxThreads={threads}'
+        )
     return (
         f'cd {out} && '
-        f'PATH={bin_dir}:$PATH '
-        f'dolphot {phot_out} -p{param_file}'
+        f'dolphot {phot_out} -p{param_file} MaxThreads={threads}'
     )

@@ -191,3 +191,76 @@ def test_resolve_instrument_defaults():
     assert align_script._resolve_instrument('visit', None) == 'NIRCAM'
     assert align_script._resolve_instrument('reference', None) == 'MIRI'
     assert align_script._resolve_instrument('visit', 'miri') == 'MIRI'
+
+
+def test_run_visit_alignment_nonzero_on_worker_failure(tmp_path: Path):
+    """Visit mode exits 1 when pooled JHAT workers report failures."""
+    table = Table(
+        {
+            'group': [0],
+            'visit': ['v1'],
+            'filter': ['F200W'],
+            'image': [str(tmp_path / 'a_cal.fits')],
+            'pupil': ['CLEAR'],
+        }
+    )
+    filter_table = {'F200W': table}
+
+    with (
+        patch('st123.scripts.align.get_input_images', return_value=['a.fits']),
+        patch('st123.scripts.align.input_list', return_value=table),
+        patch('st123.scripts.align.visit_filter_dict', return_value={'v1': 'F200W'}),
+        patch('st123.scripts.align.get_visit_geoms', return_value={'v1': object()}),
+        patch('st123.scripts.align.pick_visit', return_value=('v1', 0.5)),
+        patch('st123.scripts.align.create_filter_table', return_value=filter_table),
+        patch(
+            'st123.scripts.align.create_alignment_mosaic',
+            return_value=('mosaic.fits', (0.0, 0.0), 1),
+        ),
+        patch('st123.scripts.align.fix_phot', return_value='mosaic.phot.txt'),
+        patch('st123.scripts.align.update_refcat', return_value=None),
+        patch('st123.scripts.align.align_to_mosaic', return_value=0),
+    ):
+        rc = align_script.run_visit_alignment(
+            base_dir=tmp_path,
+            instrument='NIRCAM',
+            ncores=1,
+            verbose=False,
+        )
+    assert rc == 1
+
+
+def test_run_visit_alignment_zero_when_workers_ok(tmp_path: Path):
+    table = Table(
+        {
+            'group': [0],
+            'visit': ['v1'],
+            'filter': ['F200W'],
+            'image': [str(tmp_path / 'a_cal.fits')],
+            'pupil': ['CLEAR'],
+        }
+    )
+    filter_table = {'F200W': table}
+
+    with (
+        patch('st123.scripts.align.get_input_images', return_value=['a.fits']),
+        patch('st123.scripts.align.input_list', return_value=table),
+        patch('st123.scripts.align.visit_filter_dict', return_value={'v1': 'F200W'}),
+        patch('st123.scripts.align.get_visit_geoms', return_value={'v1': object()}),
+        patch('st123.scripts.align.pick_visit', return_value=('v1', 0.5)),
+        patch('st123.scripts.align.create_filter_table', return_value=filter_table),
+        patch(
+            'st123.scripts.align.create_alignment_mosaic',
+            return_value=('mosaic.fits', (0.0, 0.0), 0),
+        ),
+        patch('st123.scripts.align.fix_phot', return_value='mosaic.phot.txt'),
+        patch('st123.scripts.align.update_refcat', return_value=None),
+        patch('st123.scripts.align.align_to_mosaic', return_value=0),
+    ):
+        rc = align_script.run_visit_alignment(
+            base_dir=tmp_path,
+            instrument='NIRCAM',
+            ncores=1,
+            verbose=False,
+        )
+    assert rc == 0

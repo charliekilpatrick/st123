@@ -4,17 +4,22 @@
 from __future__ import annotations
 
 import glob
+import logging
 import os
 from pathlib import Path
 
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    configure_logging_from_args,
     create_parser as build_parser,
     instrument_raw_dir,
     resolve_reduction_dir,
 )
 from st123.utils.link import create_symlink, remove_proc_files
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -83,8 +88,8 @@ def _resolve_link_paths(args) -> tuple[Path, Path]:
         return Path(args.source_dir).expanduser(), Path(args.symlink_dir).expanduser()
 
     if args.base_dir is None and not args.source_dir:
-        raise SystemExit(
-            'ERROR: provide --base-dir (with optional --instrument) '
+        raise ValueError(
+            'provide --base-dir (with optional --instrument) '
             'or both --datadir/--source-dir and --symlinkdir/--reduction-dir'
         )
 
@@ -115,26 +120,30 @@ def _resolve_link_paths(args) -> tuple[Path, Path]:
 def main(argv=None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
+    configure_logging_from_args(args, 'link-raw')
     try:
-        datadir, symlinkdir = _resolve_link_paths(args)
-    except SystemExit as exc:
-        print(exc)
-        return 1
+        try:
+            datadir, symlinkdir = _resolve_link_paths(args)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 1
 
-    raw_dir = os.path.join(str(symlinkdir), 'raw')
-    os.makedirs(raw_dir, exist_ok=True)
+        raw_dir = os.path.join(str(symlinkdir), 'raw')
+        os.makedirs(raw_dir, exist_ok=True)
 
-    files = glob.glob(os.path.join(str(datadir), '**', '*.fits'), recursive=True)
-    for procdir in args.proc_dirs:
-        files = remove_proc_files(files, procdir)
-    if args.verbose:
-        print(f'Source: {datadir}')
-        print(f'Reduction: {symlinkdir}')
-    print(f'Creating symlinks for {len(files)} files under {raw_dir}')
-    for file in files:
-        link_path = os.path.join(raw_dir, os.path.basename(file))
-        create_symlink(file, link_path)
-    return 0
+        files = glob.glob(os.path.join(str(datadir), '**', '*.fits'), recursive=True)
+        for procdir in args.proc_dirs:
+            files = remove_proc_files(files, procdir)
+        if args.verbose:
+            logger.info('Source: %s', datadir)
+            logger.info('Reduction: %s', symlinkdir)
+        logger.info('Creating symlinks for %d files under %s', len(files), raw_dir)
+        for file in files:
+            link_path = os.path.join(raw_dir, os.path.basename(file))
+            create_symlink(file, link_path)
+        return 0
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

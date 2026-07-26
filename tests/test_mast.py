@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -63,7 +65,7 @@ def test_filter_jwst_observations_by_stage():
     assert list(stage3['obsid']) == [4]
 
 
-def test_download_skips_unavailable_calib_level_silently(capsys):
+def test_download_skips_unavailable_calib_level_silently(caplog):
     obs = Table(
         {
             'obsid': [253894283, 213233923],
@@ -81,17 +83,22 @@ def test_download_skips_unavailable_calib_level_silently(capsys):
             'productFilename': ['jw_ok_cal.fits'],
         }
     )
-    with patch('st123.mast.mast.Observations.get_product_list', return_value=products), patch(
-        'st123.mast.mast.Observations.download_products'
-    ) as mock_dl, patch('st123.mast.mast.resolve_mast_token', return_value=None):
-        n = download_jwst_observations(obs, outdir='/tmp/st123_dl_test', stage=2, dry_run=True)
+    with (
+        caplog.at_level(logging.INFO, logger='st123.mast'),
+        patch('st123.mast.mast.Observations.get_product_list', return_value=products),
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+    ):
+        n = download_jwst_observations(
+            obs, outdir='/tmp/st123_dl_test', stage=2, dry_run=True
+        )
     assert n == 1
     mock_dl.assert_not_called()
-    out = capsys.readouterr().out
-    assert '253894283' not in out
-    assert 'no stage-2 science products' not in out
-    assert 'Skipping 1 observation' in out
-    assert '213233923' in out or 'F2100W' in out
+    text = caplog.text
+    assert '253894283' not in text
+    assert 'no stage-2 science products' not in text
+    assert 'Skipping 1 observation' in text
+    assert '213233923' in text or 'F2100W' in text
 
 
 def test_is_hst_science_product():
@@ -122,3 +129,31 @@ def test_mast_login_success(monkeypatch):
 
 def test_resolve_mast_token_explicit():
     assert resolve_mast_token('x') == 'x'
+
+
+def test_normalize_filter_and_path_helpers():
+    from st123.mast.mast import (
+        normalize_filter_name,
+        normalize_instrument_dirname,
+        normalize_telescope_dirname,
+        observation_download_subdir,
+    )
+
+    assert normalize_filter_name('F560W;CLEAR') == 'F560W'
+    assert normalize_filter_name('f200w') == 'F200W'
+    assert normalize_filter_name('') == 'UNKNOWN'
+    assert normalize_filter_name('???') == '_'
+
+    assert normalize_telescope_dirname('JWST') == 'JWST'
+    assert normalize_telescope_dirname('HST') == 'HST'
+    assert normalize_telescope_dirname('Roman') == 'Roman'
+    assert normalize_telescope_dirname('Euclid') == 'Euclid'
+
+    assert normalize_instrument_dirname('NIRCAM/IMAGE') == 'NIRCam'
+    assert normalize_instrument_dirname('MIRI') == 'MIRI'
+    assert normalize_instrument_dirname('WFC3/UVIS') == 'WFC3'
+
+    sub = observation_download_subdir('F200W', '12345', telescope='JWST')
+    assert 'JWST' in Path(sub).parts or 'JWST' in str(sub)
+    assert 'F200W' in str(sub)
+    assert '12345' in str(sub)

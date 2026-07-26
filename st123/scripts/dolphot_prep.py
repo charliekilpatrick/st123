@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import glob
+import logging
 import shutil
-import sys
 from pathlib import Path
 
 from st123.photometry.dolphot_prep import (
     discover_mosaic_phot_jobs,
+    dolphot_command,
     prepare_frames,
     prepare_mosaic_phot_job,
     setup_paramfile,
@@ -17,11 +18,14 @@ from st123.photometry.dolphot_prep import (
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    configure_logging_from_args,
     create_parser as build_parser,
     dataset_label,
     resolve_reduction_dir,
 )
-from st123.utils.settings import DEFAULT_DOLPHOT_BIN
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -80,8 +84,11 @@ def create_parser():
     parser.add_argument(
         '--dolphot-bin',
         type=str,
-        default=DEFAULT_DOLPHOT_BIN,
-        help=f'DOLPHOT bin directory (default: {DEFAULT_DOLPHOT_BIN}).',
+        default=None,
+        help=(
+            'DOLPHOT bin directory containing dolphot/nircammask/mirimask/calcsky. '
+            'Default: directory of `dolphot` found on PATH (shutil.which).'
+        ),
     )
     parser.add_argument(
         '--skip-mask',
@@ -93,31 +100,33 @@ def create_parser():
         action='store_true',
         help='Skip calcsky.',
     )
-    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
+    add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
 
 def _run_from_mosaic(args) -> int:
     if args.base_dir is None:
-        print('ERROR: --from-mosaic requires --base-dir', file=sys.stderr)
+        logger.error('--from-mosaic requires --base-dir')
         return 1
     reduction = Path(resolve_reduction_dir(args.base_dir))
     if args.verbose:
-        print(f'Dataset: {dataset_label(args.base_dir)}')
-        print(f'Reduction workdir: {reduction}')
+        logger.info('Dataset: %s', dataset_label(args.base_dir))
+        logger.info('Reduction workdir: %s', reduction)
     jobs = discover_mosaic_phot_jobs(reduction)
     if not jobs:
-        print(
-            f'ERROR: no mosaic coadds / dolphot_frames.txt under '
-            f'{reduction / "reference"}',
-            file=sys.stderr,
+        logger.error(
+            'no mosaic coadds / dolphot_frames.txt under %s',
+            reduction / 'reference',
         )
         return 1
     for job in jobs:
         if args.verbose:
-            print(
-                f'Prep phot_{job.group}_{job.box}: '
-                f'ref={job.refimage.name} frames={len(job.frames)}'
+            logger.info(
+                'Prep phot_%s_%s: ref=%s frames=%d',
+                job.group,
+                job.box,
+                job.refimage.name,
+                len(job.frames),
             )
         param = prepare_mosaic_phot_job(
             job,
@@ -126,7 +135,18 @@ def _run_from_mosaic(args) -> int:
             skip_mask=args.skip_mask,
             skip_sky=args.skip_sky,
         )
-        print(f'Wrote {param} ({len(job.frames)} frames + ref)')
+        logger.info('Wrote %s (%d frames + ref)', param, len(job.frames))
+        phot_out = f'phot_{job.group}_{job.box}.phot'
+        logger.info(
+            'Run DOLPHOT with: %s',
+            dolphot_command(
+                job.phot_outdir,
+                phot_out=phot_out,
+                param_file=param.name,
+                dolphot_bin=args.dolphot_bin,
+                ncores=args.ncores,
+            ),
+        )
     return 0
 
 
@@ -142,15 +162,15 @@ def _run_explicit(args) -> int:
         )
         files = sorted(Path(p) for p in glob.glob(pattern))
     else:
-        print('ERROR: provide --files, --base-dir, or --from-mosaic', file=sys.stderr)
+        logger.error('provide --files, --base-dir, or --from-mosaic')
         return 1
 
     missing = [p for p in files if not p.is_file()]
     if missing:
-        print(f'ERROR: missing files: {missing[0]}', file=sys.stderr)
+        logger.error('missing files: %s', missing[0])
         return 1
     if not files:
-        print('ERROR: no input FITS files', file=sys.stderr)
+        logger.error('no input FITS files')
         return 1
 
     work = files
@@ -175,7 +195,17 @@ def _run_explicit(args) -> int:
                 work,
                 copy_files=False,
             )
-            print(f'Wrote {outdir / "dolphot.param"}')
+            logger.info('Wrote %s', outdir / 'dolphot.param')
+            logger.info(
+                'Run DOLPHOT with: %s',
+                dolphot_command(
+                    outdir,
+                    phot_out=f'{outdir.name}.phot',
+                    param_file='dolphot.param',
+                    dolphot_bin=args.dolphot_bin,
+                    ncores=args.ncores,
+                ),
+            )
 
     prepare_frames(
         work,
@@ -184,15 +214,23 @@ def _run_explicit(args) -> int:
         skip_mask=args.skip_mask,
         skip_sky=args.skip_sky,
     )
-    print(f'Prepared {len(work)} {args.instrument} frame(s)')
+    logger.info('Prepared %d %s frame(s)', len(work), args.instrument)
     return 0
 
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
-    if args.from_mosaic:
-        return _run_from_mosaic(args)
-    return _run_explicit(args)
+    configure_logging_from_args(args, 'dolphot-prep')
+    try:
+        try:
+            if args.from_mosaic:
+                return _run_from_mosaic(args)
+            return _run_explicit(args)
+        except FileNotFoundError as exc:
+            logger.error('%s', exc)
+            return 1
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

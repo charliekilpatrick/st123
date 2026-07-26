@@ -52,11 +52,12 @@ Package, module, and CLI names that previously used `jwst123` are renamed to
 | `st123.mast` | MAST query and download helpers (`mast`, `download` submodules) |
 | `st123.photometry` | Per-image / combined photometry catalog helpers |
 | `st123.photometry.catalog` | DOLPHOT column mapping and combined catalogs |
-| `st123.utils` | Shared utilities package (helpers, settings, link, constants) |
+| `st123.utils` | Shared utilities package (helpers, settings, link, logging) |
 | `st123.utils.helpers` | Coordinates, FITS bookkeeping, visits, xmatch |
 | `st123.utils.settings` | JHAT and DOLPHOT parameter sets |
 | `st123.utils.link` | Symlink helpers for reduction ``raw/`` trees |
-| `st123.utils.constants` | ANSI color strings for CLI messages |
+| `st123.utils.logging` | POTPyRI-style console/file logging (`<base-dir>/logs/`) |
+| `st123.utils.compatibility` | Cross-package compatibility adapters |
 
 ### Scripts
 
@@ -111,7 +112,10 @@ version marking (`0.3.7+st123`) are in
 
 - **Python 3.12** (3.11 also supported)
 - External **DOLPHOT** binaries if you run PSF photometry
-  ([DOLPHOT](http://americano.dolphinsim.com/dolphot/))
+  ([DOLPHOT](http://americano.dolphinsim.com/dolphot/)).
+  Put the DOLPHOT `bin/` directory on your `PATH` (st123 resolves it via
+  `which dolphot`), or pass `--dolphot-bin`. There is no machine-specific
+  default install path.
 - The custom JHAT package under `extdeps/jhat` (pulled in by `pip install -e .`)
 
 ## Installation
@@ -263,6 +267,8 @@ Useful options:
 
 After install, console scripts from `pyproject.toml` are available (`download`, `align`, `mosaic`, `link-raw`, `image-overlap`, `region`, `catalog`, `dolphot-prep`, `dolphot-warmstart`).
 
+Each CLI writes a UTC log under `<base-dir>/logs/{script}_{YYYYMMDD_HHMMSS}_{uid}.log` (or `./logs/` when `--base-dir` is omitted). Package code uses stdlib `logging.getLogger(__name__)`; scripts call `setup_script_logging` once in `main()`. External tools (JHAT, JWST Image3, DOLPHOT binaries, MAST clients) have their stdout/stderr captured into that log file at DEBUG via `capture_output` / `run_logged_subprocess` (console stays INFO unless `--verbose`).
+
 ### Stage files for a reduction
 
 ```bash
@@ -314,3 +320,20 @@ coadd, and leaves a `dolphot_frames.txt` manifest per box. DOLPHOT staging
   `relaxed_*` Gaia and JWST sets).
 - HST MAST helpers remain in `st123.mast` for reference-image queries; the
   legacy standalone `hst123` reduction pipeline is not vendored here.
+
+### Docstrings and naming
+
+Library APIs use **NumPy-style** docstrings: `Parameters` / `Returns` (and
+`Raises` when needed) with `----------` underlines, explicit types on each
+parameter/return line, and matching type hints on signatures.
+
+Canonical names:
+
+| Concept | Prefer | Notes |
+| --- | --- | --- |
+| Project / dataset root | `base_dir` / `--base-dir` | Legacy `--workdir`, `--outdir`, … alias to this |
+| Parallelism | `ncores` / `--ncores` | Alias `--workers`; DOLPHOT `MaxThreads` |
+| Science FITS path(s) | `--image` | Avoid inventing `--miri` / `--align` for that role |
+| Photometry catalog path | `photfile` / `--photfile` | JHAT APIs keep `photfilename` (upstream name) |
+| Reduction staging dir | `proc_dir` | Used by symlink helpers |
+| Output directory | `outdir` | Local job/output trees (not the CLI project root) |

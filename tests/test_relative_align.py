@@ -21,6 +21,11 @@ def test_phot_catalog_path_and_resolve_outdir(tmp_path: Path):
     assert Path(out).is_dir()
 
 
+def test_reference_align_job_alias():
+    """Historical NIRCam worker name remains an alias of the REFERENCE worker."""
+    assert align_lib.run_nircam_align_job is align_lib.run_reference_align_job
+
+
 def test_has_jwst_gwcs(tmp_path: Path):
     plain = tmp_path / 'plain.fits'
     fits.PrimaryHDU(np.ones((10, 10))).writeto(plain)

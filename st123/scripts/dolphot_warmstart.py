@@ -3,19 +3,23 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from st123.photometry.warmstart import setup_miri_warmstart
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    configure_logging_from_args,
     create_parser as build_parser,
     default_alignment_summary,
     default_phot_dir,
     default_warmstart_outdir,
     resolve_project_root,
 )
-from st123.utils.settings import DEFAULT_DOLPHOT_BIN
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -66,7 +70,9 @@ def create_parser():
         help='Explicit MIRI *_jhat.fits paths (overrides discovery).',
     )
     parser.add_argument(
+        '--photfile',
         '--phot-file',
+        dest='photfile',
         type=str,
         default=None,
         help='NIRCam .phot catalog for warmstart.xyt (default: auto-detect).',
@@ -86,8 +92,11 @@ def create_parser():
     parser.add_argument(
         '--dolphot-bin',
         type=str,
-        default=DEFAULT_DOLPHOT_BIN,
-        help=f'DOLPHOT bin directory (default: {DEFAULT_DOLPHOT_BIN}).',
+        default=None,
+        help=(
+            'DOLPHOT bin directory containing dolphot/nircammask/mirimask/calcsky. '
+            'Default: directory of `dolphot` found on PATH (shutil.which).'
+        ),
     )
     parser.add_argument(
         '--skip-miri-prep',
@@ -99,7 +108,7 @@ def create_parser():
         action='store_true',
         help='Copy NIRCam products instead of hardlinking.',
     )
-    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
+    add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
 
@@ -117,8 +126,8 @@ def _resolve_warmstart_paths(args) -> tuple[str, str, str | None, str | None]:
         return args.nircam_dir, args.outdir, data_root, summary
 
     if args.base_dir is None:
-        raise SystemExit(
-            'ERROR: provide --base-dir or both --nircam-dir and --outdir'
+        raise ValueError(
+            'provide --base-dir or both --nircam-dir and --outdir'
         )
 
     base = Path(args.base_dir)
@@ -133,41 +142,49 @@ def _resolve_warmstart_paths(args) -> tuple[str, str, str | None, str | None]:
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
+    configure_logging_from_args(args, 'dolphot-warmstart')
     try:
-        nircam_dir, outdir, data_root, summary = _resolve_warmstart_paths(args)
-    except SystemExit as exc:
-        print(exc)
-        return 1
+        try:
+            nircam_dir, outdir, data_root, summary = _resolve_warmstart_paths(args)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 1
 
-    if args.verbose:
-        print(f'NIRCam dir: {nircam_dir}')
-        print(f'Outdir:     {outdir}')
-        print(f'Data root:  {data_root}')
-        print(f'Summary:    {summary}')
+        if args.verbose:
+            logger.info('NIRCam dir: %s', nircam_dir)
+            logger.info('Outdir:     %s', outdir)
+            logger.info('Data root:  %s', data_root)
+            logger.info('Summary:    %s', summary)
 
-    result = setup_miri_warmstart(
-        nircam_dir,
-        outdir,
-        miri_jhat=args.miri_jhat,
-        data_root=data_root,
-        alignment_summary=summary,
-        phot_file=args.phot_file,
-        min_overlap=args.min_overlap,
-        dolphot_bin=args.dolphot_bin,
-        phot_out=args.phot_out,
-        prepare_miri=not args.skip_miri_prep,
-        use_hardlink=not args.copy,
-    )
-    print(f'Warm-start directory: {result.outdir}')
-    print(f'  NIRCam frames: {len(result.nircam_images)}')
-    print(f'  MIRI frames:   {len(result.miri_images)}')
-    print(f'  Param file:    {result.param_file}')
-    print(f'  xyt file:      {result.xyt_file}')
-    print(f'  Phot output:   {result.phot_out}')
-    print()
-    print('Run DOLPHOT with:')
-    print(f'  {result.command}')
-    return 0
+        try:
+            result = setup_miri_warmstart(
+                nircam_dir,
+                outdir,
+                miri_jhat=args.miri_jhat,
+                data_root=data_root,
+                alignment_summary=summary,
+                photfile=args.photfile,
+                min_overlap=args.min_overlap,
+                dolphot_bin=args.dolphot_bin,
+                phot_out=args.phot_out,
+                prepare_miri=not args.skip_miri_prep,
+                use_hardlink=not args.copy,
+                ncores=args.ncores,
+            )
+        except FileNotFoundError as exc:
+            logger.error('%s', exc)
+            return 1
+        logger.info('Warm-start directory: %s', result.outdir)
+        logger.info('  NIRCam frames: %d', len(result.nircam_images))
+        logger.info('  MIRI frames:   %d', len(result.miri_images))
+        logger.info('  Param file:    %s', result.param_file)
+        logger.info('  xyt file:      %s', result.xyt_file)
+        logger.info('  Phot output:   %s', result.phot_out)
+        logger.info('Run DOLPHOT with:')
+        logger.info('  %s', result.command)
+        return 0
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

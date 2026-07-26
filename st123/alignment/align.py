@@ -9,8 +9,15 @@ knobs to high-level orchestration:
 3. JHAT core — photometry, dispersion, ``align_jwst_image``, visit mosaics
 4. Relative API — ``run_alignment`` plus reference-catalog construction
 5. Overlap discovery — footprint matching and alignment summary tables
-6. Parallel workers — spawn-safe REFERENCE / MIRI_REL jobs
+6. Parallel workers — spawn-safe visit / REFERENCE / MIRI_REL jobs
 7. Orchestration — ``align_from_frames`` / ``run_overlaps``
+
+Visit and reference modes share the same parallel runner
+(``_run_jobs_parallel``), logging contract (``capture_output`` for JHAT /
+Image3 + parent START/DONE), JHAT entry (``align_jwst_image``), and post-JHAT
+metrics (``harvest_alignment_metrics`` / provenance). They diverge on topology:
+visit uses a mosaic/Gaia cascade with chip-relative alignment; reference uses
+overlap discovery, filter-wave ordering, MIRI_REL fallback, and quality holds.
 
 The CLI wrapper lives in :mod:`st123.scripts.align` (``visit`` / ``reference``
 / ``pair`` modes).
@@ -28,13 +35,13 @@ import os
 import re
 import shutil
 import socket
-import subprocess
 import sys
 import traceback
 import warnings
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +50,7 @@ warnings.filterwarnings('ignore')
 # stpipe/pysiaf log handlers raise on multi-argument warnings during spawn
 # worker imports; never let a logging failure abort alignment.
 logging.raiseExceptions = False
+logger = logging.getLogger(__name__)
 
 import matplotlib
 
@@ -57,32 +65,16 @@ from astropy import units as u  # noqa: E402
 from astropy.coordinates import SkyCoord  # noqa: E402
 from astropy.io import fits  # noqa: E402
 from astropy.stats import sigma_clipped_stats  # noqa: E402
-from astropy.table import Column, Table, vstack  # noqa: E402
+from astropy.table import Column, Row, Table, vstack  # noqa: E402
 from astropy.wcs import WCS  # noqa: E402
 from photutils.detection import DAOStarFinder  # noqa: E402
 
-
-@contextmanager
-def suppress_output():
-    """
-    Silence stdout, stderr, and logging for the duration of the block.
-
-    JHAT and the JWST pipeline are extremely chatty. Workers wrap every
-    alignment call in this context so the parent process only emits its own
-    ``START`` / ``DONE`` lines.
-    """
-    devnull = open(os.devnull, 'w')
-    try:
-        with redirect_stdout(devnull), redirect_stderr(devnull):
-            previous_disable = logging.root.manager.disable
-            logging.disable(logging.CRITICAL)
-            try:
-                yield
-            finally:
-                logging.disable(previous_disable)
-    finally:
-        devnull.close()
-
+from st123.utils.logging import (  # noqa: E402
+    capture_output,
+    configure_worker_logging,
+    run_logged_subprocess,
+    suppress_output,
+)
 
 # Import the science stack quietly: these packages print banners and emit
 # import-time log records that break stpipe handlers inside spawn workers.
@@ -98,8 +90,15 @@ with suppress_output():
 
 from st123.mosaic.region import SRegionPolygon  # noqa: E402
 from st123.utils.helpers import input_list, xmatch_common  # noqa: E402
-from st123.utils.jwst_compat import patch_jwst_for_photutils3  # noqa: E402
-from st123.utils.settings import *  # noqa: E402,F403
+from st123.utils.compatibility import patch_jwst_for_photutils3  # noqa: E402
+from st123.utils.settings import (  # noqa: E402
+    DEFAULT_MAX_REFERENCE_DISPERSION_MAS,
+    FILTER_MAX_REFERENCE_DISPERSION_MAS,
+    relaxed_gaia_params,
+    relaxed_jwst_params,
+    strict_gaia_params,
+    strict_jwst_params,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -199,27 +198,6 @@ F770W_CALIBRATOR_SETTINGS = CalibratorSettings(
     max_residual_arcsec=0.08,
     min_calibrators=15,
 )
-
-# Per-filter REFERENCE→MIRI_REL quality thresholds (mas).
-#
-# Empirically, MIRI_REL absolute dispersion (quadrature of parent absolute +
-# relative) is typically *worse* than REFERENCE below these cuts and better
-# above them, when a good overlapping parent is available. F560W must stay on
-# REFERENCE (``None`` disables the quality-hold fallback for that filter).
-FILTER_MAX_REFERENCE_DISPERSION_MAS: dict[str, float | None] = {
-    'F560W': None,
-    'F770W': 50.0,
-    'F1000W': 35.0,
-    'F1130W': 55.0,
-    'F1280W': 50.0,
-    'F1500W': 50.0,
-    'F1800W': 50.0,
-    'F2100W': 65.0,
-}
-
-# Default when a filter is absent from the map.
-DEFAULT_MAX_REFERENCE_DISPERSION_MAS = 70.0
-
 
 def calibrator_settings_for_filter(filter_name: str | None) -> CalibratorSettings:
     """
@@ -636,7 +614,7 @@ def write_alignment_provenance(
         mode = str(align_mode).upper()
         if mode == 'NIRCAM':
             mode = 'REFERENCE'
-        hdr['ALGNMODE'] = (mode, 'REFERENCE or MIRI_REL')
+        hdr['ALGNMODE'] = (mode, 'VISIT, REFERENCE, or MIRI_REL')
         # Astropy stores long paths via CONTINUE cards.
         hdr['ALGNREF'] = (str(original_ref), 'Original abs reference')
         hdr['ALGNTO'] = (str(aligned_to), 'Aligned-to image/catalog')
@@ -657,7 +635,10 @@ def write_alignment_provenance(
 # ---------------------------------------------------------------------------
 
 
-def get_input_images(pattern=None, workdir=None):
+def get_input_images(
+    pattern: Sequence[str] | None = None,
+    workdir: str | None = None,
+) -> list[str]:
     """
     Collect images to process from the ``raw`` subdirectory of a work directory.
 
@@ -680,7 +661,7 @@ def get_input_images(pattern=None, workdir=None):
     return [s for p in pattern for s in glob.glob(os.path.join(workdir, 'raw', p))]
 
 
-def pick_deepest_image(table):
+def pick_deepest_image(table: Table) -> Row:
     """
     Pick the longest-exposure image from a table.
 
@@ -698,7 +679,7 @@ def pick_deepest_image(table):
     return table[exptimes.index(max(exptimes))]
 
 
-def add_alignment_groups(table, use_shapely=False):
+def add_alignment_groups(table: Table, use_shapely: bool = False) -> Table:
     """
     Add alignment groups derived from image polygon overlap area.
 
@@ -771,7 +752,7 @@ def add_alignment_groups(table, use_shapely=False):
     return table
 
 
-def visit_filter_dict(table):
+def visit_filter_dict(table: Table) -> dict[Any, str]:
     """
     Find the broadband filter with maximum spatial coverage in each visit.
 
@@ -815,7 +796,7 @@ def visit_filter_dict(table):
     return visit_filter
 
 
-def get_visit_geoms(table):
+def get_visit_geoms(table: Table) -> dict[Any, shapely.geometry.base.BaseGeometry]:
     """
     Build the union sky footprint of each visit.
 
@@ -849,7 +830,7 @@ def get_visit_geoms(table):
     return dict(zip(visits, field))
 
 
-def order_visits(table):
+def order_visits(table: Table) -> np.ndarray:
     """
     Order visits from largest to smallest sky footprint.
 
@@ -867,7 +848,11 @@ def order_visits(table):
     return np.argsort([geom.area for geom in geoms.values()])[::-1]
 
 
-def pick_visit(align_pgon, visit_geoms, visit_filter):
+def pick_visit(
+    align_pgon: shapely.geometry.base.BaseGeometry | None,
+    visit_geoms: dict[Any, shapely.geometry.base.BaseGeometry],
+    visit_filter: dict[Any, str],
+) -> tuple[Any, float]:
     """
     Pick the next visit to align against the current alignment footprint.
 
@@ -907,7 +892,7 @@ def pick_visit(align_pgon, visit_geoms, visit_filter):
     return list(visit_geoms.keys())[arg], overlap_frac
 
 
-def jwst_phot(phot_img):
+def jwst_phot(phot_img: str) -> tuple[Table, str]:
     """
     Run JHAT ``jwst_photclass`` photometry on an image.
 
@@ -935,7 +920,7 @@ def jwst_phot(phot_img):
     return refcat, photfilename
 
 
-def fix_phot(mosaic):
+def fix_phot(mosaic: str) -> str:
     """
     Rewrite JHAT photometry sky coordinates for an i2d mosaic.
 
@@ -958,7 +943,10 @@ def fix_phot(mosaic):
     return corrected
 
 
-def generate_level3_mosaic(inputfiles, outdir):
+def generate_level3_mosaic(
+    inputfiles: Sequence[str],
+    outdir: str,
+) -> str:
     """
     Create a Level-3 drizzled mosaic from Level-2 inputs.
 
@@ -1007,18 +995,19 @@ def generate_level3_mosaic(inputfiles, outdir):
     image3.resample.pixfrac = 1.0
     image3.weight_type = 'ivm'
 
-    image3.run(asn_file)
+    with capture_output():
+        image3.run(asn_file)
     return f'{outdir_level3}/{filter_name}_i2d.fits'
 
 
 def create_alignment_mosaic(
-    filter_table,
-    outdir,
-    align_filter=None,
-    align_to='gaia',
-    ncores=10,
-    Nbright=800,
-):
+    filter_table: dict[str, Table],
+    outdir: str,
+    align_filter: str | None = None,
+    align_to: str = 'gaia',
+    ncores: int = 10,
+    Nbright: int = 800,
+) -> tuple[str, tuple[float, float], int]:
     """
     Build an i2d alignment mosaic and align it to Gaia or a catalog.
 
@@ -1040,7 +1029,7 @@ def create_alignment_mosaic(
     Returns
     -------
     tuple
-        ``(aligned_mosaic, guess_offset)``.
+        ``(aligned_mosaic, guess_offset, n_failures)``.
     """
     if align_to is None:
         raise ValueError('Invalid alignment phot file')
@@ -1078,28 +1067,22 @@ def create_alignment_mosaic(
         else:
             photfilename = ref_image.replace('.fits', '.phot.txt')
         jobs.append(
-            {
-                'miri_path': image,  # START/DONE label key shared with wrap runner
-                'align_image': image,
-                'outdir': outdir,
-                'gaia': False,
-                'photfilename': photfilename,
-                'xshift': 0.0,
-                'yshift': 0.0,
-                'Nbright': 800,
-                'sig': 2,
-                'filter': str(row.get('filter', '')),
-                'mode': 'VISIT',
-                'repo': repo,
-            }
+            _build_visit_jhat_job(
+                image=image,
+                outdir=outdir,
+                photfilename=photfilename,
+                repo=repo,
+                filter=str(row.get('filter', '')),
+            )
         )
-    _run_jobs_parallel(
+    results = _run_jobs_parallel(
         jobs,
         run_visit_align_job,
         workers=ncores,
         label='VISIT',
-        on_result=lambda result: print(_format_worker_done(result), flush=True),
+        on_result=lambda result: logger.info(_format_worker_done(result)),
     )
+    n_failures = _count_worker_failures(results)
 
     # Create an i2d mosaic from the relatively aligned images.
     inputfiles = [
@@ -1124,10 +1107,10 @@ def create_alignment_mosaic(
         filehandle[0].header['JHATX'] = guess_offset[0]
         filehandle[0].header['JHATY'] = guess_offset[1]
 
-    return aligned_mosaic, guess_offset
+    return aligned_mosaic, guess_offset, n_failures
 
 
-def cut_gaia_sources(image, table_gaia):
+def cut_gaia_sources(image: str, table_gaia: Table) -> Table:
     """
     Drop Gaia sources that fall outside an image.
 
@@ -1157,7 +1140,12 @@ def cut_gaia_sources(image, table_gaia):
     return table_gaia[mask]
 
 
-def query_gaia(image, dr='gaiadr3', telescope='jwst', save_file=False):
+def query_gaia(
+    image: str,
+    dr: str = 'gaiadr3',
+    telescope: str = 'jwst',
+    save_file: str | bool = False,
+) -> Table:
     """
     Query Gaia for sources covering an image.
 
@@ -1225,16 +1213,20 @@ def query_gaia(image, dr='gaiadr3', telescope='jwst', save_file=False):
             tb_gaia['pmra_error'] ** 2 + tb_gaia['pmdec_error'] ** 2
         )
     tb_gaia = cut_gaia_sources(image, tb_gaia)
-    print('Number of Gaia stars:', len(tb_gaia))
+    logger.info('Number of Gaia stars:', len(tb_gaia))
 
     if save_file:
-        print(f'Saving Gaia query to {save_file}')
+        logger.info(f'Saving Gaia query to {save_file}')
         np.savetxt(save_file, np.array(tb_gaia[['ra', 'dec']]), fmt='%s')
 
     return tb_gaia
 
 
-def expand_mask(mask, size=40, mask_shape='square'):
+def expand_mask(
+    mask: np.ndarray,
+    size: int = 40,
+    mask_shape: str = 'square',
+) -> np.ndarray:
     """
     Expand a binary mask with square or circular dilation.
 
@@ -1311,7 +1303,14 @@ def add_bin_dq(filename, outfile=None, mask_shape='circle'):
     return outfile
 
 
-def calc_dispersion(ref_table, phot_file, w=False, dist_limit=1, sig=2, plot=False):
+def calc_dispersion(
+    ref_table: Table,
+    photfile: str,
+    w: WCS | bool = False,
+    dist_limit: float = 1,
+    sig: float = 2,
+    plot: bool = False,
+) -> tuple[float, float, float]:
     """
     Measure the dispersion between a photometry catalog and a reference table.
 
@@ -1319,9 +1318,9 @@ def calc_dispersion(ref_table, phot_file, w=False, dist_limit=1, sig=2, plot=Fal
     ----------
     ref_table : astropy.table.Table
         Reference photometry table with ``ra`` / ``dec`` columns.
-    phot_file : str
+    photfile : str
         Photometry catalog to compare.
-    w : astropy.wcs.WCS or False, optional
+    w : astropy.wcs.WCS or bool, optional
         WCS used to convert catalog ``x``/``y`` to sky; ``False`` uses the
         catalog's own ``ra``/``dec``.
     dist_limit : float, optional
@@ -1333,10 +1332,14 @@ def calc_dispersion(ref_table, phot_file, w=False, dist_limit=1, sig=2, plot=Fal
 
     Returns
     -------
-    tuple
-        ``(mean, median, std)`` dispersion in arcsec.
+    mean : float
+        Mean matched separation in arcsec.
+    median : float
+        Median matched separation in arcsec.
+    std : float
+        Standard deviation of matched separations in arcsec.
     """
-    phot_df = pd.read_csv(phot_file, sep=r'\s+')
+    phot_df = pd.read_csv(photfile, sep=r'\s+')
 
     if w:
         sky_xy = w.all_pix2world(phot_df['x'], phot_df['y'], 0)
@@ -1445,8 +1448,8 @@ def jwst_dispersion(align_image, outdir, photfile=None, gaia=False, plot=False, 
         sig=sig,
         plot=plot,
     )
-    print(f'Initial mean dispersion: {disp_in_mean * 1000} mas')
-    print(f'Initial median dispersion: {disp_in_median * 1000} mas')
+    logger.info(f'Initial mean dispersion: {disp_in_mean * 1000} mas')
+    logger.info(f'Initial median dispersion: {disp_in_median * 1000} mas')
 
     os.rename(aligned_image, temp_cal_name)
     _align_cat, align_photfile = jwst_phot(temp_cal_name)
@@ -1454,8 +1457,8 @@ def jwst_dispersion(align_image, outdir, photfile=None, gaia=False, plot=False, 
     disp_fn_mean, disp_fn_median, disp_fn_std = calc_dispersion(
         refcat, align_photfile, w=wcs_in, sig=sig, dist_limit=0.5, plot=plot
     )
-    print(f'Final mean dispersion: {disp_fn_mean * 1000} mas')
-    print(f'Final median dispersion: {disp_fn_median * 1000} mas')
+    logger.info(f'Final mean dispersion: {disp_fn_mean * 1000} mas')
+    logger.info(f'Final median dispersion: {disp_fn_median * 1000} mas')
     os.rename(temp_cal_name, aligned_image)
 
     with fits.open(aligned_image, mode='update') as filehandle:
@@ -1518,7 +1521,7 @@ def guess_shift(align_image, ref_table, radius_px=50, res=5, sig=2, plot=False):
             yshift.append(ys)
 
     best_x, best_y = -xshift[np.argmin(off)], -yshift[np.argmin(off)]
-    print(f'Best guess for {align_image}: ({best_x}, {best_y})')
+    logger.info(f'Best guess for {align_image}: ({best_x}, {best_y})')
 
     if plot:
         fig, ax = plt.subplots(1, 3, figsize=(24, 6))
@@ -1627,11 +1630,10 @@ def run_jhat(
             **params,
         )
 
-    if verbose:
+    # Always mediate JHAT stdout/stderr through logging (DEBUG → log file;
+    # console only when --verbose raises the stream handler to DEBUG).
+    with capture_output():
         wcs_align.run_all(align_image, **run_kwargs)
-    else:
-        with suppress_output():
-            wcs_align.run_all(align_image, **run_kwargs)
 
 
 def align_jwst_image(
@@ -1692,11 +1694,11 @@ def align_jwst_image(
     tuple
         ``(xshift, yshift)`` guess offset applied to the accepted solution.
     """
-    print(
+    logger.info(
         f'Aligning {os.path.basename(align_image)} to '
         f"{'Gaia' if gaia else photfilename.replace('.phot.txt', '.fits')}"
     )
-    params = dict(strict_gaia_params if gaia else strict_jwst_params)  # noqa: F405
+    params = dict(strict_gaia_params if gaia else strict_jwst_params)
     if jhat_params:
         params.update(jhat_params)
     if plot:
@@ -1740,13 +1742,13 @@ def align_jwst_image(
         )
         guess_offset = (0, 0)
     except Exception:
-        print(traceback.format_exc())
+        logger.error(traceback.format_exc())
         disp_fn_med = 99.99
 
     # Retry with relaxed params / guess shift when the strict solution is still
     # worse than one MIRI/NIRCam pixel. Preserve caller JHAT overrides.
     if disp_fn_med / pixscale > retry_pix:
-        params = dict(relaxed_gaia_params if gaia else relaxed_jwst_params)  # noqa: F405
+        params = dict(relaxed_gaia_params if gaia else relaxed_jwst_params)
         if jhat_params:
             params.update(jhat_params)
         if plot:
@@ -1773,7 +1775,7 @@ def align_jwst_image(
             )
             guess_offset = (0, 0)
         except Exception:
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             disp_fn_med = 99.99
 
     if disp_fn_med / pixscale > retry_pix:
@@ -1806,10 +1808,10 @@ def align_jwst_image(
             )
             guess_offset = (xsh * factor, ysh * factor)
         except Exception:
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             disp_fn_med = 99.99
 
-    print(
+    logger.info(
         f"Final {'Gaia' if gaia else 'JWST'} dispersion for {align_image}: "
         f'{disp_fn_mu * 1000} mas'
     )
@@ -1824,7 +1826,7 @@ def align_jwst_image(
         return float(default)
 
     if soft_fail and disp_fn_med / pixscale > soft_fail_pix:
-        print(
+        logger.info(
             f'Copying unaligned {align_image} to output, redo alignment '
             f'(median {disp_fn_med * 1000:.1f} mas > {soft_fail_pix}*pixscale)'
         )
@@ -1857,7 +1859,7 @@ def align_jwst_image(
                 filehandle[0].header['JWDISPS'] = d_med
                 filehandle[0].header['JWNCAL'] = 0
     elif disp_fn_med / pixscale > retry_pix:
-        print(
+        logger.info(
             f'Keeping JHAT solution despite median '
             f'{disp_fn_med * 1000:.1f} mas ({disp_fn_med / pixscale:.2f} pix); '
             f'below soft-fail cut ({soft_fail_pix} pix) for refine / summary'
@@ -1933,9 +1935,14 @@ def align_to_mosaic(
     guess_offset : tuple, optional
         Initial ``(xshift, yshift)`` seed; halved for long-wavelength frames.
     verbose : bool, optional
-        Let JHAT print its own progress.
+        Forwarded to worker crash formatting (JHAT stays muted).
     ncores : int, optional
         Pool size.
+
+    Returns
+    -------
+    int
+        Number of failed worker jobs.
     """
     repo = str(_resolve_repo_root())
     jobs = []
@@ -1950,29 +1957,24 @@ def align_to_mosaic(
             xs = xs * 0.5
             ys = ys * 0.5
         jobs.append(
-            {
-                'miri_path': im,
-                'align_image': im,
-                'outdir': outdir,
-                'gaia': False,
-                'photfilename': mosaic_photfile,
-                'xshift': xs,
-                'yshift': ys,
-                'Nbright': 800,
-                'sig': 2,
-                'filter': '',
-                'mode': 'VISIT',
-                'repo': repo,
-                'verbose': bool(verbose),
-            }
+            _build_visit_jhat_job(
+                image=im,
+                outdir=outdir,
+                photfilename=mosaic_photfile,
+                repo=repo,
+                xshift=xs,
+                yshift=ys,
+                verbose=bool(verbose),
+            )
         )
-    _run_jobs_parallel(
+    results = _run_jobs_parallel(
         jobs,
         run_visit_align_job,
         workers=ncores,
         label='VISIT',
-        on_result=lambda result: print(_format_worker_done(result), flush=True),
+        on_result=lambda result: logger.info(_format_worker_done(result)),
     )
+    return _count_worker_failures(results)
 
 
 def create_dirs(work_dir, obj=None):
@@ -2207,7 +2209,7 @@ def stage_photfile(
     if os.path.exists(dest) and os.path.samefile(photfile, dest):
         return dest
     shutil.copy2(photfile, dest)
-    print(f'Copied reference catalog → {dest}')
+    logger.info(f'Copied reference catalog → {dest}')
     return dest
 
 
@@ -2246,7 +2248,7 @@ def build_ref_catalog(
             raise FileNotFoundError(
                 f'Reference photometry catalog not found: {photfile}'
             )
-        print(f'Using existing reference catalog: {photfile}')
+        logger.info(f'Using existing reference catalog: {photfile}')
         return stage_photfile(photfile, outdir)
 
     dest_name = Path(phot_catalog_path(image, outdir)).name
@@ -2255,33 +2257,33 @@ def build_ref_catalog(
         cache_path.mkdir(parents=True, exist_ok=True)
         cached = cache_path / dest_name
         if cached.is_file():
-            print(f'Reusing cached reference catalog: {cached}')
+            logger.info(f'Reusing cached reference catalog: {cached}')
             return stage_photfile(str(cached), outdir, dest_name=dest_name)
 
     dest = phot_catalog_path(image, outdir)
-    print(f'Running photometry on reference: {image}')
+    logger.info(f'Running photometry on reference: {image}')
 
     if has_jwst_gwcs(image):
-        print('  detected JWST ASDF/GWCS → jwst_phot')
+        logger.info('  detected JWST ASDF/GWCS → jwst_phot')
         _, src = jwst_phot(image)
         staged = stage_photfile(src, outdir, dest_name=Path(dest).name)
     elif image.endswith(('i2d.fits', 'i2d.fits.gz')):
         try:
-            print('  no JWST ASDF/GWCS; trying fix_phot')
+            logger.info('  no JWST ASDF/GWCS; trying fix_phot')
             src = fix_phot(image)
             staged = stage_photfile(src, outdir, dest_name=Path(dest).name)
         except Exception as exc:
-            print(f'  fix_phot failed ({exc}); falling back to photutils')
+            logger.info(f'  fix_phot failed ({exc}); falling back to photutils')
             staged = photutils_phot(image, dest)
     else:
-        print('  falling back to photutils DAOStarFinder')
+        logger.info('  falling back to photutils DAOStarFinder')
         staged = photutils_phot(image, dest)
 
     if cache_dir is not None:
         cache_dest = Path(cache_dir).expanduser().resolve() / Path(staged).name
         if not cache_dest.exists():
             shutil.copy2(staged, cache_dest)
-            print(f'Cached reference catalog → {cache_dest}')
+            logger.info(f'Cached reference catalog → {cache_dest}')
 
     return staged
 
@@ -2430,7 +2432,7 @@ def clip_catalog_to_miri_footprint(table: Table, miri_image: str) -> Table:
     # Cross-check with the pixel-plane illuminated polygon when the sky clip
     # yields nothing (should be rare; quiet=True avoids hard WCS failures).
     if not np.any(keep):
-        print(
+        logger.warning(
             'WARNING: sky-footprint clip kept 0 sources; '
             'retrying with quiet WCS pixel clip'
         )
@@ -2448,7 +2450,7 @@ def clip_catalog_to_miri_footprint(table: Table, miri_image: str) -> Table:
         )
 
     clipped = table[keep]
-    print(
+    logger.info(
         f'Clipped master catalog to MIRI footprint: '
         f'{len(table)} → {len(clipped)} sources'
     )
@@ -2504,15 +2506,15 @@ def build_master_ref_catalog(
         try:
             phot = build_ref_catalog(ref, outdir, cache_dir=cache_dir)
             tables.append(read_jhat_phot_table(phot))
-            print(f'  + {len(tables[-1])} sources from {ref}')
+            logger.info(f'  + {len(tables[-1])} sources from {ref}')
         except Exception as exc:
-            print(f'  WARNING: photometry failed for {ref}: {exc}')
+            logger.warning(f'  WARNING: photometry failed for {ref}: {exc}')
 
     if not tables:
         raise RuntimeError('No reference photometry catalogs could be built')
 
     master = merge_phot_catalogs(tables, match_radius_arcsec=match_radius_arcsec)
-    print(
+    logger.info(
         f'Merged {len(tables)} reference catalog(s) → {len(master)} unique sources '
         f'(match radius {match_radius_arcsec}" )'
     )
@@ -2526,7 +2528,7 @@ def build_master_ref_catalog(
 
     dest = str(Path(outdir) / dest_name)
     write_jhat_phot_table(master, dest)
-    print(f'Wrote master reference catalog → {dest} ({len(master)} sources)')
+    logger.info(f'Wrote master reference catalog → {dest} ({len(master)} sources)')
     return dest
 
 
@@ -2578,7 +2580,7 @@ def plot_saver(outdir: str, prefix: str):
             out = os.path.join(outdir, f'{prefix}.diag_{counter["n"]:02d}.png')
             # Use the original savefig so we do not mark this as a JHAT savefig.
             original_savefig(fig, out, dpi=150, bbox_inches='tight')
-            print(f'Saved diagnostic plot: {out}')
+            logger.info(f'Saved diagnostic plot: {out}')
         already_saved.clear()
         plt.close('all')
 
@@ -2775,7 +2777,7 @@ def iterative_sigma_clip_matches(
     if n_morph == 0:
         raise RuntimeError('No MIRI sources survive calibrator morphology/mag cuts')
     if n_morph < len(jhat_df):
-        print(f'  calibrator morph/mag cut: kept {n_morph}/{len(jhat_df)} MIRI sources')
+        logger.info(f'  calibrator morph/mag cut: kept {n_morph}/{len(jhat_df)} MIRI sources')
     jhat_df = jhat_df.loc[morph_keep].reset_index(drop=True)
 
     jh = SkyCoord(
@@ -2799,7 +2801,7 @@ def iterative_sigma_clip_matches(
         if max_residual_arcsec is not None:
             thr = min(thr, float(max_residual_arcsec))
         new_keep = keep & (d2d <= thr)
-        print(
+        logger.info(
             f'  clip iter {i}: n={int(new_keep.sum())}/{len(matched)} '
             f'med={np.median(d2d[new_keep]) * 1000:.2f} mas '
             f'thr={thr * 1000:.2f} mas'
@@ -2814,7 +2816,7 @@ def iterative_sigma_clip_matches(
     if max_residual_arcsec is not None:
         hard = d2d <= float(max_residual_arcsec)
         if hard.sum() < keep.sum():
-            print(
+            logger.info(
                 f'  hard residual cut ({max_residual_arcsec * 1000:.1f} mas): '
                 f'{int(keep.sum())} → {int((keep & hard).sum())}'
             )
@@ -2912,7 +2914,7 @@ def refine_alignment_iteratively(
     disp_mas, n_cal = read_dispersion_mas(jhat)
     xshift, yshift = read_jhat_pixel_offset(jhat)
     guess_offset: object = (xshift, yshift)
-    print(
+    logger.info(
         f'Iterative refinement starting from dispersion={disp_mas} mas, '
         f'n_calibrators={n_cal}, xshift={xshift:.3f}, yshift={yshift:.3f}'
     )
@@ -2920,7 +2922,7 @@ def refine_alignment_iteratively(
     current_ref = ref_phot
     for it in range(1, max_iter + 1):
         if not os.path.exists(align_phot):
-            print(
+            logger.info(
                 f'  refine iter {it}: missing align photometry {align_phot}; stopping'
             )
             break
@@ -2940,11 +2942,11 @@ def refine_alignment_iteratively(
                 miri_sharp_max=miri_sharp_max,
             )
         except Exception as exc:
-            print(f'  refine iter {it}: clipping failed ({exc}); stopping')
+            logger.info(f'  refine iter {it}: clipping failed ({exc}); stopping')
             break
 
         if stats['n_ref_kept'] < min_calibrators:
-            print(
+            logger.info(
                 f'  refine iter {it}: only {stats["n_ref_kept"]} ref stars left '
                 f'(<{min_calibrators}); stopping'
             )
@@ -2976,12 +2978,12 @@ def refine_alignment_iteratively(
             and current_ref == ref_phot
         )
         if no_clip_progress and not force_morph_pass:
-            print(f'  refine iter {it}: no outliers clipped; converged')
+            logger.info(f'  refine iter {it}: no outliers clipped; converged')
             break
 
         cleaned_path = str(Path(outdir) / f'master_ref_refined_iter{it:02d}.phot.txt')
         write_jhat_phot_table(cleaned, cleaned_path)
-        print(
+        logger.info(
             f'  refine iter {it}: wrote cleaned catalog {cleaned_path} '
             f'({len(cleaned)} stars; match median {stats["median_d2d_mas"]:.2f} mas)'
         )
@@ -3027,13 +3029,13 @@ def refine_alignment_iteratively(
 
         jhat, align_phot, _ = jhat_product_paths(align_image, outdir)
         new_disp, new_ncal = read_dispersion_mas(jhat)
-        print(
+        logger.info(
             f'  refine iter {it}: dispersion {disp_mas} → {new_disp} mas '
             f'(n_calibrators={new_ncal})'
         )
 
         def restore_backup_and_stop(reason: str) -> None:
-            print(
+            logger.info(
                 f'  refine iter {it}: {reason}; '
                 f'restoring previous JHAT products and stopping'
             )
@@ -3054,7 +3056,7 @@ def refine_alignment_iteratively(
 
         if disp_mas is not None and new_disp is not None:
             if abs(new_disp - disp_mas) < tol_mas:
-                print(
+                logger.info(
                     f'  refine iter {it}: |Δdispersion|='
                     f'{abs(new_disp - disp_mas):.3f} mas < {tol_mas} mas; converged'
                 )
@@ -3081,9 +3083,9 @@ def refine_alignment_iteratively(
         final_clean = str(Path(outdir) / 'master_ref_refined.phot.txt')
         if os.path.abspath(current_ref) != os.path.abspath(final_clean):
             shutil.copy2(current_ref, final_clean)
-            print(f'Final refined reference catalog → {final_clean}')
+            logger.info(f'Final refined reference catalog → {final_clean}')
 
-    print(
+    logger.info(
         f'Iterative refinement finished: dispersion_mas={disp_mas}, '
         f'n_calibrators={n_cal}'
     )
@@ -3172,11 +3174,11 @@ def run_alignment(
         refs = [ref_image]
     refs = [str(Path(r).expanduser().resolve()) for r in refs]
 
-    print(f'Output directory: {outdir}')
-    print(f'Align image:      {align_image}')
+    logger.info(f'Output directory: {outdir}')
+    logger.info(f'Align image:      {align_image}')
     if jhat_params:
-        print(f'JHAT param overrides: {jhat_params}')
-    print(
+        logger.info(f'JHAT param overrides: {jhat_params}')
+    logger.info(
         f'Calibrator knobs: nbright={nbright}, refine_sigma={refine_sigma}, '
         f'dist_limit={refine_dist_limit_arcsec}", '
         f'max_resid={max_residual_arcsec}"'
@@ -3186,11 +3188,11 @@ def run_alignment(
         ref_phot = build_ref_catalog(
             refs[0] if refs else align_image, outdir, photfile=photfile
         )
-        print(f'Reference catalog: {ref_phot}')
+        logger.info(f'Reference catalog: {ref_phot}')
     elif len(refs) > 1:
-        print(f'Reference images ({len(refs)}): building master catalog')
+        logger.info(f'Reference images ({len(refs)}): building master catalog')
         for path in refs:
-            print(f'  {path}')
+            logger.info(f'  {path}')
         ref_phot = build_master_ref_catalog(
             refs,
             outdir,
@@ -3200,7 +3202,7 @@ def run_alignment(
             clip_to_align_footprint=clip_to_align_footprint,
         )
     elif len(refs) == 1:
-        print(f'Reference image:  {refs[0]}')
+        logger.info(f'Reference image:  {refs[0]}')
         ref_phot = build_ref_catalog(refs[0], outdir, cache_dir=cache_dir)
     else:
         raise ValueError('Provide photfile, ref_image, or ref_images')
@@ -3245,7 +3247,7 @@ def run_alignment(
             miri_sharp_max=miri_sharp_max,
             jhat_params=jhat_params,
         )
-        print(f'Refined dispersion_mas={disp_mas}, n_calibrators={n_cal}')
+        logger.info(f'Refined dispersion_mas={disp_mas}, n_calibrators={n_cal}')
 
     return guess_offset, outdir
 
@@ -3922,14 +3924,14 @@ def find_frame_overlaps(
     results: list[FrameOverlaps] = []
 
     for image in miri_images:
-        print(f'MIRI: {image}')
+        logger.info(f'MIRI: {image}')
         miri = MirIFootprint.from_fits(image)
-        print(f'  illuminated S_REGION: {miri.s_region.to_string()}')
-        print(
+        logger.info(f'  illuminated S_REGION: {miri.s_region.to_string()}')
+        logger.info(
             f'  WCS pixel solid angle: {miri.pixel_area_arcmin2:.8e} '
             f'arcmin^2 / pixel'
         )
-        print(f'  illuminated area: {miri.area.format()}')
+        logger.info(f'  illuminated area: {miri.area.format()}')
 
         overlapping = []
         best = None
@@ -3938,13 +3940,13 @@ def find_frame_overlaps(
             try:
                 result = compute_overlap(miri, ref)
             except Exception as exc:
-                print(f'  FAILED for ref {ref}: {exc}')
+                logger.warning(f'  FAILED for ref {ref}: {exc}')
                 continue
 
-            print(f'  ref: {ref}')
-            print(f'    S_REGION: {result.ref_s_region.to_string()}')
-            print(f'    ref area: {result.ref_area.format()}')
-            print(f'    overlap area: {result.overlap_area.format()}')
+            logger.info(f'  ref: {ref}')
+            logger.info(f'    S_REGION: {result.ref_s_region.to_string()}')
+            logger.info(f'    ref area: {result.ref_area.format()}')
+            logger.info(f'    overlap area: {result.overlap_area.format()}')
 
             if result.overlap_area.pixels2 > 0.0:
                 overlapping.append(result)
@@ -3969,7 +3971,7 @@ def find_frame_overlaps(
             miri, [r.ref_path for r in overlapping]
         )
 
-        print(
+        logger.info(
             f'Overlap maximized: MIRI image: {best.miri_path}, '
             f'Reference image: {best.ref_path}, '
             f'Max overlap area: {best.overlap_area.pixels2:.3f} pixels^2 '
@@ -3979,14 +3981,13 @@ def find_frame_overlaps(
             f'union coverage {union_frac:.4f} of MIRI ROI'
         )
         if overlapping:
-            print('  References with any overlap (largest first):')
+            logger.info('  References with any overlap (largest first):')
             for result in overlapping:
-                print(
+                logger.info(
                     f'    {result.ref_path}: '
                     f'{result.overlap_area.pixels2:.3f} pixels^2 '
                     f'({result.overlap_area.fraction_of_miri_roi:.4f} of MIRI ROI)'
                 )
-        print()
 
         results.append(
             FrameOverlaps(
@@ -4050,8 +4051,8 @@ def write_overlap_summaries(
         'frames': [f.to_dict() for f in frames],
     }
     json_path.write_text(json.dumps(payload, indent=2))
-    print(f'Wrote overlap summary: {txt_path}')
-    print(f'Wrote overlap JSON:    {json_path}')
+    logger.info(f'Wrote overlap summary: {txt_path}')
+    logger.info(f'Wrote overlap JSON:    {json_path}')
     return txt_path, json_path
 
 
@@ -4149,7 +4150,7 @@ def run_legacy_overlap_file_pipeline(
     """
     overlap_file = Path(overlap_file).expanduser().resolve()
     if not overlap_file.is_file():
-        print(f'ERROR: legacy overlap file not found: {overlap_file}', file=sys.stderr)
+        logger.error(f'ERROR: legacy overlap file not found: {overlap_file}')
         return 1
 
     outdir = Path(outdir)
@@ -4196,7 +4197,7 @@ def run_legacy_overlap_file_pipeline(
                 if verbose:
                     command.append('--verbose')
 
-                result = subprocess.run(command)
+                result = run_logged_subprocess(command, check=False, logger=logger)
                 if result.returncode == 0:
                     success.write(
                         f'MIRI image: {align_image}, \n'
@@ -4212,9 +4213,9 @@ def run_legacy_overlap_file_pipeline(
                     failed.flush()
                     n_fail += 1
 
-    print('Done')
-    print(f'Successful pairs written to {success_file} ({n_ok})')
-    print(f'Failed pairs written to {fail_file} ({n_fail})')
+    logger.info('Done')
+    logger.info(f'Successful pairs written to {success_file} ({n_ok})')
+    logger.info(f'Failed pairs written to {fail_file} ({n_fail})')
     return 1 if n_fail else 0
 
 
@@ -4357,19 +4358,17 @@ def reject_zero_nircam_overlap_frames(
             continue
 
         n_rejected += 1
-        print(
+        logger.info(
             f'REJECT {Path(miri_path).name}  {filt}  '
             f'ref_overlap_frac={ov_frac:.4f} < {min_frac:.4f} '
             f'(excluded from alignment)',
-            flush=True,
         )
 
     if n_rejected:
-        print(
+        logger.info(
             f'Rejected {n_rejected} MIRI frame(s) with '
             f'ref_overlap_frac < {min_frac:.4f}; '
             f'{len(kept)} frame(s) remain for alignment',
-            flush=True,
         )
     return kept, n_rejected
 
@@ -4458,8 +4457,10 @@ def _needs_miri_fallback(row: AlignmentSummaryRow) -> bool:
 # ---------------------------------------------------------------------------
 #
 # These must stay module-level so ``ProcessPoolExecutor`` can pickle them for
-# spawn children. JHAT / pipeline chatter is silenced with ``suppress_output``;
-# the parent process only prints START / DONE lines.
+# spawn children. JHAT / pipeline chatter is mediated with ``capture_output``
+# into the shared log file; the parent process emits START / DONE. Visit and
+# reference workers share job construction, crash handling, and post-JHAT
+# finalize helpers below.
 
 _STACK_READY = False
 
@@ -4470,12 +4471,161 @@ class AlignWorkerResult:
 
     miri_path: str
     filter: str
-    mode: str  # 'nircam' | 'fallback' | 'skip' | 'visit'
+    mode: str  # 'visit' | 'reference' | 'fallback' | 'skip'
     ok: bool
     row: dict[str, Any]
     success: dict[str, Any] | None = None
     error: str | None = None
     message: str = ''
+
+
+def _build_visit_jhat_job(
+    *,
+    image: str,
+    outdir: str,
+    photfilename: str | None,
+    repo: str,
+    filter: str = '',
+    xshift: float = 0.0,
+    yshift: float = 0.0,
+    Nbright: int = 800,
+    sig: float = 2.0,
+    gaia: bool = False,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """Build a picklable visit-mode JHAT job dict for ``_run_jobs_parallel``."""
+    return {
+        'miri_path': image,  # START/DONE label key shared with all workers
+        'align_image': image,
+        'outdir': outdir,
+        'gaia': bool(gaia),
+        'photfilename': photfilename,
+        'xshift': float(xshift),
+        'yshift': float(yshift),
+        'Nbright': int(Nbright),
+        'sig': float(sig),
+        'filter': str(filter or ''),
+        'mode': 'VISIT',
+        'repo': str(repo),
+        'verbose': bool(verbose),
+    }
+
+
+def _worker_crash_result(
+    job: dict[str, Any],
+    exc: Exception | None,
+    *,
+    mode: str,
+    message: str,
+    ran_ok: bool = False,
+) -> AlignWorkerResult:
+    """Shared FAILURE result when a worker raises or cannot run JHAT."""
+    miri_path = job['miri_path']
+    filt = str(job.get('filter', ''))
+    outdir = Path(job['outdir'])
+    ref_overlap_frac = job.get('ref_overlap_frac', 'NA')
+    err = message if exc is None else f'{message}: {exc}'
+    if job.get('verbose') and exc is not None:
+        err = f'{err}\n{traceback.format_exc()}'
+    row = harvest_alignment_metrics(
+        miri_path,
+        outdir,
+        ran_ok=ran_ok,
+        ref_overlap_frac=ref_overlap_frac,
+    )
+    if filt:
+        row.filter = filt
+    return AlignWorkerResult(
+        miri_path=miri_path,
+        filter=row.filter or filt,
+        mode=mode,
+        ok=False,
+        row=asdict(row),
+        error=err,
+        message=message,
+    )
+
+
+def _finalize_jhat_worker(
+    job: dict[str, Any],
+    *,
+    mode: str,
+    align_mode: str,
+    ran_ok: bool,
+    original_ref: str = 'NA',
+    aligned_to: str = 'NA',
+    write_provenance: bool = True,
+    soft_fail_error: str | None = None,
+) -> AlignWorkerResult:
+    """
+    Shared post-JHAT path: harvest metrics, optional provenance, AlignWorkerResult.
+
+    SUCCESS requires a finite mean dispersion in the JHAT header (same contract
+    for visit and reference).
+    """
+    miri_path = job['miri_path']
+    filt = str(job.get('filter', ''))
+    outdir = Path(job['outdir'])
+    ref_overlap_frac = job.get('ref_overlap_frac', 'NA')
+    row = harvest_alignment_metrics(
+        miri_path,
+        outdir,
+        ran_ok=ran_ok,
+        default_align_mode=align_mode,
+        default_original_ref=original_ref,
+        default_aligned_to=aligned_to,
+        ref_overlap_frac=ref_overlap_frac,
+    )
+    if filt and (not row.filter or row.filter == 'UNKNOWN'):
+        row.filter = filt
+
+    if row.status != 'SUCCESS' or not isinstance(row.dispersion_mas, float):
+        return AlignWorkerResult(
+            miri_path=miri_path,
+            filter=row.filter or filt,
+            mode=mode,
+            ok=False,
+            row=asdict(row),
+            error=soft_fail_error or f'{align_mode} alignment soft-failed',
+        )
+
+    if write_provenance and row.aligned_path not in ('NA', None, ''):
+        write_alignment_provenance(
+            row.aligned_path,
+            align_mode=align_mode,
+            original_ref=original_ref,
+            aligned_to=aligned_to,
+            relative_dispersion_mas=float(row.dispersion_mas),
+            absolute_dispersion_mas=float(row.dispersion_mas),
+            n_calibrators=(
+                row.n_calibrators if isinstance(row.n_calibrators, int) else None
+            ),
+        )
+        row = harvest_alignment_metrics(
+            miri_path,
+            outdir,
+            ran_ok=True,
+            default_align_mode=align_mode,
+            default_original_ref=original_ref,
+            default_aligned_to=aligned_to,
+            ref_overlap_frac=ref_overlap_frac,
+        )
+        if filt and (not row.filter or row.filter == 'UNKNOWN'):
+            row.filter = filt
+
+    return AlignWorkerResult(
+        miri_path=miri_path,
+        filter=row.filter or filt,
+        mode=mode,
+        ok=True,
+        row=asdict(row),
+        message='ok',
+    )
+
+
+def _count_worker_failures(results: list[AlignWorkerResult]) -> int:
+    """Return how many worker results are not ``ok``."""
+    return sum(1 for result in results if not result.ok)
 
 
 def _bootstrap(repo: str) -> None:
@@ -4568,6 +4718,7 @@ def worker_initializer(repo: str) -> None:
     os.environ.setdefault('MKL_NUM_THREADS', '1')
     os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
     _sanitize_logging()
+    configure_worker_logging()
     _preload_science_stack()
 
 
@@ -4583,6 +4734,7 @@ def _ensure_worker_ready(repo: str) -> None:
     _bootstrap(repo)
     if socket.getdefaulttimeout() is None:
         socket.setdefaulttimeout(15)
+    configure_worker_logging()
     if not _STACK_READY:
         _sanitize_logging()
         _preload_science_stack()
@@ -4627,9 +4779,8 @@ def _run_alignment_kwargs(job: dict[str, Any], filt: str) -> dict[str, Any]:
     kwargs['plot'] = job['plot']
     kwargs['refine'] = job['refine']
     kwargs['verbose'] = False
-    print(
+    logger.info(
         f'  {filt} calibrator settings: {describe_calibrator_settings(settings)}',
-        flush=True,
     )
     return kwargs
 
@@ -4647,19 +4798,24 @@ def run_visit_align_job(job: dict[str, Any]) -> AlignWorkerResult:
     Returns
     -------
     AlignWorkerResult
-        Outcome for the parent process summary line.
+        Outcome for the parent process summary line (metrics via harvest).
     """
     _ensure_worker_ready(job.get('repo', ''))
     image = job['align_image']
-    filt = str(job.get('filter', ''))
+    photfilename = job.get('photfilename')
+    aligned_to = (
+        str(photfilename)
+        if photfilename
+        else ('gaia' if job.get('gaia') else 'NA')
+    )
     try:
         # Quiet JHAT / pipeline chatter; parent only sees START / DONE.
-        with suppress_output():
+        with capture_output():
             align_jwst_image(
                 align_image=image,
                 outdir=job['outdir'],
                 gaia=bool(job.get('gaia', False)),
-                photfilename=job.get('photfilename'),
+                photfilename=photfilename,
                 xshift=float(job.get('xshift', 0.0)),
                 yshift=float(job.get('yshift', 0.0)),
                 Nbright=int(job.get('Nbright', 800)),
@@ -4667,49 +4823,22 @@ def run_visit_align_job(job: dict[str, Any]) -> AlignWorkerResult:
                 verbose=False,
                 plot=False,
             )
-        row = AlignmentSummaryRow(
-            miri_path=image,
-            filter=filt,
-            status='SUCCESS',
-            n_calibrators='NA',
-            dispersion_mas='NA',
-            aligned_path=str(
-                Path(job['outdir'])
-                / Path(image).name.replace('cal.fits', 'jhat.fits')
-            ),
-        )
-        return AlignWorkerResult(
-            miri_path=image,
-            filter=filt,
+        return _finalize_jhat_worker(
+            job,
             mode='visit',
-            ok=True,
-            row=asdict(row),
-            message='ok',
+            align_mode='VISIT',
+            ran_ok=True,
+            original_ref=aligned_to,
+            aligned_to=aligned_to,
+            write_provenance=True,
         )
     except Exception as exc:
-        err = str(exc)
-        if job.get('verbose'):
-            err = f'{err}\n{traceback.format_exc()}'
-        row = AlignmentSummaryRow(
-            miri_path=image,
-            filter=filt,
-            status='FAILURE',
-            n_calibrators='NA',
-            dispersion_mas='NA',
-            aligned_path='NA',
-        )
-        return AlignWorkerResult(
-            miri_path=image,
-            filter=filt,
-            mode='visit',
-            ok=False,
-            row=asdict(row),
-            error=err,
-            message=f'Worker crashed: {exc}',
+        return _worker_crash_result(
+            job, exc, mode='visit', message='Worker crashed'
         )
 
 
-def run_nircam_align_job(job: dict[str, Any]) -> AlignWorkerResult:
+def run_reference_align_job(job: dict[str, Any]) -> AlignWorkerResult:
     """
     Align one science frame to its overlapping reference images.
 
@@ -4729,28 +4858,7 @@ def run_nircam_align_job(job: dict[str, Any]) -> AlignWorkerResult:
     filt = job['filter']
     ref_images = list(job['ref_images'])
     best_ref = job.get('best_ref')
-    outdir = Path(job['outdir'])
     ref_overlap_frac = job.get('ref_overlap_frac', 'NA')
-
-    def fail(msg: str, exc: Exception | None = None) -> AlignWorkerResult:
-        err = msg if exc is None else f'{msg}: {exc}'
-        if job.get('verbose') and exc is not None:
-            err = f'{err}\n{traceback.format_exc()}'
-        row = harvest_alignment_metrics(
-            miri_path,
-            outdir,
-            ran_ok=False,
-            ref_overlap_frac=ref_overlap_frac,
-        )
-        row.filter = filt
-        return AlignWorkerResult(
-            miri_path=miri_path,
-            filter=filt,
-            mode='nircam',
-            ok=False,
-            row=asdict(row),
-            error=err,
-        )
 
     if not ref_images:
         row = AlignmentSummaryRow(
@@ -4772,60 +4880,37 @@ def run_nircam_align_job(job: dict[str, Any]) -> AlignWorkerResult:
 
     try:
         align_kw = _run_alignment_kwargs(job, filt)
-        with suppress_output():
+        with capture_output():
             run_alignment(
                 ref_images=ref_images,
                 align_image=miri_path,
-                outdir=str(outdir),
+                outdir=str(job['outdir']),
                 cache_dir=job.get('cache_dir'),
                 match_radius_arcsec=job['match_radius_arcsec'],
                 clip_to_align_footprint=job['clip_to_align_footprint'],
                 **align_kw,
             )
     except Exception as exc:
-        return fail('NIRCam alignment failed', exc)
+        return _worker_crash_result(
+            job, exc, mode='reference', message='REFERENCE alignment failed'
+        )
 
     original_ref = best_ref or ref_images[0]
     aligned_to = original_ref
-    row = harvest_alignment_metrics(
-        miri_path,
-        outdir,
-        ran_ok=True,
-        default_align_mode='REFERENCE',
-        default_original_ref=original_ref,
-        default_aligned_to=aligned_to,
-        ref_overlap_frac=ref_overlap_frac,
-    )
-    if row.status != 'SUCCESS' or not isinstance(row.dispersion_mas, float):
-        return AlignWorkerResult(
-            miri_path=miri_path,
-            filter=filt,
-            mode='nircam',
-            ok=False,
-            row=asdict(row),
-            error='REFERENCE alignment soft-failed',
-        )
-
-    write_alignment_provenance(
-        row.aligned_path,
+    result = _finalize_jhat_worker(
+        job,
+        mode='reference',
         align_mode='REFERENCE',
+        ran_ok=True,
         original_ref=original_ref,
         aligned_to=aligned_to,
-        relative_dispersion_mas=row.dispersion_mas,
-        absolute_dispersion_mas=row.dispersion_mas,
-        n_calibrators=(row.n_calibrators if isinstance(row.n_calibrators, int) else None),
+        write_provenance=True,
+        soft_fail_error='REFERENCE alignment soft-failed',
     )
-    row = harvest_alignment_metrics(
-        miri_path,
-        outdir,
-        ran_ok=True,
-        default_align_mode='REFERENCE',
-        default_original_ref=original_ref,
-        default_aligned_to=aligned_to,
-        ref_overlap_frac=ref_overlap_frac,
-    )
-    if not row.filter or row.filter == 'UNKNOWN':
-        row.filter = filt or read_miri_filter(miri_path)
+    if not result.ok:
+        return result
+
+    row = AlignmentSummaryRow(**result.row)
 
     # ``None`` in the job means use the per-filter map; a positive float is a
     # uniform CLI override; <=0 disables the quality hold.
@@ -4846,7 +4931,7 @@ def run_nircam_align_job(job: dict[str, Any]) -> AlignWorkerResult:
         return AlignWorkerResult(
             miri_path=miri_path,
             filter=row.filter,
-            mode='nircam',
+            mode='reference',
             ok=False,
             row=asdict(row),
             error=(
@@ -4871,11 +4956,15 @@ def run_nircam_align_job(job: dict[str, Any]) -> AlignWorkerResult:
     return AlignWorkerResult(
         miri_path=miri_path,
         filter=row.filter,
-        mode='nircam',
+        mode='reference',
         ok=True,
         row=asdict(row),
         success=asdict(success),
     )
+
+
+# Backward-compatible alias (REFERENCE worker was historically misnamed).
+run_nircam_align_job = run_reference_align_job
 
 
 def _backup_alignment_products(outdir: Path, miri_path: str) -> list[tuple[Path, Path]]:
@@ -4971,23 +5060,8 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
 
     def fail(msg: str, exc: Exception | None = None) -> AlignWorkerResult:
         _restore_alignment_products(backups)
-        row = harvest_alignment_metrics(
-            miri_path,
-            outdir,
-            ran_ok=False,
-            ref_overlap_frac=ref_overlap_frac,
-        )
-        row.filter = filt
-        err = msg if exc is None else f'{msg}: {exc}'
-        if job.get('verbose') and exc is not None:
-            err = f'{err}\n{traceback.format_exc()}'
-        return AlignWorkerResult(
-            miri_path=miri_path,
-            filter=filt,
-            mode='fallback',
-            ok=False,
-            row=asdict(row),
-            error=err,
+        return _worker_crash_result(
+            job, exc, mode='fallback', message=msg, ran_ok=False
         )
 
     if not parent_dicts:
@@ -5016,7 +5090,7 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
                 outdir=str(outdir),
                 **align_kw,
             )
-            with suppress_output():
+            with capture_output():
                 if parent_phot is not None:
                     run_alignment(
                         photfile=parent_phot,
@@ -5154,13 +5228,12 @@ def _run_jobs_parallel(
         return []
 
     n_workers = max(1, int(workers))
-    print(
+    logger.info(
         f'{label}: {len(jobs)} job(s), workers={min(n_workers, len(jobs))}',
-        flush=True,
     )
 
     def start_line(job: dict) -> None:
-        print(f'START {Path(job["miri_path"]).name}', flush=True)
+        logger.info(f'START {Path(job["miri_path"]).name}')
 
     def handle(result) -> None:
         if on_result is not None:
@@ -5368,11 +5441,10 @@ def align_from_frames(
                 )
             )
             n_ok += 1
-        print(
+        logger.info(
             f'DONE  {Path(prev.miri_path).name}  {prev.filter}  SUCCESS  '
             f'align_mode=REFERENCE  dispersion_mas={final.dispersion_mas:.3f} '
             f'({reason})',
-            flush=True,
         )
         flush_summary()
 
@@ -5393,7 +5465,7 @@ def align_from_frames(
                 why = f'{why}: {result.error}'
             finalize_quality_hold_keep_reference(prev, reason=why)
             if verbose and result.error:
-                print(f'  detail: {result.error}', file=sys.stderr, flush=True)
+                logger.error(f'  detail: {result.error}')
             return
 
         if prev is None:
@@ -5410,27 +5482,27 @@ def align_from_frames(
                 if count_fallback or result.mode == 'fallback':
                     n_fallback += 1
 
-        print(_format_worker_done(result), flush=True)
+        logger.info(_format_worker_done(result))
         if verbose and result.error:
-            print(f'  detail: {result.error}', file=sys.stderr, flush=True)
+            logger.error(f'  detail: {result.error}')
         flush_summary()
 
     if summary_outfile is not None:
         summary_outfile = Path(summary_outfile).expanduser().resolve()
         write_alignment_summary(rows, summary_outfile)
-        print(f'Live alignment summary → {summary_outfile}')
+        logger.info(f'Live alignment summary → {summary_outfile}')
 
-    print(
+    logger.info(
         f'Alignment plan: {len(groups)} filter wave(s), '
         f'{sum(len(v) for v in groups.values())} frame(s) after rejecting '
         f'{n_rejected} low-overlap '
         f'(ref_overlap_frac < {min_ref_overlap_frac:.4f}), workers={workers}'
     )
     for filt, group in groups.items():
-        print(f'  {filt}: {len(group)} frame(s)')
+        logger.info(f'  {filt}: {len(group)} frame(s)')
 
     if not groups:
-        print('No science frames with reference overlap remain to align.')
+        logger.info('No science frames with reference overlap remain to align.')
         return 0, rows
 
     common_job = dict(
@@ -5449,17 +5521,17 @@ def align_from_frames(
     )
 
     if use_filter_calibrators:
-        print(
+        logger.info(
             'Filter calibrators: F770W → '
             f'{describe_calibrator_settings(F770W_CALIBRATOR_SETTINGS)}'
         )
     else:
-        print('Filter calibrators: disabled (--no-filter-calibrators)')
+        logger.info('Filter calibrators: disabled (--no-filter-calibrators)')
 
     if max_nircam_dispersion_mas == 0.0:
-        print('REFERENCE quality hold: disabled')
+        logger.info('REFERENCE quality hold: disabled')
     elif max_nircam_dispersion_mas is not None:
-        print(
+        logger.info(
             f'REFERENCE quality hold: uniform > '
             f'{max_nircam_dispersion_mas:.1f} mas → try MIRI_REL '
             f'(keep only if improved)'
@@ -5468,16 +5540,15 @@ def align_from_frames(
         parts = []
         for name, thr in FILTER_MAX_REFERENCE_DISPERSION_MAS.items():
             parts.append(f'{name}:{"off" if thr is None else f"{thr:.0f}"}')
-        print(
+        logger.info(
             'REFERENCE quality hold (per filter, mas → try MIRI_REL; '
             f'keep only if improved): {", ".join(parts)}'
         )
 
     for filt, group in groups.items():
-        print()
-        print('=' * 72)
-        print(f'Filter wave {filt}: {len(group)} frame(s)')
-        print('=' * 72)
+        logger.info('=' * 72)
+        logger.info(f'Filter wave {filt}: {len(group)} frame(s)')
+        logger.info('=' * 72)
 
         pending: dict[str, dict] = {}
         for frame in group:
@@ -5498,11 +5569,11 @@ def align_from_frames(
             }
 
         # --- Pass 1: parallel REFERENCE alignment ---
-        nircam_jobs = [{**job, 'mode': 'nircam'} for job in pending.values()]
+        reference_jobs = [{**job, 'mode': 'reference'} for job in pending.values()]
 
         _run_jobs_parallel(
-            nircam_jobs,
-            run_nircam_align_job,
+            reference_jobs,
+            run_reference_align_job,
             workers=workers,
             label=f'{filt} REFERENCE',
             on_result=record_result,
@@ -5608,14 +5679,13 @@ def align_from_frames(
 
         failures += len(wave_failures)
 
-        print(
+        logger.info(
             f'Filter wave {filt} done: '
             f'{sum(1 for m in pending if row_by_miri[m].status == "SUCCESS")} ok, '
             f'{len(wave_failures)} failed'
         )
 
-    print()
-    print(
+    logger.info(
         f'Alignment finished: {n_ok} ok ({n_fallback} via MIRI fallback), '
         f'{n_rejected} rejected (ref_overlap_frac < {min_ref_overlap_frac:.4f}), '
         f'{failures} failed'
@@ -5670,13 +5740,12 @@ def run_overlaps(
             f'or {data_dir}/reduction/reference/'
         )
 
-    print(f'Repo:              {args.repo}')
-    print(f'Data dir:          {data_dir}')
-    print(f'Dataset label:     {args.galaxy}')
-    print(f'Filters:           {", ".join(filters) if filters else "ALL"}')
-    print(f'MIRI images:       {len(miri_images)}')
-    print(f'Reference images:  {len(refs)}')
-    print()
+    logger.info(f'Repo:              {args.repo}')
+    logger.info(f'Data dir:          {data_dir}')
+    logger.info(f'Dataset label:     {args.galaxy}')
+    logger.info(f'Filters:           {", ".join(filters) if filters else "ALL"}')
+    logger.info(f'MIRI images:       {len(miri_images)}')
+    logger.info(f'Reference images:  {len(refs)}')
 
     frames = find_frame_overlaps(
         miri_images,

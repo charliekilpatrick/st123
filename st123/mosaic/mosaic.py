@@ -1,49 +1,69 @@
-import glob, os
-from st123.utils.helpers import create_filter_table, input_list
-import numpy as np
-from multiprocessing import Pool
-from jwst.pipeline import calwebb_image3
+from __future__ import annotations
 
-import glob,os
-from astropy.io import fits
-from jwst.associations import asn_from_list
-from jwst.associations.lib.rules_level3_base import DMS_Level3_Base
+import logging
+import os
+import shutil
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
 import shapely
 import shapely.ops
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon
-import shutil
-from pathlib import Path
-
-from astropy.modeling import models
-from astropy import coordinates as coord
-from astropy import units as u
-from astropy.table import Column
-from gwcs import FITSImagingWCSTransform, coordinate_frames as cf
-from astropy import wcs
-from gwcs import WCS as g_wcs
-from asdf import AsdfFile
-
-from astropy.nddata import CCDData
-from astropy import nddata
-from ccdproc import Combiner
-
 import stpsf
+from asdf import AsdfFile
+from astropy import coordinates as coord
+from astropy import nddata
+from astropy import units as u
+from astropy import wcs
+from astropy.convolution import convolve_fft
+from astropy.io import fits
+from astropy.modeling import models
+from astropy.nddata import CCDData
 from astropy.stats import sigma_clipped_stats as scs
-#from photutils.psf.matching import resize_psf, SplitCosineBellWindow, create_matching_kernel, CosineBellWindow, TukeyWindow, TopHatWindow, HanningWindow
-from photutils.psf.matching import SplitCosineBellWindow, create_matching_kernel, CosineBellWindow, TukeyWindow, TopHatWindow, HanningWindow
-from astropy.convolution import convolve, convolve_fft
+from astropy.table import Table
+from ccdproc import Combiner
+from gwcs import FITSImagingWCSTransform, coordinate_frames as cf
+from gwcs import WCS as g_wcs
+from jwst.associations import asn_from_list
+from jwst.associations.lib.rules_level3_base import DMS_Level3_Base
+from jwst.pipeline import calwebb_image3
+from matplotlib.patches import Polygon
+from photutils.psf.matching import SplitCosineBellWindow, create_matching_kernel
 from reproject.mosaicking import find_optimal_celestial_wcs
-import subprocess
-from st123.utils.helpers import get_detector_chip
+
 from st123.mast import parse_s_region
-from st123.utils.jwst_compat import patch_jwst_for_photutils3
-from st123.utils.settings import *  # noqa: F403
+from st123.utils.compatibility import patch_jwst_for_photutils3
+from st123.utils.helpers import create_filter_table, input_list
+from st123.utils.logging import capture_output
+
+logger = logging.getLogger(__name__)
 
 
-def mp_init(init_success: int = 0,
-            init_failed: int = 0,
-            init_success_files: list =[]):
+def mp_init(
+    init_success: int = 0,
+    init_failed: int = 0,
+    init_success_files: list[str] | None = None,
+) -> None:
+    """
+    Initialize module-level counters for multiprocessing mosaic workers.
+
+    Parameters
+    ----------
+    init_success : int, optional
+        Initial success count.
+    init_failed : int, optional
+        Initial failure count.
+    init_success_files : list of str, optional
+        Paths of successfully processed files.
+
+    Returns
+    -------
+    None
+    """
+    if init_success_files is None:
+        init_success_files = []
     global success
     global failed
     global success_files
@@ -52,8 +72,39 @@ def mp_init(init_success: int = 0,
     success_files = init_success_files
 
 class split_observations(object):
-    def __init__(self, table, N_max=150, min_overlap=0.2, pad=15, polygons=None, wcs_opt=None):
+    """
+    Split an input list into spatial boxes for Level-3 mosaic / coadd groups.
 
+    Footprints are derived from ``S_REGION`` polygons (or caller-supplied
+    shapely geometries) and recursively subdivided until each box contains at
+    most ``N_max`` images.
+    """
+
+    def __init__(
+        self,
+        table: Table,
+        N_max: int = 150,
+        min_overlap: float = 0.2,
+        pad: float = 15,
+        polygons: Sequence[Any] | None = None,
+        wcs_opt: wcs.WCS | None = None,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        table : Table
+            Input list with an ``image`` column.
+        N_max : int, optional
+            Maximum images per mosaic box.
+        min_overlap : float, optional
+            Minimum fractional overlap required to assign an image to a box.
+        pad : float, optional
+            Pixel padding applied to each accepted box.
+        polygons : sequence, optional
+            Precomputed shapely polygons (one per table row).
+        wcs_opt : astropy.wcs.WCS, optional
+            Pixel WCS matching ``polygons`` when supplied.
+        """
         self.table = table
         self.N_max = N_max
         self.min_overlap = min_overlap
@@ -199,7 +250,10 @@ class split_observations(object):
 
             for split_box in split_bbox:
                 if self.check_box == split_box:
-                    print(f"WARNING: Cannot split further, minmimum group size is {mask.sum()}")
+                    logger.warning(
+                        'Cannot split further, minmimum group size is %s',
+                        mask.sum(),
+                    )
                     split_box = self.pad_box(split_box, pad=self.pad)
                     self.split_boxes.append(split_box)
                     self.subimages.append(self.table[mask]['image'])
@@ -263,7 +317,26 @@ class split_observations(object):
         ax.set_ylabel('y (pix)')
         
         
-def get_pgons(table):
+def get_pgons(
+    table: Table,
+) -> tuple[wcs.WCS, np.ndarray, np.ndarray]:
+    """
+    Build pixel-space shapely footprints for each row in an input list.
+
+    Parameters
+    ----------
+    table : Table
+        Input list with an ``image`` column.
+
+    Returns
+    -------
+    wcs_opt : astropy.wcs.WCS
+        Optimal celestial WCS projected to pixels.
+    pgons : numpy.ndarray
+        Shapely polygons, one per image.
+    centroids : numpy.ndarray
+        Polygon centroids in pixel coordinates.
+    """
     image_hdus = [fits.open(i)[1] for i in table['image']]
     wcs_out, shape_out = find_optimal_celestial_wcs(image_hdus, auto_rotate = True)
 
@@ -285,22 +358,27 @@ def get_pgons(table):
 
     return wcs_opt, pgons, centroids
         
-def create_default_mosaic(inputfiles, outdir, filt):
-    '''
-    Create level3 drizzled mosaic from level2 input files
-    using the JWST pipeline with default options
+def create_default_mosaic(
+    inputfiles: Sequence[str],
+    outdir: str,
+    filt: str,
+) -> None:
+    """
+    Create a Level-3 drizzled mosaic from Level-2 inputs with default JWST options.
 
     Parameters
     ----------
-    input_files : list
-        List of input level2 files
-    outdir: str
-        Output directory
+    inputfiles : sequence of str
+        Level-2 science FITS paths.
+    outdir : str
+        Output directory for association and pipeline products.
+    filt : str
+        Filter name used to select inputs and name outputs.
 
     Returns
     -------
     None
-    '''
+    """
     patch_jwst_for_photutils3()
     if not os.path.exists(outdir):
         os.makedirs(outdir)
@@ -332,21 +410,21 @@ def create_default_mosaic(inputfiles, outdir, filt):
     image3.pixel_scale = 0.0311
     image3.weight_type = 'ivm'
 
-    image3.run(asn_file)
+    with capture_output():
+        image3.run(asn_file)
 
 def create_coadd_mosaic(
-    table,
-    outdir,
-    filt,
+    table: Table,
+    outdir: str,
+    filt: str,
     *,
-    sci_header=None,
-    wcs_out=None,
-    shape_out=None,
-    gwcs_file=None,
-):
-    '''
-    Create level3 drizzled mosaic from level2 input files
-    using the JWST pipeline with a required shared output GWCS.
+    sci_header: fits.Header | None = None,
+    wcs_out: wcs.WCS | None = None,
+    shape_out: tuple[int, int] | None = None,
+    gwcs_file: str | None = None,
+) -> str:
+    """
+    Create a Level-3 drizzled mosaic with a shared output GWCS.
 
     A ``FITSImagingWCSTransform``-based output WCS is always applied
     (via :func:`create_gwcs`) so resample can write FITS WCS keywords
@@ -355,28 +433,28 @@ def create_coadd_mosaic(
 
     Parameters
     ----------
-    table : astropy.table.table.Table
-        Table containing all images to be resampled
-    outdir: str
-        Output directory
-    filt: str
-        Filter of images to be resampled
-    sci_header : optional, astropy.io.fits.Header
+    table : Table
+        Input list of images to resample.
+    outdir : str
+        Output directory for association and pipeline products.
+    filt : str
+        Filter name for the resampled product.
+    sci_header : fits.Header, optional
         FITS WCS header used to build ``mosaic_gwcs.asdf`` when
-        ``gwcs_file`` is not given
-    wcs_out : optional, astropy.wcs.WCS
+        ``gwcs_file`` is not given.
+    wcs_out : astropy.wcs.WCS, optional
         Astropy WCS used with ``shape_out`` when ``gwcs_file`` /
-        ``sci_header`` are not given
-    shape_out : optional, tuple
-        ``(NAXIS2, NAXIS1)`` for ``wcs_out``
-    gwcs_file : optional, str
-        Path to an existing GWCS asdf file (from :func:`create_gwcs`)
+        ``sci_header`` are not given.
+    shape_out : tuple of int, optional
+        ``(NAXIS2, NAXIS1)`` for ``wcs_out``.
+    gwcs_file : str, optional
+        Path to an existing GWCS asdf file (from :func:`create_gwcs`).
 
     Returns
     -------
-    filepath: str
-        Path to resampled i2d image
-    '''
+    str
+        Path to the resampled ``*_i2d.fits`` image.
+    """
     patch_jwst_for_photutils3()
     if not os.path.exists(outdir):
         os.makedirs(outdir)
@@ -417,28 +495,42 @@ def create_coadd_mosaic(
     image3.weight_type = 'ivm'
     image3.resample.output_wcs = gwcs_file
 
-    image3.run(asn_file)
-    
+    with capture_output():
+        image3.run(asn_file)
+
     filepath = f'{outdir}/out_{filt}/{filt}_i2d.fits'
     return filepath
 
 
-def create_gwcs(outdir, sci_header=None, wcs_out=None, shape_out=None, return_gwcs=False):
-    '''
-    Convert astropy WCS to a GWCS object and write it into an asdf file
+def create_gwcs(
+    outdir: str,
+    sci_header: fits.Header | None = None,
+    wcs_out: wcs.WCS | None = None,
+    shape_out: tuple[int, int] | None = None,
+    return_gwcs: bool = False,
+) -> str | g_wcs:
+    """
+    Convert an astropy WCS to GWCS and write or return it.
 
     Parameters
     ----------
-    wcs_out : astropy.wcs.WCS
-        Astropy WCS to be converted to gwcs
-    shape_out : tuple
-        (NAXIS2, NAXIS1) shape of output mosaic
+    outdir : str
+        Directory for ``mosaic_gwcs.asdf`` when ``return_gwcs`` is False.
+    sci_header : fits.Header, optional
+        FITS WCS header defining the output mosaic grid.
+    wcs_out : astropy.wcs.WCS, optional
+        Astropy WCS converted with ``shape_out`` when ``sci_header`` is omitted.
+    shape_out : tuple of int, optional
+        ``(NAXIS2, NAXIS1)`` shape paired with ``wcs_out``.
+    return_gwcs : bool, optional
+        When True, return the in-memory GWCS object instead of writing asdf.
 
     Returns
     -------
-    gwcs_path: str
-        Path to the GWCS asdf file
-    '''
+    str or gwcs.wcs.WCS
+        Path to ``mosaic_gwcs.asdf``, or the GWCS object when
+        ``return_gwcs`` is True.
+    """
 
     if sci_header:
         pass
@@ -492,14 +584,55 @@ def create_gwcs(outdir, sci_header=None, wcs_out=None, shape_out=None, return_gw
 
     return gwcs_path
 
-def find_optimal_wcs(filter_table):
+def find_optimal_wcs(
+    filter_table: dict[str, Table],
+) -> tuple[wcs.WCS, tuple[int, int]]:
+    """
+    Find the optimal celestial WCS spanning all images in a filter table dict.
+
+    Parameters
+    ----------
+    filter_table : dict
+        Filter name mapped to an input-list :class:`~astropy.table.Table`.
+
+    Returns
+    -------
+    wcs_out : astropy.wcs.WCS
+        Optimal output WCS.
+    shape_out : tuple of int
+        ``(NAXIS2, NAXIS1)`` shape for the mosaic grid.
+    """
     images = np.hstack([filter_table[i]['image'].value for i in filter_table.keys()])
     image_hdus = [fits.open(i)[1] for i in images]
     wcs_out, shape_out = find_optimal_celestial_wcs(image_hdus, auto_rotate = True)
 
     return wcs_out, shape_out
 
-def create_psf_kernel(ref_filter: str, in_filter: str, ovs=5, fov=81):
+def create_psf_kernel(
+    ref_filter: str,
+    in_filter: str,
+    ovs: int = 5,
+    fov: int = 81,
+) -> np.ndarray:
+    """
+    Build a photutils PSF-matching kernel between two NIRCam filters.
+
+    Parameters
+    ----------
+    ref_filter : str
+        Reference filter name (e.g. ``F277W``).
+    in_filter : str
+        Source filter to match to ``ref_filter``.
+    ovs : int, optional
+        STPSF oversampling factor.
+    fov : int, optional
+        STPSF field of view in pixels.
+
+    Returns
+    -------
+    numpy.ndarray
+        Matching kernel for :func:`astropy.convolution.convolve_fft`.
+    """
     nrc = stpsf.NIRCam()
     nrc.filter = in_filter.upper()
     if nrc.filter == 'F150W2':
@@ -521,7 +654,24 @@ def create_psf_kernel(ref_filter: str, in_filter: str, ovs=5, fov=81):
 
     return psf_kernel
 
-def convolve_images(filter_table, target_filter):
+def convolve_images(
+    filter_table: dict[str, Table],
+    target_filter: str,
+) -> None:
+    """
+    PSF-match and overwrite science images to ``target_filter`` in place.
+
+    Parameters
+    ----------
+    filter_table : dict
+        Filter name mapped to an input-list :class:`~astropy.table.Table`.
+    target_filter : str
+        Reference filter for PSF matching.
+
+    Returns
+    -------
+    None
+    """
     for filt in filter_table.keys():
         if filt.upper() == target_filter.upper():
             continue
@@ -539,7 +689,20 @@ def convolve_images(filter_table, target_filter):
             hdu['ERR'].data = err_con
             hdu.writeto(im, overwrite=True)
 
-def create_ccddata(file):
+def create_ccddata(file: str) -> CCDData:
+    """
+    Load a JWST i2d FITS file as :class:`~astropy.nddata.CCDData`.
+
+    Parameters
+    ----------
+    file : str
+        Path to a Level-3 or coadd FITS file with SCI/ERR extensions.
+
+    Returns
+    -------
+    CCDData
+        Science data, uncertainty, WCS, and zero mask.
+    """
     hdu = fits.open(file)
     sci_data = hdu['SCI'].data
     
@@ -552,7 +715,25 @@ def create_ccddata(file):
     
     return ccd_data
 
-def update_photmjsr(ccddata, phots):
+def update_photmjsr(
+    ccddata: Sequence[CCDData],
+    phots: Sequence[float],
+) -> float:
+    """
+    Estimate a combined PHOTMJSR from weighted coadd inputs.
+
+    Parameters
+    ----------
+    ccddata : sequence of CCDData
+        Per-image science arrays in MJy/sr.
+    phots : sequence of float
+        Per-image ``PHOTMJSR`` header values.
+
+    Returns
+    -------
+    float
+        Sigma-clipped median conversion factor (MJy/sr per count).
+    """
     ccd_mjsr = np.sum([ccd.data for ccd in ccddata], axis = 0)
     ccd_cps = np.sum([ccd.data/phot for ccd, phot in list(zip(ccddata, phots))], axis = 0)
     mjsr = ccd_mjsr/ccd_cps
@@ -560,7 +741,27 @@ def update_photmjsr(ccddata, phots):
 
     return mjsr_med
 
-def coadd(ref_files, filt, filename = 'coadd_i2d.fits'):
+def coadd(
+    ref_files: Sequence[str],
+    filt: str,
+    filename: str = 'coadd_i2d.fits',
+) -> None:
+    """
+    Inverse-variance coadd Level-3 images with ccdproc.
+
+    Parameters
+    ----------
+    ref_files : sequence of str
+        Input ``*_i2d.fits`` paths to combine.
+    filt : str
+        Filter name written to the coadd primary header.
+    filename : str, optional
+        Output coadd FITS path.
+
+    Returns
+    -------
+    None
+    """
     #edit specific header keys
     hdu_template = fits.open(ref_files[0])
     hdr_update = {'EFFEXPTM': [], 'TMEASURE': [], 'DURATION': []}
@@ -625,7 +826,25 @@ def coadd(ref_files, filt, filename = 'coadd_i2d.fits'):
     coadd_hdul.writeto(filename, overwrite = True)
     hdu_template.close()
 
-def create_dirs(base_dir, n=1):
+def create_dirs(base_dir: str, n: int = 1) -> dict[int, str]:
+    """
+    Create ``reference/group_*`` directories under a mosaic base directory.
+
+    When ``base_dir`` is named ``reduction``, also symlink ``../reference`` to
+    ``reduction/reference`` for align reference mode.
+
+    Parameters
+    ----------
+    base_dir : str
+        Mosaic reduction root (typically ``.../reduction``).
+    n : int, optional
+        Number of group directories to create.
+
+    Returns
+    -------
+    dict
+        Group index mapped to ``reference/group_<index>`` path.
+    """
     out_dict = dict.fromkeys(range(n))
     os.makedirs(base_dir, exist_ok=True)
     for i in range(n):
@@ -642,9 +861,18 @@ def create_dirs(base_dir, n=1):
 
 def ensure_dataset_reference_link(base_dir: str) -> str | None:
     """
-    If *base_dir* is named ``reduction``, symlink ``../reference`` →
-    ``reduction/reference`` (idempotent). Returns the dataset-root reference
-    path when linked/created, else ``None``.
+    Symlink dataset-root ``reference`` to ``reduction/reference``.
+
+    Parameters
+    ----------
+    base_dir : str
+        Reduction directory; no-op unless its basename is ``reduction``.
+
+    Returns
+    -------
+    str or None
+        Dataset-root reference path when linked or already present, else
+        ``None``.
     """
     base = Path(base_dir).resolve()
     if base.name != 'reduction':
@@ -660,12 +888,44 @@ def ensure_dataset_reference_link(base_dir: str) -> str | None:
         return None
     return str(dst)
 
-def copy_files(filter_table, outdir):
+def copy_files(filter_table: dict[str, Table], outdir: str) -> None:
+    """
+    Copy all science images listed in a filter table dict into ``outdir``.
+
+    Parameters
+    ----------
+    filter_table : dict
+        Filter name mapped to an input-list :class:`~astropy.table.Table`.
+    outdir : str
+        Destination directory.
+
+    Returns
+    -------
+    None
+    """
     infiles = np.hstack([filter_table[i]['image'].value for i in filter_table.keys()])
     for file in infiles:
         shutil.copy(file, outdir)
 
-def update_path(filter_table, outdir):
+def update_path(
+    filter_table: dict[str, Table],
+    outdir: str,
+) -> dict[str, Table]:
+    """
+    Rewrite ``image`` paths in a filter table dict to basenames under ``outdir``.
+
+    Parameters
+    ----------
+    filter_table : dict
+        Filter name mapped to an input-list :class:`~astropy.table.Table`.
+    outdir : str
+        Directory containing copied FITS files.
+
+    Returns
+    -------
+    dict
+        Updated filter table (same object, mutated in place).
+    """
     for flt in filter_table.keys():
         tbl = filter_table[flt]
         filenames = [os.path.basename(i['image']) for i in tbl]
@@ -675,13 +935,13 @@ def update_path(filter_table, outdir):
     return filter_table
 
 def write_dolphot_frame_list(
-    box_outdir,
+    box_outdir: str,
     *,
-    refimage,
-    frames,
+    refimage: str,
+    frames: Sequence[str],
     group: int = 0,
     box: int = 0,
-):
+) -> str:
     """
     Write a manifest of coadd + JHAT frames for ``dolphot-prep --from-mosaic``.
 
@@ -710,7 +970,25 @@ def write_dolphot_frame_list(
     return out
 
 
-def edit_spec_groups(table, spec_group_file):
+def edit_spec_groups(
+    table: Table,
+    spec_group_file: str,
+) -> Table:
+    """
+    Assign a new mosaic group index to files listed in a text manifest.
+
+    Parameters
+    ----------
+    table : Table
+        Input list with ``image`` and ``group`` columns.
+    spec_group_file : str
+        Text file of basenames to move into group ``max(group)+1``.
+
+    Returns
+    -------
+    Table
+        Updated input list.
+    """
     files = np.loadtxt(spec_group_file, dtype=str)
     ngrp = np.max(table['group'])
     basenames = np.array([os.path.basename(i) for i in table['image']])
@@ -719,13 +997,28 @@ def edit_spec_groups(table, spec_group_file):
 
     return table
 
-def assign_gwcs(box_outdir, wcs_hdr):
+def assign_gwcs(box_outdir: str, wcs_hdr: fits.Header) -> g_wcs:
+    """
+    Build a GWCS object for a mosaic box from a FITS WCS header.
+
+    Parameters
+    ----------
+    box_outdir : str
+        Mosaic box directory passed to :func:`create_gwcs`.
+    wcs_hdr : fits.Header
+        SCI extension WCS header from a coadd product.
+
+    Returns
+    -------
+    gwcs.wcs.WCS
+        GWCS object suitable for JWST datamodel ``meta.wcs``.
+    """
     wcsobj = create_gwcs(outdir=box_outdir, sci_header=wcs_hdr, return_gwcs=True)
 
     return wcsobj
 
 
-def apply_wcs_to_coadd(coadd_file, output=None):
+def apply_wcs_to_coadd(coadd_file: str, output: str | None = None) -> str:
     """
     Attach a :func:`create_gwcs` GWCS object to a coadd datamodel.
 

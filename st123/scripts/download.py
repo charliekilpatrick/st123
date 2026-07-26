@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from astropy import units as u
 
 from st123.mast import normalize_filter_name, query_mast_jwst, resolve_outdir
@@ -11,11 +13,15 @@ from st123.scripts.utils.options import (
     add_common_runtime,
     add_filters,
     add_mast_token,
+    configure_logging_from_args,
     create_parser as build_parser,
     parse_filter_list,
     parse_instruments,
 )
 from st123.utils import parse_coord
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_parser():
@@ -85,50 +91,59 @@ def create_parser():
 def main(argv=None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
-    coord = parse_coord(args.ra, args.dec)
-    if coord is None:
-        return 1
-
+    configure_logging_from_args(args, 'download')
     try:
-        outdir = resolve_outdir(args.base_dir)
-    except (PermissionError, ValueError) as exc:
-        print(f'ERROR: {exc}')
-        return 1
+        coord = parse_coord(args.ra, args.dec)
+        if coord is None:
+            return 1
 
-    instruments = parse_instruments(args.instruments)
-    mirimage_only = bool(args.mirimage_only)
-    layout = args.layout
-    if instruments is not None and len(instruments) == 1 and instruments[0].upper() == 'MIRI':
-        if layout in (
-            'telescope/instrument/filter/obsid',
-            'filter/obsid',
+        try:
+            outdir = resolve_outdir(args.base_dir)
+        except (PermissionError, ValueError) as exc:
+            logger.error('%s', exc)
+            return 1
+
+        instruments = parse_instruments(args.instruments)
+        mirimage_only = bool(args.mirimage_only)
+        layout = args.layout
+        if (
+            instruments is not None
+            and len(instruments) == 1
+            and instruments[0].upper() == 'MIRI'
         ):
-            mirimage_only = True
+            if layout in (
+                'telescope/instrument/filter/obsid',
+                'filter/obsid',
+            ):
+                mirimage_only = True
 
-    allowed = None
-    if args.filters:
-        allowed = [
-            normalize_filter_name(f) for f in parse_filter_list(args.filters) or []
-        ]
+        allowed = None
+        if args.filters:
+            allowed = [
+                normalize_filter_name(f)
+                for f in parse_filter_list(args.filters) or []
+            ]
 
-    try:
-        n = query_mast_jwst(
-            coord,
-            outdir=outdir,
-            radius=args.radius * u.arcmin,
-            stage=args.stage,
-            token=args.token,
-            instruments=instruments,
-            layout=layout,
-            mirimage_only=mirimage_only,
-            dry_run=args.dry_run,
-            allowed_filters=allowed,
-        )
-    except (RuntimeError, OSError) as exc:
-        print(f'ERROR: {exc}')
-        return 1
+        try:
+            n = query_mast_jwst(
+                coord,
+                outdir=outdir,
+                radius=args.radius * u.arcmin,
+                stage=args.stage,
+                token=args.token,
+                instruments=instruments,
+                layout=layout,
+                mirimage_only=mirimage_only,
+                dry_run=args.dry_run,
+                allowed_filters=allowed,
+            )
+        except (RuntimeError, OSError) as exc:
+            logger.error('%s', exc)
+            return 1
 
-    return 0 if n else 1
+        return 0 if n else 1
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

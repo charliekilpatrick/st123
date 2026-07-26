@@ -1,25 +1,33 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-from tqdm import tqdm
-import glob, os
-import itertools
+"""DOLPHOT column mapping and combined-catalog helpers."""
 
-def get_filters(columns):
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import glob
+import itertools
+import os
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+
+def get_filters(columns: str) -> tuple[np.ndarray, list[str]]:
     """
-    get unique filters and lines from dolphot column files
+    Extract unique NIRCam filters and raw lines from a DOLPHOT column file.
 
     Parameters
     ----------
     columns : str
-        path to dolphot column file
+        Path to a DOLPHOT ``*.columns`` file.
 
     Returns
     -------
-    lines : list
-        list of lines from dolphot column file
-    filters : list
-        list of unique filters
+    lines : numpy.ndarray
+        Raw lines from the column file.
+    filters : list of str
+        Unique NIRCam filter names.
     """
     with open(columns, 'r') as f:
         lines = f.readlines()
@@ -32,22 +40,27 @@ def get_filters(columns):
 
     return lines, filters
 
-def map_columns(columns):
+
+def map_columns(
+    columns: str,
+) -> tuple[dict[str, int | None], list[str], dict[str, dict[str, list[str]]]]:
     """
-    generate dictionaries mapping column names to column indices from dolphot column files
+    Map DOLPHOT column names to zero-based indices.
 
     Parameters
     ----------
     columns : str
-        path to dolphot column file
+        Path to a DOLPHOT ``*.columns`` file.
 
     Returns
     -------
     col_dict : dict
-        dictionary mapping column names to column indices for combined photometry
+        Combined-photometry column name mapped to index (or ``None`` if absent).
+    filters : list of str
+        Unique NIRCam filter names in the column file.
     filter_cols : dict
-        dictionary mapping filter names to counts, error and flag column indices for
-        individual images
+        Filter name mapped to per-image ``Counts``, ``Err``, and ``Flag`` index
+        lists.
     """
     #combined photometry columns
     column_strings = ['Object X position', 'Object Y position', 'Signal-to-noise',
@@ -97,20 +110,26 @@ def map_columns(columns):
 
     return col_dict, filters, filter_cols
 
-def save_photfiles(photfile_path, outdir, obj, chunksize = 100000):
+
+def save_photfiles(
+    photfile_path: str,
+    outdir: str,
+    obj: str,
+    chunksize: int = 100000,
+) -> None:
     """
-    save photometry files with cuts applied to smaller csv files
+    Write quality-cut DOLPHOT photometry chunks to CSV files.
 
     Parameters
     ----------
     photfile_path : str
-        path to directory containing dolphot photometry files
+        Directory containing DOLPHOT ``*.phot`` files.
     outdir : str
-        path to directory to save csv files
+        Directory for output CSV files.
     obj : str
-        object name
-    chunksize : int
-        number of rows to read from photometry file at a time
+        Object name prefix for output filenames.
+    chunksize : int, optional
+        Rows read per chunk from the photometry file.
 
     Returns
     -------
@@ -123,7 +142,7 @@ def save_photfiles(photfile_path, outdir, obj, chunksize = 100000):
         col_idx, filters, _ = map_columns(column_file)
 
         #read photometry file in chunks
-        photdf = pd.read_csv(photfile, sep = '\s+', memory_map = True,
+        photdf = pd.read_csv(photfile, sep=r'\s+', memory_map=True,
                              header = None, iterator = True, chunksize = chunksize)
 
         for j, chunk in tqdm(enumerate(photdf)):
@@ -141,18 +160,26 @@ def save_photfiles(photfile_path, outdir, obj, chunksize = 100000):
             chunk.set_index('idx', inplace = True)
             chunk[cuts].to_csv(f'{outdir}/{obj}_{i}_{j}.csv', mode = 'a', header = False)
 
-def create_common_catalog(common_ids, dfs, columns, outfile):
+
+def create_common_catalog(
+    common_ids: Sequence[str],
+    dfs: Sequence[pd.DataFrame],
+    columns: Sequence[str],
+    outfile: str,
+) -> None:
     """
-    save combined photometry for common sources to a csv file
+    Combine photometry for sources shared across catalogs into one CSV.
 
     Parameters
     ----------
-    common_ids : list
-        list of unique source indices shared across catalogs
-    dfs : list
-        list of dataframes containing photometry
-    columns : list
-        list of column files
+    common_ids : sequence of str
+        Shared source index keys (``x_y`` strings).
+    dfs : sequence of pandas.DataFrame
+        Per-run photometry tables indexed by source key.
+    columns : sequence of str
+        Paths to DOLPHOT ``*.columns`` files matching ``dfs``.
+    outfile : str
+        Output combined-catalog CSV path.
 
     Returns
     -------

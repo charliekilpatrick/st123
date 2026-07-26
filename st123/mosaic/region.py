@@ -25,6 +25,24 @@ class SRegionPolygon:
 
     @classmethod
     def parse(cls, s_region: str) -> SRegionPolygon:
+        """
+        Parse an ``S_REGION`` polygon string.
+
+        Parameters
+        ----------
+        s_region : str
+            Header value such as ``'POLYGON ICRS ra dec ...'``.
+
+        Returns
+        -------
+        SRegionPolygon
+            Parsed sky polygon.
+
+        Raises
+        ------
+        ValueError
+            When the string is not a supported ``POLYGON`` format.
+        """
         tokens = s_region.strip().split()
         if len(tokens) < 4 or tokens[0].upper() != "POLYGON":
             raise ValueError(f"Unsupported S_REGION format: {s_region!r}")
@@ -36,6 +54,19 @@ class SRegionPolygon:
         return cls(frame=frame, vertices=vertices)
 
     def to_string(self, precision: int = 9) -> str:
+        """
+        Format the polygon as an ``S_REGION`` string.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Decimal places for RA and Dec values.
+
+        Returns
+        -------
+        str
+            ``POLYGON <frame> ra dec ...`` header value.
+        """
         coord_text = " ".join(
             f"{ra:.{precision}f} {dec:.{precision}f}" for ra, dec in self.vertices
         )
@@ -52,6 +83,18 @@ class SRegionPolygon:
         Coordinates are offsets in arcseconds (east, north). This is the safe
         geometry for footprint intersection: unlike WCS pixel projection, it
         does not invent detector-plane coordinates for far off-axis sky positions.
+
+        Parameters
+        ----------
+        center_ra_deg : float
+            Tangent-plane origin right ascension in degrees.
+        center_dec_deg : float
+            Tangent-plane origin declination in degrees.
+
+        Returns
+        -------
+        shapely.geometry.Polygon
+            Polygon in arcsecond offsets (east, north).
         """
         ra = np.asarray(self.vertices[:, 0], dtype=float)
         dec = np.asarray(self.vertices[:, 1], dtype=float)
@@ -71,6 +114,23 @@ class SRegionPolygon:
         Rejects projections whose sky→pixel→sky round-trip exceeds
         ``max_roundtrip_arcsec`` so far off-axis vertices are not treated as
         valid detector-plane footprint corners.
+
+        Parameters
+        ----------
+        wcs : astropy.wcs.WCS
+            World coordinate system for the science image.
+        max_roundtrip_arcsec : float, optional
+            Maximum allowed sky round-trip error in arcseconds.
+
+        Returns
+        -------
+        shapely.geometry.Polygon
+            Polygon in pixel coordinates.
+
+        Raises
+        ------
+        ValueError
+            When projection fails or round-trip error exceeds the limit.
         """
         ra0 = np.asarray(self.vertices[:, 0], dtype=float)
         dec0 = np.asarray(self.vertices[:, 1], dtype=float)
@@ -102,7 +162,26 @@ class SRegionPolygon:
 
 
 def find_image_hdu(hdulist: fits.HDUList) -> tuple[int, fits.ImageHDU | fits.PrimaryHDU]:
-    """Return the HDU index and HDU for a 2D science image with a usable WCS."""
+    """
+    Return the HDU index and HDU for a 2D science image with a usable WCS.
+
+    Parameters
+    ----------
+    hdulist : astropy.io.fits.HDUList
+        Open FITS file.
+
+    Returns
+    -------
+    index : int
+        HDU index of the selected image.
+    hdu : astropy.io.fits.ImageHDU or astropy.io.fits.PrimaryHDU
+        Two-dimensional science HDU.
+
+    Raises
+    ------
+    ValueError
+        When no suitable 2D image HDU is found.
+    """
     for index, hdu in enumerate(hdulist):
         if hdu.data is None or hdu.data.ndim != 2:
             continue
@@ -122,7 +201,28 @@ def find_dq_hdu(
     sci_hdu: fits.ImageHDU | fits.PrimaryHDU,
     sci_index: int,
 ) -> fits.ImageHDU | fits.PrimaryHDU:
-    """Return the DQ HDU matching the science image shape."""
+    """
+    Return the DQ HDU matching the science image shape.
+
+    Parameters
+    ----------
+    hdulist : astropy.io.fits.HDUList
+        Open FITS file.
+    sci_hdu : astropy.io.fits.ImageHDU or astropy.io.fits.PrimaryHDU
+        Science image HDU whose DQ extension is needed.
+    sci_index : int
+        Index of ``sci_hdu`` in ``hdulist``.
+
+    Returns
+    -------
+    astropy.io.fits.ImageHDU or astropy.io.fits.PrimaryHDU
+        Data-quality HDU with the same 2D shape as ``sci_hdu``.
+
+    Raises
+    ------
+    ValueError
+        When no matching DQ extension is found.
+    """
     if "DQ" in hdulist:
         dq_hdu = hdulist["DQ"]
         if dq_hdu.data is not None and dq_hdu.data.shape == sci_hdu.data.shape:
@@ -152,12 +252,38 @@ def find_dq_hdu(
 
 
 def illuminated_mask_from_dq(dq: np.ndarray, *, dq_threshold: int = 512) -> np.ndarray:
-    """Pixels considered illuminated based on the DQ frame."""
+    """
+    Build a boolean mask of illuminated pixels from a DQ array.
+
+    Parameters
+    ----------
+    dq : numpy.ndarray
+        Data-quality array.
+    dq_threshold : int, optional
+        Pixels with ``DQ < dq_threshold`` are considered illuminated.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask with the same shape as ``dq``.
+    """
     return dq < dq_threshold
 
 
 def illuminated_mask(data: np.ndarray) -> np.ndarray:
-    """Backward-compatible alias for finite-value masking."""
+    """
+    Return a boolean mask of finite science pixels.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Science image array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask where values are finite.
+    """
     return np.isfinite(data)
 
 
@@ -166,7 +292,26 @@ def select_right_illuminated_component(
     *,
     min_pixels: int | None = None,
 ) -> np.ndarray:
-    """Return a mask for the largest illuminated component on the right side."""
+    """
+    Return a mask for the largest illuminated component on the right side.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        Boolean illuminated-pixel mask.
+    min_pixels : int or None, optional
+        Minimum component size; defaults to ``max(100, 0.001 * mask.size)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean mask for the selected connected component.
+
+    Raises
+    ------
+    ValueError
+        When no illuminated pixels or no right-side component is found.
+    """
     labeled, component_count = ndimage.label(mask)
     if component_count == 0:
         raise ValueError("No illuminated pixels found in image data.")
@@ -196,7 +341,19 @@ def select_right_illuminated_component(
 
 
 def default_adjacency_pixels(shape: tuple[int, ...]) -> float:
-    """Heuristic reach for merging nearby illuminated fragments into the ROI."""
+    """
+    Heuristic reach for merging nearby illuminated fragments into the ROI.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the 2D image array (uses the last dimension as width).
+
+    Returns
+    -------
+    float
+        Adjacency distance in pixels.
+    """
     width = shape[-1]
     return max(80.0, 0.08 * width)
 
@@ -212,6 +369,21 @@ def expand_illuminated_region(
 
     Distance is measured through bad pixels, so components on both sides of a
     bad column can be merged into the ROI when they lie near the primary area.
+
+    Parameters
+    ----------
+    valid_mask : numpy.ndarray
+        Boolean mask of all illuminated pixels.
+    primary_mask : numpy.ndarray
+        Boolean mask of the primary ROI component.
+    adjacency_pixels : float or None, optional
+        Maximum distance in pixels; defaults to
+        :func:`default_adjacency_pixels`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Expanded boolean illuminated mask.
     """
     if adjacency_pixels is None:
         adjacency_pixels = default_adjacency_pixels(valid_mask.shape)
@@ -220,7 +392,21 @@ def expand_illuminated_region(
 
 
 def auto_bridge_pixels(mask: np.ndarray, max_bridge: int = 50) -> int:
-    """Return a dilation radius that merges disconnected ROI fragments."""
+    """
+    Return a dilation radius that merges disconnected ROI fragments.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        Boolean ROI mask.
+    max_bridge : int, optional
+        Maximum binary-dilation iterations to try.
+
+    Returns
+    -------
+    int
+        Dilation radius in pixels (``0`` when already connected).
+    """
     _, component_count = ndimage.label(mask)
     if component_count <= 1:
         return 0
@@ -252,7 +438,31 @@ def mask_to_pixel_polygon(
     bridge_pixels: float | None = None,
     min_component_pixels: int = 50,
 ) -> Polygon:
-    """Trace the illuminated mask boundary and return a simplified pixel polygon."""
+    """
+    Trace the illuminated mask boundary and return a simplified pixel polygon.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        Boolean illuminated-region mask.
+    simplify_tolerance : float, optional
+        Douglas-Peucker tolerance passed to :func:`shapely.simplify`.
+    bridge_pixels : float or None, optional
+        Buffer radius to merge fragments; ``None`` auto-selects via
+        :func:`auto_bridge_pixels`.
+    min_component_pixels : int, optional
+        Ignore connected components smaller than this.
+
+    Returns
+    -------
+    shapely.geometry.Polygon
+        Simplified polygon tracing the mask boundary.
+
+    Raises
+    ------
+    ValueError
+        When no contour can be traced.
+    """
     labeled, component_count = ndimage.label(mask)
     component_polygons: list[Polygon] = []
     for component_id in range(1, component_count + 1):
@@ -288,7 +498,23 @@ def pixel_polygon_to_s_region(
     *,
     frame: str = "ICRS",
 ) -> SRegionPolygon:
-    """Convert a pixel-space polygon to sky coordinates."""
+    """
+    Convert a pixel-space polygon to sky coordinates.
+
+    Parameters
+    ----------
+    polygon : shapely.geometry.Polygon
+        Polygon in pixel coordinates.
+    wcs : astropy.wcs.WCS
+        World coordinate system for the image.
+    frame : str, optional
+        Coordinate frame name for the ``S_REGION`` string.
+
+    Returns
+    -------
+    SRegionPolygon
+        Sky polygon with RA/Dec vertices in degrees.
+    """
     x_coords, y_coords = polygon.exterior.coords.xy
     ra, dec = wcs.pixel_to_world_values(np.asarray(x_coords), np.asarray(y_coords))
     vertices = np.column_stack([ra, dec])
@@ -296,6 +522,21 @@ def pixel_polygon_to_s_region(
 
 
 def infer_coordinate_frame(header: fits.Header, s_region: str | None = None) -> str:
+    """
+    Infer the sky coordinate frame for an ``S_REGION`` polygon.
+
+    Parameters
+    ----------
+    header : astropy.io.fits.Header
+        Image header (may contain ``RADESYS``).
+    s_region : str or None, optional
+        Existing ``S_REGION`` header value; when present, its frame is used.
+
+    Returns
+    -------
+    str
+        Uppercase frame name (defaults to ``'ICRS'``).
+    """
     if s_region:
         return SRegionPolygon.parse(s_region).frame
     if "RADESYS" in header:
@@ -318,19 +559,35 @@ def illuminated_s_region_from_fits(
     Illuminated pixels are selected from the DQ extension (DQ < dq_threshold),
     not from NaNs in the science image.
 
+    Parameters
+    ----------
+    fits_path : str or Path
+        Path to a calibrated science FITS file.
+    hdu_index : int or None, optional
+        Science HDU index; ``None`` selects the first 2D HDU with WCS.
+    simplify_tolerance : float, optional
+        Contour simplification tolerance in pixels.
+    adjacency_pixels : float or None, optional
+        Distance threshold for expanding the ROI; ``None`` uses
+        :func:`default_adjacency_pixels`.
+    bridge_pixels : float or None, optional
+        Fragment-bridging buffer passed to :func:`mask_to_pixel_polygon`.
+    dq_threshold : int, optional
+        DQ values below this threshold count as illuminated.
+
     Returns
     -------
-    s_region_polygon
+    s_region_polygon : SRegionPolygon
         Sky polygon for the illuminated region.
-    region_mask
+    region_mask : numpy.ndarray
         Boolean mask of the selected illuminated component.
-    wcs
+    wcs : astropy.wcs.WCS
         WCS for the image HDU.
-    header
+    header : astropy.io.fits.Header
         Header for the image HDU.
-    data
+    data : numpy.ndarray
         Image data array.
-    valid_mask
+    valid_mask : numpy.ndarray
         Boolean mask of pixels with DQ below the threshold.
     """
     with fits.open(fits_path) as hdulist:
@@ -375,7 +632,31 @@ def illuminated_s_region_string(
     dq_threshold: int = 512,
     precision: int = 9,
 ) -> str:
-    """Return the S_REGION string bounding the illuminated region of interest."""
+    """
+    Return the S_REGION string bounding the illuminated region of interest.
+
+    Parameters
+    ----------
+    fits_path : str or Path
+        Path to a calibrated science FITS file.
+    hdu_index : int or None, optional
+        Science HDU index; ``None`` selects the first 2D HDU with WCS.
+    simplify_tolerance : float, optional
+        Contour simplification tolerance in pixels.
+    adjacency_pixels : float or None, optional
+        Distance threshold for expanding the ROI.
+    bridge_pixels : float or None, optional
+        Fragment-bridging buffer passed to :func:`mask_to_pixel_polygon`.
+    dq_threshold : int, optional
+        DQ values below this threshold count as illuminated.
+    precision : int, optional
+        Decimal places for RA and Dec in the output string.
+
+    Returns
+    -------
+    str
+        ``POLYGON <frame> ra dec ...`` header value.
+    """
     s_region_polygon, _, _, _, _, _ = illuminated_s_region_from_fits(
         fits_path,
         hdu_index=hdu_index,
@@ -396,7 +677,29 @@ def save_illuminated_region_plot(
     original_s_region: SRegionPolygon | None = None,
     title: str | None = None,
 ) -> Path:
-    """Plot the illuminated-region polygon over the original image and save a PNG."""
+    """
+    Plot the illuminated-region polygon over the image and save a PNG.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Science image array.
+    illuminated_polygon : SRegionPolygon
+        Derived illuminated-region sky polygon.
+    wcs : astropy.wcs.WCS
+        WCS for projecting polygons into pixel space.
+    output_path : str or Path
+        Destination PNG path.
+    original_s_region : SRegionPolygon or None, optional
+        Header ``S_REGION`` polygon overlaid for comparison.
+    title : str or None, optional
+        Plot title; defaults to ``'Illuminated region polygon'``.
+
+    Returns
+    -------
+    Path
+        Resolved path to the saved PNG file.
+    """
     plot_data = np.array(data, copy=True)
     plot_data[~np.isfinite(plot_data)] = np.nan
 

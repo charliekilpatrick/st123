@@ -50,6 +50,32 @@ def test_calibrator_settings_and_quality_hold_thresholds():
     assert max_reference_dispersion_mas('F9999W') == 70.0
 
 
+def test_filter_wavelength_um_and_blue_to_red_sort():
+    from st123.alignment.align import filter_wavelength_um, sort_frames_blue_to_red
+
+    assert filter_wavelength_um('F560W') == pytest.approx(5.6)
+    assert filter_wavelength_um('F1000W') == pytest.approx(10.0)
+    assert filter_wavelength_um('F200W') == pytest.approx(2.0)
+    assert filter_wavelength_um('not-a-filter') == float('inf')
+
+    filt_map = {
+        '/c_f1000.fits': 'F1000W',
+        '/a_f560.fits': 'F560W',
+        '/b_f770.fits': 'F770W',
+    }
+    frames = [
+        {'miri_path': '/c_f1000.fits'},
+        {'miri_path': '/a_f560.fits'},
+        {'miri_path': '/b_f770.fits'},
+    ]
+    ordered = sort_frames_blue_to_red(frames, filter_from_path=filt_map.get)
+    assert [f['miri_path'] for f in ordered] == [
+        '/a_f560.fits',
+        '/b_f770.fits',
+        '/c_f1000.fits',
+    ]
+
+
 def test_combine_dispersion_and_rank_parents():
     assert combine_dispersion_mas(30.0, 40.0) == pytest.approx(50.0)
     parents = [
@@ -317,7 +343,7 @@ def test_align_from_frames_continues_on_failure(tmp_path: Path):
                 AlignWorkerResult(
                     miri_path=job['miri_path'],
                     filter=job['filter'],
-                    mode=job.get('mode', 'nircam'),
+                    mode=job.get('mode', 'reference'),
                     ok=False,
                     row={
                         'miri_path': job['miri_path'],
@@ -377,3 +403,94 @@ def test_alignment_package_exports_drivers():
     assert callable(alignment.run_alignment)
     assert callable(alignment.align_from_frames)
     assert callable(alignment.run_overlaps)
+    assert alignment.run_nircam_align_job is alignment.run_reference_align_job
+
+
+def _write_jhat_product(
+    outdir: Path,
+    cal_path: Path,
+    *,
+    dispersion_arcsec: float | None,
+) -> Path:
+    """Write a JHAT product whose stem matches ``find_jhat_product``."""
+    jhat = outdir / cal_path.name.replace('_cal.fits', '_jhat.fits')
+    hdr = fits.Header()
+    hdr['FILTER'] = 'F560W'
+    if dispersion_arcsec is not None:
+        hdr['JWDISPM'] = dispersion_arcsec
+        hdr['JWDISPS'] = 0.01
+        hdr['JWNCAL'] = 12
+    fits.PrimaryHDU(header=hdr).writeto(jhat, overwrite=True)
+    return jhat
+
+
+def test_visit_and_reference_workers_share_harvest_contract(tmp_path: Path):
+    """Both workers SUCCESS only when JHAT headers carry finite dispersion."""
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    cal = _write_miri_cal(tmp_path / 'frame_cal.fits')
+    repo = str(tmp_path)
+
+    visit_job = {
+        'miri_path': str(cal),
+        'align_image': str(cal),
+        'outdir': str(outdir),
+        'gaia': False,
+        'photfilename': str(tmp_path / 'ref.phot.txt'),
+        'xshift': 0.0,
+        'yshift': 0.0,
+        'Nbright': 100,
+        'sig': 2,
+        'filter': 'F560W',
+        'mode': 'VISIT',
+        'repo': repo,
+        'verbose': False,
+    }
+    ref_job = {
+        'miri_path': str(cal),
+        'filter': 'F560W',
+        'ref_images': ['/fake/ref.fits'],
+        'best_ref': '/fake/ref.fits',
+        'outdir': str(outdir),
+        'repo': repo,
+        'nbright': 100,
+        'plot': False,
+        'verbose': False,
+        'cache_dir': None,
+        'match_radius_arcsec': 1.0,
+        'clip_to_align_footprint': True,
+        'refine': False,
+        'refine_sigma': 3.0,
+        'refine_max_iter': 3,
+        'use_filter_calibrators': False,
+        'max_nircam_dispersion_mas': 0.0,
+        'ref_overlap_frac': 0.5,
+        'mode': 'reference',
+    }
+
+    with (
+        patch.object(align_lib, '_ensure_worker_ready'),
+        patch.object(align_lib, 'align_jwst_image'),
+        patch.object(align_lib, 'run_alignment'),
+    ):
+        # No dispersion header → FAILURE for both modes.
+        _write_jhat_product(outdir, cal, dispersion_arcsec=None)
+        visit_fail = align_lib.run_visit_align_job(visit_job)
+        ref_fail = align_lib.run_reference_align_job(ref_job)
+        assert visit_fail.ok is False and visit_fail.row['status'] == 'FAILURE'
+        assert ref_fail.ok is False and ref_fail.row['status'] == 'FAILURE'
+
+        # Finite JWDISPM → SUCCESS + provenance for both modes.
+        _write_jhat_product(outdir, cal, dispersion_arcsec=0.05)
+        visit_ok = align_lib.run_visit_align_job(visit_job)
+        ref_ok = align_lib.run_reference_align_job(ref_job)
+        assert visit_ok.ok and visit_ok.row['status'] == 'SUCCESS'
+        assert visit_ok.row['align_mode'] == 'VISIT'
+        assert ref_ok.ok and ref_ok.row['status'] == 'SUCCESS'
+        assert ref_ok.row['align_mode'] == 'REFERENCE'
+        with fits.open(outdir / 'frame_jhat.fits') as hdul:
+            assert hdul[0].header['ALGNMODE'] in ('VISIT', 'REFERENCE')
+
+
+def test_reference_worker_alias():
+    assert align_lib.run_nircam_align_job is align_lib.run_reference_align_job

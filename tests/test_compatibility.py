@@ -1,4 +1,4 @@
-"""Tests for jwst / photutils compatibility helpers."""
+"""Tests for cross-package compatibility helpers."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from packaging.version import Version
 from photutils.aperture import CircularAnnulus
 from photutils.segmentation import SourceFinder
 
-from st123.utils import jwst_compat
+from st123.utils import compatibility
 
 
 @pytest.mark.skipif(
@@ -22,7 +22,7 @@ from st123.utils import jwst_compat
     reason='photutils>=3 required for this regression',
 )
 def test_translate_photutils3_kwargs():
-    out = jwst_compat._translate_photutils3_kwargs(
+    out = compatibility._translate_photutils3_kwargs(
         {'npixels': 25, 'nlevels': 32, 'progress_bar': False}
     )
     assert out['n_pixels'] == 25
@@ -55,12 +55,12 @@ def test_patch_prevents_missing_n_pixels_error():
     real_wrapper = tc._sourcefinder_wrapper
     real_xypos = JWSTSourceCatalog.xypos
     saved_flag = getattr(tc, 'PHOTUTILS_GE_3', 'MISSING')
-    jwst_compat._PATCHED = False
+    compatibility._PATCHED = False
     try:
         if hasattr(tc, 'PHOTUTILS_GE_3'):
             delattr(tc, 'PHOTUTILS_GE_3')
         with patch.object(tc, '_sourcefinder_wrapper', fake_original):
-            assert jwst_compat.patch_jwst_for_photutils3() is True
+            assert compatibility.patch_jwst_for_photutils3() is True
             tc._sourcefinder_wrapper(
                 MagicMock(), MagicMock(), 2.0, npixels=25, nlevels=32
             )
@@ -72,7 +72,7 @@ def test_patch_prevents_missing_n_pixels_error():
                 delattr(tc, 'PHOTUTILS_GE_3')
         else:
             tc.PHOTUTILS_GE_3 = saved_flag
-        jwst_compat._PATCHED = False
+        compatibility._PATCHED = False
 
     assert calls['finder_dict']['n_pixels'] == 25
 
@@ -86,9 +86,9 @@ def test_xypos_patch_keeps_single_source_masks_iterable():
     from jwst.source_catalog.source_catalog import JWSTSourceCatalog
 
     real_xypos = JWSTSourceCatalog.xypos
-    jwst_compat._PATCHED = False
+    compatibility._PATCHED = False
     try:
-        assert jwst_compat.patch_jwst_for_photutils3() is True
+        assert compatibility.patch_jwst_for_photutils3() is True
 
         class _FakeCat:
             xcentroid = 10.0
@@ -101,7 +101,7 @@ def test_xypos_patch_keeps_single_source_masks_iterable():
         assert len(masks) == 1
     finally:
         JWSTSourceCatalog.xypos = real_xypos
-        jwst_compat._PATCHED = False
+        compatibility._PATCHED = False
 
 
 def test_atleast_2d_xypos_shape_contract():
@@ -145,9 +145,9 @@ def test_aper_local_background_single_source_after_compat_patch():
     from jwst.source_catalog.source_catalog import JWSTSourceCatalog
 
     real_xypos = JWSTSourceCatalog.xypos
-    jwst_compat._PATCHED = False
+    compatibility._PATCHED = False
     try:
-        assert jwst_compat.patch_jwst_for_photutils3() is True
+        assert compatibility.patch_jwst_for_photutils3() is True
 
         data = np.random.default_rng(0).normal(loc=1.0, scale=0.05, size=(64, 64))
         model = MagicMock()
@@ -185,7 +185,7 @@ def test_aper_local_background_single_source_after_compat_patch():
         assert np.isfinite(bkg_median.value[0])
     finally:
         JWSTSourceCatalog.xypos = real_xypos
-        jwst_compat._PATCHED = False
+        compatibility._PATCHED = False
 
 
 def test_generate_level3_mosaic_applies_photutils3_compat(tmp_path: Path):

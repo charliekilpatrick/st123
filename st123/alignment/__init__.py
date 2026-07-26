@@ -10,8 +10,10 @@ Primary entry points
 - :func:`rank_fallback_parents` — MIRI→MIRI parent ranking
 - :func:`calibrator_settings_for_filter` — per-filter JHAT / refine knobs
 
-Everything lives in :mod:`st123.alignment.align`; this package re-exports the
-public surface. CLI wrappers live under :mod:`st123.scripts` (``align``, …).
+Visit and reference share the pool/logging/JHAT/metrics contract in
+:mod:`st123.alignment.align`; they diverge on topology (mosaic cascade vs
+overlap + MIRI_REL). Everything lives in that module; this package re-exports
+the public surface. CLI wrappers live under :mod:`st123.scripts` (``align``, …).
 """
 
 from __future__ import annotations
@@ -50,7 +52,9 @@ from st123.alignment.align import (
     refine_alignment_iteratively,
     run_alignment,
     run_jhat,
+    run_nircam_align_job,
     run_overlaps,
+    run_reference_align_job,
     select_fallback_parent,
     write_alignment_provenance,
     write_alignment_summary,
@@ -90,7 +94,9 @@ __all__ = [
     'refine_alignment_iteratively',
     'run_alignment',
     'run_jhat',
+    'run_nircam_align_job',
     'run_overlaps',
+    'run_reference_align_job',
     'select_fallback_parent',
     'write_alignment_provenance',
     'write_alignment_summary',

@@ -23,10 +23,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import socket
-import sys
-import traceback
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +47,7 @@ from st123.scripts.utils.options import (
     add_common_runtime,
     add_filters,
     add_pair_align_args,
+    configure_logging_from_args,
     as_path,
     create_parser as build_parser,
     dataset_label,
@@ -55,9 +55,14 @@ from st123.scripts.utils.options import (
     sync_legacy_ncores,
 )
 from st123.utils.helpers import create_filter_table, input_list
+from st123.utils.logging import shutdown_logging
+from st123.utils.settings import DEFAULT_PAIR_OUTDIR
 
+logger = logging.getLogger(__name__)
+
+# Machine-local fallback for ``align --mode reference`` when ``--base-dir`` is
+# omitted (not a portable package default; override via CLI).
 DEFAULT_REFERENCE_DATA_DIR = Path('/data/rwisenbaker/jwst_data/M51')
-DEFAULT_PAIR_OUTDIR = 'alignment_output'
 
 
 def create_parser(default_data_dir: Path | None = None):
@@ -279,7 +284,7 @@ def run_pair_alignment(args: argparse.Namespace) -> int:
     align_image = str(Path(args.image).expanduser())
     for path, label in ((ref, '--ref'), (align_image, '--image')):
         if not os.path.exists(path):
-            print(f'ERROR: {label} file not found: {path}', file=sys.stderr)
+            logger.error('%s file not found: %s', label, path)
             return 1
 
     outdir = args.base_dir if args.base_dir is not None else DEFAULT_PAIR_OUTDIR
@@ -298,13 +303,13 @@ def run_pair_alignment(args: argparse.Namespace) -> int:
             refine_max_iter=args.refine_max_iter,
         )
     except Exception as exc:
-        print(f'ERROR: alignment failed: {exc}', file=sys.stderr)
+        logger.error('alignment failed: %s', exc)
         if getattr(args, 'verbose', False):
-            traceback.print_exc()
+            logger.debug('pair alignment traceback', exc_info=True)
         return 1
 
-    print(f'Guess offset (x, y): {guess_offset}')
-    print(f'Done. Products in {out}')
+    logger.info('Guess offset (x, y): %s', guess_offset)
+    logger.info('Done. Products in %s', out)
     return 0
 
 
@@ -324,13 +329,20 @@ def run_visit_alignment(
     ncores: int = 1,
     verbose: bool = False,
 ) -> int:
-    """Self-align instrument frames under ``reduction/`` (Gaia / visit mosaics)."""
+    """Self-align instrument frames under ``reduction/`` (Gaia / visit mosaics).
+
+    Returns
+    -------
+    int
+        ``0`` on success; ``1`` if any pooled visit JHAT worker failed
+        (same contract as reference mode).
+    """
     work_dir = str(resolve_reduction_dir(base_dir))
     if verbose:
-        print(f'Dataset: {dataset_label(base_dir)}')
-        print(f'Mode: visit')
-        print(f'Instrument: {instrument}')
-        print(f'Reduction workdir: {work_dir}')
+        logger.info('Dataset: %s', dataset_label(base_dir))
+        logger.info('Mode: visit')
+        logger.info('Instrument: %s', instrument)
+        logger.info('Reduction workdir: %s', work_dir)
 
     create_dirs(work_dir)
     patterns = _visit_patterns(instrument)
@@ -338,6 +350,7 @@ def run_visit_alignment(
     table = input_list(input_images)
     ngroups = np.unique(table['group'])
     visit_filter = visit_filter_dict(table)
+    n_failures = 0
 
     for group_id in ngroups:
         combined_photfile = os.path.join(
@@ -362,7 +375,7 @@ def run_visit_alignment(
             )
 
             if visit_index == 0:
-                mosaic_name, guess_offset = create_alignment_mosaic(
+                mosaic_name, guess_offset, mosaic_fail = create_alignment_mosaic(
                     filter_table,
                     visit_outdir,
                     align_filter=align_filter,
@@ -371,7 +384,7 @@ def run_visit_alignment(
                 )
             else:
                 nbright = 50000 if overlap_frac < 0.3 else 800
-                mosaic_name, guess_offset = create_alignment_mosaic(
+                mosaic_name, guess_offset, mosaic_fail = create_alignment_mosaic(
                     filter_table,
                     visit_outdir,
                     align_filter=align_filter,
@@ -379,6 +392,7 @@ def run_visit_alignment(
                     ncores=ncores,
                     Nbright=nbright,
                 )
+            n_failures += int(mosaic_fail)
 
             mosaic_photfile = fix_phot(mosaic_name)
             _ = update_refcat(
@@ -388,15 +402,17 @@ def run_visit_alignment(
                 align_pgon=align_polygon,
             )
 
-            print(f'Mosaic photfile: {mosaic_photfile}')
+            logger.info('Mosaic photfile: %s', mosaic_photfile)
             for _filt, filt_table in filter_table.items():
-                align_to_mosaic(
-                    mosaic_photfile,
-                    [row['image'] for row in filt_table],
-                    os.path.join(work_dir, 'jhat'),
-                    guess_offset=guess_offset,
-                    verbose=verbose,
-                    ncores=ncores,
+                n_failures += int(
+                    align_to_mosaic(
+                        mosaic_photfile,
+                        [row['image'] for row in filt_table],
+                        os.path.join(work_dir, 'jhat'),
+                        guess_offset=guess_offset,
+                        verbose=verbose,
+                        ncores=ncores,
+                    )
                 )
 
             if align_polygon is None:
@@ -407,7 +423,7 @@ def run_visit_alignment(
                 )
 
             visit_geoms.pop(visit_id)
-    return 0
+    return 1 if n_failures else 0
 
 
 def run_reference_alignment(args: argparse.Namespace) -> int:
@@ -469,16 +485,13 @@ def run_reference_alignment(args: argparse.Namespace) -> int:
     summary_path = data_dir / f'{label}_alignment_summary.txt'
 
     if args.verbose:
-        print(f'Dataset: {label}')
-        print(f'Mode: reference')
-        print(f'Instrument: {args.instrument}')
-        print(f'Data dir: {data_dir}')
+        logger.info('Dataset: %s', label)
+        logger.info('Mode: reference')
+        logger.info('Instrument: %s', args.instrument)
+        logger.info('Data dir: %s', data_dir)
 
     if args.overlap_only and args.align_only:
-        print(
-            'ERROR: choose at most one of --overlap-only / --align-only',
-            file=sys.stderr,
-        )
+        logger.error('choose at most one of --overlap-only / --align-only')
         return 2
 
     try:
@@ -488,9 +501,9 @@ def run_reference_alignment(args: argparse.Namespace) -> int:
                 json_path = data_dir / 'overlap' / 'overlap_summary.json'
             json_path = Path(json_path).expanduser().resolve()
             if not json_path.is_file():
-                print(f'ERROR: overlap JSON not found: {json_path}', file=sys.stderr)
+                logger.error('overlap JSON not found: %s', json_path)
                 return 1
-            print(f'Loading overlaps from {json_path}')
+            logger.info('Loading overlaps from %s', json_path)
             payload = json.loads(json_path.read_text())
             frames = payload['frames']
             filters = parse_filters_arg(args.filters)
@@ -504,9 +517,10 @@ def run_reference_alignment(args: argparse.Namespace) -> int:
                     )
                     in wanted
                 ]
-                print(
-                    f'Filter restriction {", ".join(filters)}: '
-                    f'{len(frames)} frame(s) from overlap JSON'
+                logger.info(
+                    'Filter restriction %s: %d frame(s) from overlap JSON',
+                    ', '.join(filters),
+                    len(frames),
                 )
             if args.limit is not None:
                 frames = frames[: args.limit]
@@ -542,16 +556,16 @@ def run_reference_alignment(args: argparse.Namespace) -> int:
             repo=args.repo,
         )
     except Exception as exc:
-        print(f'ERROR: {exc}', file=sys.stderr)
+        logger.error('%s', exc)
         if getattr(args, 'verbose', False):
-            traceback.print_exc()
+            logger.debug('reference alignment traceback', exc_info=True)
         if summary_rows:
             summary_path = write_alignment_summary(summary_rows, summary_path)
-            print(f'Alignment summary: {summary_path}')
+            logger.info('Alignment summary: %s', summary_path)
         return 1
 
     summary_path = write_alignment_summary(summary_rows, summary_path)
-    print(f'Alignment summary: {summary_path}')
+    logger.info('Alignment summary: %s', summary_path)
 
     return 1 if failures else 0
 
@@ -571,30 +585,34 @@ def main(argv=None) -> int:
     parser = create_parser(default_data_dir)
     args = parser.parse_args(argv)
     sync_legacy_ncores(args)
+    configure_logging_from_args(args, 'align')
     try:
-        args.mode = _resolve_mode(args)
-    except ValueError as exc:
-        print(f'ERROR: {exc}', file=sys.stderr)
-        return 2
-    args.instrument = _resolve_instrument(args.mode, args.instrument)
-
-    if args.mode == 'pair':
-        return run_pair_alignment(args)
-
-    if args.mode == 'visit':
-        base = args.base_dir if args.base_dir is not None else '.'
         try:
-            return run_visit_alignment(
-                base_dir=base,
-                instrument=args.instrument,
-                ncores=args.ncores,
-                verbose=args.verbose,
-            )
+            args.mode = _resolve_mode(args)
         except ValueError as exc:
-            print(f'ERROR: {exc}', file=sys.stderr)
-            return 1
+            logger.error('%s', exc)
+            return 2
+        args.instrument = _resolve_instrument(args.mode, args.instrument)
 
-    return run_reference_alignment(args)
+        if args.mode == 'pair':
+            return run_pair_alignment(args)
+
+        if args.mode == 'visit':
+            base = args.base_dir if args.base_dir is not None else '.'
+            try:
+                return run_visit_alignment(
+                    base_dir=base,
+                    instrument=args.instrument,
+                    ncores=args.ncores,
+                    verbose=args.verbose,
+                )
+            except ValueError as exc:
+                logger.error('%s', exc)
+                return 1
+
+        return run_reference_alignment(args)
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':
