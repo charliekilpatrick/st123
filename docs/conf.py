@@ -1,0 +1,132 @@
+# -*- coding: utf-8 -*-
+# st123 documentation configuration (Sphinx + Read the Docs theme).
+#
+# This file is execfile()d with the current directory set to its containing dir.
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+
+# Package import path (repo root)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+try:
+    from st123 import __version__ as st123_version
+except Exception:
+    try:
+        from importlib.metadata import version
+
+        st123_version = version('st123')
+    except Exception:
+        st123_version = '0.0.0+unknown'
+
+# -- General ---------------------------------------------------------------
+
+extensions = [
+    'myst_parser',
+    'sphinx.ext.autodoc',
+    'sphinx.ext.autosummary',
+    'sphinx.ext.doctest',
+    'sphinx.ext.intersphinx',
+    'sphinx.ext.mathjax',
+    'sphinx.ext.viewcode',
+    'numpydoc',
+]
+
+autosummary_generate = True
+autosummary_imported_members = False
+
+# numpydoc extension
+numpydoc_show_class_members = False
+numpydoc_use_blockquotes = True
+numpydoc_use_plots = False
+
+try:
+    from numpydoc import docscrape_sphinx
+
+    parts = re.split(r'[\(\)|]', docscrape_sphinx.IMPORT_MATPLOTLIB_RE)[1:-1]
+except Exception:
+    pass
+else:
+    parts.extend(('fig.show()', 'plot.show()'))
+    docscrape_sphinx.IMPORT_MATPLOTLIB_RE = r'\b({})\b'.format('|'.join(parts))
+
+templates_path = ['_templates']
+# MyST-Parser registers the ``myst`` source type for ``.md`` (see MyST docs).
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'myst',
+}
+
+master_doc = 'index'
+project = 'st123'
+copyright = '2025–2026, C. D. Kilpatrick & A. Suresh'
+author = 'C. D. Kilpatrick & A. Suresh'
+version = '.'.join(st123_version.split('.')[:2]) if st123_version else '0.0'
+release = st123_version
+
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'build']
+
+pygments_style = 'sphinx'
+todo_include_todos = False
+
+# Autodoc: avoid importing optional heavy stacks when building on minimal envs
+autodoc_mock_imports = [
+    'astroquery',
+    'astroquery.mast',
+    'astroquery.vizier',
+    'astroscrappy',
+    'ccdproc',
+    'drizzlepac',
+    'gwcs',
+    'jhat',
+    'jwst',
+    'jwst.associations',
+    'jwst.datamodels',
+    'jwst.pipeline',
+    'photutils',
+    'photutils.detection',
+    'photutils.psf',
+    'photutils.psf.matching',
+    'reproject',
+    'reproject.mosaicking',
+    'shapely',
+    'shapely.ops',
+    'stpsf',
+    'stwcs',
+    'tqdm',
+]
+
+# -- HTML ------------------------------------------------------------------
+
+html_theme = 'sphinx_rtd_theme'
+html_static_path = ['_static']
+html_title = f'st123 {release}'
+htmlhelp_basename = 'st123doc'
+
+# -- myst-parser -----------------------------------------------------------
+
+myst_enable_extensions = [
+    'colon_fence',
+    'deflist',
+    'dollarmath',
+    'substitution',
+]
+
+# -- Intersphinx -----------------------------------------------------------
+
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'numpy': ('https://numpy.org/doc/stable/', None),
+    'astropy': ('https://docs.astropy.org/en/stable/', None),
+}
+
+# -- LaTeX / manual (optional) ----------------------------------------------
+
+latex_documents = [
+    (master_doc, 'st123.tex', 'st123 Documentation', author, 'manual'),
+]
+
+man_pages = [(master_doc, 'st123', 'st123 Documentation', [author], 1)]

@@ -1,4 +1,4 @@
-"""Tests for relative-align script helpers and entry point."""
+"""Tests for relative-alignment library helpers and align pair-mode CLI."""
 
 from __future__ import annotations
 
@@ -10,35 +10,42 @@ from astropy.io import fits
 from astropy.table import Table
 
 from helpers import make_wcs_header
-from st123.scripts import relative_align as rel
+from st123.alignment import align as align_lib
+from st123.scripts import align as align_script
+from st123.scripts.utils.options import add_pair_align_args, create_parser as build_parser
 
 
 def test_phot_catalog_path_and_resolve_outdir(tmp_path: Path):
-    assert rel.phot_catalog_path('/a/b/c_i2d.fits', str(tmp_path)).endswith('c_i2d.phot.txt')
-    out = rel.resolve_outdir(str(tmp_path / 'align_out'))
+    assert align_lib.phot_catalog_path('/a/b/c_i2d.fits', str(tmp_path)).endswith('c_i2d.phot.txt')
+    out = align_lib.resolve_outdir(str(tmp_path / 'align_out'))
     assert Path(out).is_dir()
+
+
+def test_reference_align_job_alias():
+    """Historical NIRCam worker name remains an alias of the REFERENCE worker."""
+    assert align_lib.run_nircam_align_job is align_lib.run_reference_align_job
 
 
 def test_has_jwst_gwcs(tmp_path: Path):
     plain = tmp_path / 'plain.fits'
     fits.PrimaryHDU(np.ones((10, 10))).writeto(plain)
-    assert rel.has_jwst_gwcs(str(plain)) is False
+    assert align_lib.has_jwst_gwcs(str(plain)) is False
 
     with_asdf = tmp_path / 'with_asdf.fits'
     fits.HDUList(
         [fits.PrimaryHDU(), fits.ImageHDU(name='ASDF')]
     ).writeto(with_asdf)
-    assert rel.has_jwst_gwcs(str(with_asdf)) is True
+    assert align_lib.has_jwst_gwcs(str(with_asdf)) is True
 
 
 def test_write_jhat_phot_table_and_stage(tmp_path: Path):
     table = Table({'ra': [1.0], 'dec': [2.0], 'mag': [20.0], 'dmag': [0.1]})
     phot = tmp_path / 'cat.phot.txt'
-    written = rel.write_jhat_phot_table(table, str(phot))
+    written = align_lib.write_jhat_phot_table(table, str(phot))
     assert Path(written).is_file()
     outdir = tmp_path / 'out'
     outdir.mkdir()
-    staged = rel.stage_photfile(written, str(outdir))
+    staged = align_lib.stage_photfile(written, str(outdir))
     assert Path(staged).is_file()
 
 
@@ -49,35 +56,74 @@ def test_load_sci_data_wcs(tmp_path: Path):
     fits.HDUList(
         [fits.PrimaryHDU(), fits.ImageHDU(data=data, header=header, name='SCI')]
     ).writeto(path)
-    arr, wcs = rel.load_sci_data_wcs(str(path))
+    arr, wcs = align_lib.load_sci_data_wcs(str(path))
     assert arr.shape == (20, 20)
     assert wcs.wcs.crval[0] == 150.0
 
 
-def test_relative_align_main_missing_file(tmp_path: Path):
-    rc = rel.main(
-        ['--ref', str(tmp_path / 'missing.fits'), '--align', str(tmp_path / 'also.fits')]
+def test_add_pair_align_args_on_options_api():
+    parser = build_parser('pair opts')
+    add_pair_align_args(parser)
+    args = parser.parse_args(
+        ['--ref', 'r.fits', '--image', 'a.fits', '--photfile', 'c.phot.txt']
+    )
+    assert args.ref == 'r.fits'
+    assert args.image == 'a.fits'
+    assert args.photfile == 'c.phot.txt'
+
+
+def test_align_pair_parser():
+    parser = align_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--ref',
+            'r.fits',
+            '--image',
+            'a.fits',
+            '--photfile',
+            'c.phot.txt',
+            '--nbright',
+            '100',
+            '--outdir',
+            '/tmp/out',
+        ]
+    )
+    assert args.ref == 'r.fits'
+    assert args.image == 'a.fits'
+    assert args.photfile == 'c.phot.txt'
+    assert args.nbright == 100
+    assert args.base_dir == '/tmp/out'
+    assert args.mode == 'visit'  # auto-resolved to pair in main()
+
+
+def test_align_pair_main_missing_file(tmp_path: Path):
+    rc = align_script.main(
+        ['--ref', str(tmp_path / 'missing.fits'), '--image', str(tmp_path / 'also.fits')]
     )
     assert rc == 1
 
 
-def test_relative_align_main_success(tmp_path: Path):
+def test_align_pair_main_success(tmp_path: Path):
     ref = tmp_path / 'ref.fits'
-    align = tmp_path / 'align.fits'
+    image = tmp_path / 'sci.fits'
     fits.PrimaryHDU(np.ones((5, 5))).writeto(ref)
-    fits.PrimaryHDU(np.ones((5, 5))).writeto(align)
+    fits.PrimaryHDU(np.ones((5, 5))).writeto(image)
     with patch(
-        'st123.alignment.relative_align.run_alignment',
+        'st123.alignment.align.run_alignment',
         return_value=((0.1, -0.2), str(tmp_path / 'out')),
     ):
-        rc = rel.main(
-            ['--ref', str(ref), '--align', str(align), '--outdir', str(tmp_path / 'out')]
+        rc = align_script.main(
+            [
+                '--ref',
+                str(ref),
+                '--image',
+                str(image),
+                '--outdir',
+                str(tmp_path / 'out'),
+            ]
         )
     assert rc == 0
 
-
-def test_relative_align_parser():
-    parser = rel.create_parser()
-    args = parser.parse_args(['--ref', 'r.fits', '--align', 'a.fits', '--nbright', '100'])
-    assert args.nbright == 100
-    assert args.plot is False
+def test_align_pair_mode_requires_both_paths():
+    rc = align_script.main(['--mode', 'pair', '--ref', 'only_ref.fits'])
+    assert rc == 2

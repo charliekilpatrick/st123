@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from astropy.table import Table
 
 from st123.mast import (
+    filter_jwst_observations_by_stage,
     filter_jwst_products,
     is_hst_science_product,
     mast_login,
+    observation_matches_calib_stage,
     parse_s_region,
     resolve_mast_token,
 )
+from st123.mast.mast import download_jwst_observations
 
 
 def test_filter_jwst_products_stage2_and_3():
@@ -33,6 +38,67 @@ def test_filter_jwst_products_stage2_and_3():
     assert stage3[0]['productFilename'] == 'b_i2d.fits'
     with pytest.raises(ValueError):
         filter_jwst_products(products, stage=9)
+
+
+def test_observation_matches_calib_stage():
+    assert observation_matches_calib_stage(3, 2) is True
+    assert observation_matches_calib_stage(2, 2) is True
+    assert observation_matches_calib_stage(1, 2) is False
+    assert observation_matches_calib_stage(-1, 2) is False
+    assert observation_matches_calib_stage(2, 3) is False
+    # Unknown levels: keep and attempt download
+    assert observation_matches_calib_stage(None, 2) is True
+    assert observation_matches_calib_stage('x', 2) is True
+
+
+def test_filter_jwst_observations_by_stage():
+    obs = Table(
+        {
+            'obsid': [1, 2, 3, 4],
+            'calib_level': [-1, 1, 2, 3],
+            'filters': ['F770W', 'F770W', 'F770W', 'F770W'],
+        }
+    )
+    stage2 = filter_jwst_observations_by_stage(obs, stage=2)
+    assert list(stage2['obsid']) == [3, 4]
+    stage3 = filter_jwst_observations_by_stage(obs, stage=3)
+    assert list(stage3['obsid']) == [4]
+
+
+def test_download_skips_unavailable_calib_level_silently(caplog):
+    obs = Table(
+        {
+            'obsid': [253894283, 213233923],
+            'filters': ['F2100W', 'F2100W'],
+            'calib_level': [-1, 3],
+            'obs_collection': ['JWST', 'JWST'],
+            'instrument_name': ['MIRI/IMAGE', 'MIRI/IMAGE'],
+        }
+    )
+    products = Table(
+        {
+            'productType': ['SCIENCE'],
+            'productSubGroupDescription': ['CAL'],
+            'calib_level': [2],
+            'productFilename': ['jw_ok_cal.fits'],
+        }
+    )
+    with (
+        caplog.at_level(logging.INFO, logger='st123.mast'),
+        patch('st123.mast.mast.Observations.get_product_list', return_value=products),
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+    ):
+        n = download_jwst_observations(
+            obs, outdir='/tmp/st123_dl_test', stage=2, dry_run=True
+        )
+    assert n == 1
+    mock_dl.assert_not_called()
+    text = caplog.text
+    assert '253894283' not in text
+    assert 'no stage-2 science products' not in text
+    assert 'Skipping 1 observation' in text
+    assert '213233923' in text or 'F2100W' in text
 
 
 def test_is_hst_science_product():
@@ -63,3 +129,31 @@ def test_mast_login_success(monkeypatch):
 
 def test_resolve_mast_token_explicit():
     assert resolve_mast_token('x') == 'x'
+
+
+def test_normalize_filter_and_path_helpers():
+    from st123.mast.mast import (
+        normalize_filter_name,
+        normalize_instrument_dirname,
+        normalize_telescope_dirname,
+        observation_download_subdir,
+    )
+
+    assert normalize_filter_name('F560W;CLEAR') == 'F560W'
+    assert normalize_filter_name('f200w') == 'F200W'
+    assert normalize_filter_name('') == 'UNKNOWN'
+    assert normalize_filter_name('???') == '_'
+
+    assert normalize_telescope_dirname('JWST') == 'JWST'
+    assert normalize_telescope_dirname('HST') == 'HST'
+    assert normalize_telescope_dirname('Roman') == 'Roman'
+    assert normalize_telescope_dirname('Euclid') == 'Euclid'
+
+    assert normalize_instrument_dirname('NIRCAM/IMAGE') == 'NIRCam'
+    assert normalize_instrument_dirname('MIRI') == 'MIRI'
+    assert normalize_instrument_dirname('WFC3/UVIS') == 'WFC3'
+
+    sub = observation_download_subdir('F200W', '12345', telescope='JWST')
+    assert 'JWST' in Path(sub).parts or 'JWST' in str(sub)
+    assert 'F200W' in str(sub)
+    assert '12345' in str(sub)

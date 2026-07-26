@@ -63,13 +63,13 @@ def test_image_overlap_script_main(tmp_path: Path):
     science_path = write_illuminated_fits(tmp_path / 'science.fits')
     ref_path = write_ref_with_s_region(tmp_path / 'ref_i2d.fits')
     rc = overlap_script.main(
-        ['--miri', str(science_path), '--ref', str(ref_path)]
+        ['--image', str(science_path), '--ref', str(ref_path)]
     )
     assert rc == 0
 
 
 def test_image_overlap_parser():
     parser = overlap_script.create_parser()
-    args = parser.parse_args(['--miri', 'a.fits', '--ref', 'b.fits', 'c.fits'])
-    assert args.miri == ['a.fits']
+    args = parser.parse_args(['--image', 'a.fits', '--ref', 'b.fits', 'c.fits'])
+    assert args.image == ['a.fits']
     assert args.ref == ['b.fits', 'c.fits']

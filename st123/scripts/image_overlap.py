@@ -3,23 +3,32 @@
 
 from __future__ import annotations
 
-import argparse
+import logging
 
 from st123.mosaic.image_overlap import find_best_refs
+from st123.scripts.utils.options import (
+    add_common_runtime,
+    add_image_arg,
+    configure_logging_from_args,
+    create_parser as build_parser,
+)
+from st123.utils.logging import shutdown_logging
+
+logger = logging.getLogger(__name__)
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def create_parser():
+    parser = build_parser(
         description=(
             'Find the reference image with maximum footprint overlap '
             'for each science frame (e.g. MIRI cal products).'
         )
     )
-    parser.add_argument(
-        '--miri',
+    add_image_arg(
+        parser,
         nargs='+',
         required=True,
-        help='Science *_cal.fits image(s) to score for overlap (historically MIRI).',
+        help='Science *_cal.fits image(s) to score for overlap.',
     )
     parser.add_argument(
         '--ref',
@@ -31,26 +40,30 @@ def create_parser() -> argparse.ArgumentParser:
         '--outfile',
         type=str,
         default=None,
-        help='Optional text file for summary lines (default: print only).',
+        help='Optional text file for summary lines (default: log only).',
     )
+    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
-    science_images = list(args.miri)
-    refs = list(args.ref)
+    configure_logging_from_args(args, 'image-overlap')
+    try:
+        science_images = list(args.image)
+        refs = list(args.ref)
 
-    print(f'Science images ({len(science_images)}):')
-    for path in science_images:
-        print(f'  {path}')
-    print(f'Reference images ({len(refs)}):')
-    for path in refs:
-        print(f'  {path}')
-    print()
+        logger.info('Science images (%d):', len(science_images))
+        for path in science_images:
+            logger.info('  %s', path)
+        logger.info('Reference images (%d):', len(refs))
+        for path in refs:
+            logger.info('  %s', path)
 
-    find_best_refs(science_images, refs, outfile=args.outfile)
-    return 0
+        find_best_refs(science_images, refs, outfile=args.outfile)
+        return 0
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':

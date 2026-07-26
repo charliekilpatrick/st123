@@ -1,4 +1,4 @@
-"""Unit tests for ``st123.utils`` (helpers, settings, link, constants)."""
+"""Unit tests for ``st123.utils`` (helpers, settings, link)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.table import Table
 
-from helpers import make_wcs_header, write_illuminated_fits
+from helpers import make_wcs_header
 from st123 import utils as utils_pkg
-from st123.utils import constants, helpers, link, settings
+from st123.utils import helpers, link, settings
 
 
 def _write_jwst_cal(
@@ -48,16 +48,6 @@ def _write_jwst_cal(
         ]
     ).writeto(path, overwrite=True)
     return path
-
-
-# --- constants ----------------------------------------------------------------
-
-
-def test_constants_ansi_strings():
-    assert constants.green.startswith('\033')
-    assert constants.red.startswith('\033')
-    assert constants.end == '\033[0;0m'
-    assert utils_pkg.green == constants.green
 
 
 # --- settings -----------------------------------------------------------------
@@ -116,13 +106,6 @@ def test_is_number_and_parse_coord():
     assert isinstance(c2, SkyCoord)
 
     assert helpers.parse_coord('not-a-coord', 'also-bad') is None
-
-
-def test_make_banner_prints(capsys):
-    helpers.make_banner('hello-utils')
-    out = capsys.readouterr().out
-    assert 'hello-utils' in out
-    assert '#' * 10 in out
 
 
 # --- helpers: FITS metadata ---------------------------------------------------
@@ -221,3 +204,53 @@ def test_package_reexports():
     assert callable(utils_pkg.create_symlink)
     assert isinstance(utils_pkg.strict_jwst_params, dict)
     assert 'F606W' in utils_pkg.acceptable_filters
+    # Expanded multi-mission filter catalog lives in settings
+    assert 'F200W' in utils_pkg.acceptable_filters  # JWST/NIRCam
+    assert 'F770W' in utils_pkg.acceptable_filters  # JWST/MIRI
+    assert 'F062' in utils_pkg.acceptable_filters  # Roman/WFI
+    assert 'VIS' in utils_pkg.acceptable_filters  # Euclid
+    assert utils_pkg.FILTERS_BY_INSTRUMENT['NIRCAM']['telescope'] == 'JWST'
+    assert utils_pkg.FILTERS_BY_INSTRUMENT['WFI']['telescope'] == 'Roman'
+    assert 'f606w' in utils_pkg.BEST_REFERENCE_FILTERS
+
+
+def test_pick_deepest_images_prefers_best_filter(tmp_path: Path):
+    """Prefer a ``BEST_REFERENCE_FILTERS`` band over a non-preferred band."""
+    preferred = _write_jwst_cal(
+        tmp_path / 'a_nrca1_cal.fits',
+        filt='F606W',
+        exptime=100.0,
+    )
+    other = _write_jwst_cal(
+        tmp_path / 'b_nrca1_cal.fits',
+        filt='F200W',  # not in BEST_REFERENCE_FILTERS
+        exptime=1000.0,
+    )
+    chosen = helpers.pick_deepest_images([str(preferred), str(other)])
+    assert chosen == [str(preferred)]
+
+
+def test_pick_deepest_images_reffilter_override(tmp_path: Path):
+    a = _write_jwst_cal(tmp_path / 'a_nrca1_cal.fits', filt='F606W', exptime=50.0)
+    b = _write_jwst_cal(tmp_path / 'b_nrca1_cal.fits', filt='F200W', exptime=500.0)
+    chosen = helpers.pick_deepest_images(
+        [str(a), str(b)],
+        reffilter='F200W',
+    )
+    assert chosen == [str(b)]
+
+
+def test_organize_visit_tables_byvisit():
+    table = Table(
+        {
+            'visit': [1, 1, 2],
+            'image': ['a.fits', 'b.fits', 'c.fits'],
+        }
+    )
+    single = helpers.organize_visit_tables(table, byvisit=False)
+    assert len(single) == 1
+    assert len(single[0]) == 3
+
+    split = helpers.organize_visit_tables(table, byvisit=True)
+    assert len(split) == 2
+    assert sorted(len(t) for t in split) == [1, 2]

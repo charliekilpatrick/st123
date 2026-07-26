@@ -1,48 +1,68 @@
-import glob, os
+"""Symlink helpers for reduction ``raw/`` trees."""
+
+from __future__ import annotations
+
+import glob
+import logging
+import os
+from typing import Sequence
+
+logger = logging.getLogger(__name__)
 
 
-def create_symlink(src, dst):
-    '''
-    Create a symlink from src to dst
+def create_symlink(src: str, dst: str) -> None:
+    """
+    Create a symlink from ``src`` to ``dst``.
 
-    Parameters:
+    Creates the destination parent directory when needed. If ``dst`` already
+    exists as a file or symlink, it is replaced; if it exists as a non-link
+    path that is still present, a warning is logged and no link is created.
+
+    Parameters
     ----------
     src : str
-        source file
+        Absolute or relative path to the source file.
     dst : str
-        destination file
+        Absolute or relative path of the symlink to create.
 
-    Returns:
+    Returns
     -------
     None
-    '''
+    """
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     if not os.path.exists(dst):
         try:
             os.symlink(src, dst)
-        except:
+        except FileExistsError:
             os.unlink(dst)
             os.symlink(src, dst)
     else:
-        print(f'{dst} already exists')
+        logger.warning('%s already exists', dst)
 
-def remove_proc_files(files, dir):
+
+def remove_proc_files(files: Sequence[str], proc_dir: str) -> list[str]:
     """
-    Remove files that have already been processed in dir
+    Drop science files that already appear under ``proc_dir/raw/``.
 
-    Parameters:
+    Comparison uses resolved real paths so symlinks into the reduction tree
+    match their source FITS files.
+
+    Parameters
     ----------
-    files : list
-        list of all files in the data directory
-    dir : str
-        directory where some files have already been processed
+    files : sequence of str
+        Candidate FITS paths (typically under a JWST download tree).
+    proc_dir : str
+        Reduction directory that may contain ``raw/*.fits`` symlinks or copies
+        of already-staged frames.
 
-    Returns:
+    Returns
     -------
-    new_files : list
-        list of files that have not been processed
+    list of str
+        Members of ``files`` that are not already present under
+        ``proc_dir/raw/``.
     """
-    proc_files = glob.glob(os.path.join(dir, 'raw', '*.fits'), recursive = True)
+    proc_files = glob.glob(os.path.join(proc_dir, 'raw', '*.fits'), recursive=True)
     proc_files = [os.path.realpath(i) for i in proc_files]
-    new_files = list(set(files) - set(proc_files))
-
-    return new_files
+    return list(set(files) - set(proc_files))

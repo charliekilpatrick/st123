@@ -1,4 +1,4 @@
-"""Tests for illuminated-s-region library API and script entry point."""
+"""Tests for illuminated S_REGION library API and region CLI."""
 
 from __future__ import annotations
 

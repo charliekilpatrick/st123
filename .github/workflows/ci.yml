@@ -51,9 +51,7 @@ jobs:
           mosaic --help
           link-raw --help
           image-overlap --help
-          illuminated-s-region --help
-          relative-align --help
-          apply-gwcs --help
+          region --help
           catalog --help
 
       - name: Run unit tests

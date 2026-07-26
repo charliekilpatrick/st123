@@ -5,8 +5,7 @@ Submodules
 ----------
 - :mod:`st123.mosaic.region` — illuminated footprints and ``S_REGION`` polygons
 - :mod:`st123.mosaic.image_overlap` — science vs reference footprint overlap
-- :mod:`st123.mosaic.mosaic` — overlap splitting, PSF matching, coadds, GWCS,
-  DOLPHOT prep
+- :mod:`st123.mosaic.mosaic` — overlap splitting, PSF matching, coadds, GWCS
 
 Heavy symbols from :mod:`st123.mosaic.mosaic` are resolved lazily so importing
 footprint helpers does not require optional stack packages (``ccdproc``, etc.).
@@ -49,10 +48,8 @@ from st123.mosaic.region import (
 
 _MOSAIC_LAZY = frozenset(
     {
-        'apply_nircammask',
         'apply_wcs_to_coadd',
         'assign_gwcs',
-        'calc_sky',
         'coadd',
         'convolve_images',
         'copy_files',
@@ -66,10 +63,10 @@ _MOSAIC_LAZY = frozenset(
         'find_optimal_wcs',
         'get_pgons',
         'mp_init',
-        'setup_paramfile',
         'split_observations',
         'update_path',
         'update_photmjsr',
+        'write_dolphot_frame_list',
     }
 )
 
@@ -80,11 +77,9 @@ __all__ = [
     'OverlapResult',
     'SRegionPolygon',
     'ScienceFootprint',
-    'apply_nircammask',
     'apply_wcs_to_coadd',
     'assign_gwcs',
     'auto_bridge_pixels',
-    'calc_sky',
     'coadd',
     'compute_cumulative_overlap_fraction',
     'compute_overlap',
@@ -117,10 +112,10 @@ __all__ = [
     'polygon_area',
     'save_illuminated_region_plot',
     'select_right_illuminated_component',
-    'setup_paramfile',
     'split_observations',
     'update_path',
     'update_photmjsr',
+    'write_dolphot_frame_list',
 ]
 
 
