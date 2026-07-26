@@ -165,6 +165,50 @@ def filter_jwst_observations(
     return out
 
 
+def observation_matches_calib_stage(calib_level: object, stage: int) -> bool:
+    """
+    Return True if an observation's MAST ``calib_level`` can satisfy ``stage``.
+
+    MAST uses ``calib_level=-1`` (or missing) when no calibrated products exist
+    yet — e.g. APT placeholders or unexecuted visits. Observations that only
+    reach a lower level than requested are also not relevant for download.
+    Unknown / unparseable levels are treated as potentially relevant so we do
+    not silently drop rows that might still have products.
+    """
+    if calib_level is None:
+        return True
+    try:
+        if np.ma.is_masked(calib_level):
+            return True
+    except Exception:
+        pass
+    try:
+        level = int(calib_level)
+    except (TypeError, ValueError):
+        return True
+    if level < 0:
+        return False
+    return level >= int(stage)
+
+
+def filter_jwst_observations_by_stage(obs_table: Table, stage: int) -> Table:
+    """
+    Keep JWST observations expected to have products at ``stage`` or higher.
+
+    Rows with ``calib_level=-1`` or otherwise below ``stage`` are dropped so
+    download does not report attempts on programs with no matching products.
+    """
+    if obs_table is None or len(obs_table) == 0:
+        return obs_table
+    if 'calib_level' not in obs_table.colnames:
+        return obs_table
+    keep = [
+        observation_matches_calib_stage(level, stage)
+        for level in obs_table['calib_level']
+    ]
+    return obs_table[keep]
+
+
 def query_hst(
     coord: SkyCoord,
     radius: Optional[u.Quantity] = None,
@@ -351,7 +395,7 @@ def observation_download_subdir(
     ``telescope/instrument/filter/obsid`` (default / preferred)
         ``JWST/MIRI/F560W/<obsid>``
     ``filter/obsid``
-        ``<FILTER>/<obsid>`` (older alignment_wrap layout)
+        ``<FILTER>/<obsid>`` (older download layout)
     ``filter_obsid``
         ``<FILTER>_<obsid>`` (legacy flat name)
     """
@@ -417,6 +461,25 @@ def download_jwst_observations(
         print('ERROR: observation table is empty. Cannot download files.')
         return 0
 
+    n_before = len(obs_table)
+    obs_table = filter_jwst_observations_by_stage(obs_table, stage)
+    n_skipped = n_before - len(obs_table)
+    if n_skipped:
+        # Observations with calib_level=-1 / below the requested stage are not
+        # expected to have matching products (e.g. APT placeholders). Skip
+        # silently aside from a one-line tally — do not per-obs "tried".
+        print(
+            f'Skipping {n_skipped} observation(s) with no '
+            f'calib_level>={stage} products available'
+        )
+
+    if len(obs_table) == 0:
+        print(
+            f'ERROR: no observations with calib_level>={stage}. '
+            'Cannot download files.'
+        )
+        return 0
+
     os.makedirs(outdir, exist_ok=True)
     n_obs = len(obs_table)
     n_downloaded = 0
@@ -448,6 +511,7 @@ def download_jwst_observations(
             print(f'WARNING: could not get products for obsid={obsid}: {exc}')
             continue
         if len(product_list) == 0:
+            # Only reached for observations that looked stage-relevant.
             print(f'[{i}/{n_obs}] {subdir}: no stage-{stage} science products')
             continue
         download_dir = os.path.join(outdir, subdir)

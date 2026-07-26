@@ -1,15 +1,18 @@
 """
 Prepare JWST frames for DOLPHOT (mask + sky + parameter file).
 
-Mirrors the NIRCam workflow in :mod:`st123.mosaic.mosaic` and adds MIRI
-support following ``dolphotMIRI.pdf`` (mirimask, calcsky, FitSky=2 params).
+Independent of mosaicking: stage frames, write ``dolphot.param``, run
+``nircammask`` / ``mirimask`` and ``calcsky``. MIRI defaults follow
+``dolphotMIRI.pdf``.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, MutableMapping, Optional, Sequence, Union
 
@@ -29,10 +32,167 @@ from st123.utils.settings import (
 
 PathLike = Union[str, os.PathLike]
 
+_FRAME_LIST_NAME = 'dolphot_frames.txt'
+_GROUP_BOX_RE = re.compile(r'group_(\d+)/ref_(\d+)')
+
+
+@dataclass(frozen=True)
+class MosaicPhotJob:
+    """One mosaic box ready for DOLPHOT staging."""
+
+    group: int
+    box: int
+    refimage: Path
+    frames: tuple[Path, ...]
+    phot_outdir: Path
+    frame_list: Path
+
 
 def dolphot_bin_dir(dolphot_bin: Optional[PathLike] = None) -> Path:
     """Return the DOLPHOT ``bin`` directory (default: local 3.1 install)."""
     return Path(dolphot_bin or DEFAULT_DOLPHOT_BIN)
+
+
+def science_fits_paths(directory: PathLike) -> list[str]:
+    """
+    Return sorted ``*.fits`` paths under *directory*, excluding calcsky products.
+
+    ``*.sky.fits`` files must not be passed to ``nircammask`` / ``calcsky``.
+    """
+    root = Path(directory)
+    return sorted(
+        str(path)
+        for path in root.glob('*.fits')
+        if not path.name.endswith('.sky.fits')
+    )
+
+
+def parse_dolphot_frame_list(path: PathLike) -> tuple[Path, list[Path], int, int]:
+    """
+    Parse a ``dolphot_frames.txt`` manifest written by ``mosaic``.
+
+    Returns
+    -------
+    refimage, frames, group, box
+    """
+    path = Path(path)
+    text = path.read_text()
+    refimage: Path | None = None
+    frames: list[Path] = []
+    group, box = 0, 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('# group='):
+            # ``# group=0 box=1``
+            parts = stripped[1:].split()
+            for part in parts:
+                if part.startswith('group='):
+                    group = int(part.split('=', 1)[1])
+                elif part.startswith('box='):
+                    box = int(part.split('=', 1)[1])
+            continue
+        if stripped.startswith('# ref '):
+            refimage = Path(stripped[len('# ref ') :].strip())
+            continue
+        if stripped.startswith('#'):
+            continue
+        frames.append(Path(stripped))
+    if refimage is None:
+        raise ValueError(f'No ``# ref`` line in {path}')
+    if not frames:
+        raise ValueError(f'No frame paths in {path}')
+    # Infer group/box from parent path when header omitted.
+    if group == 0 and box == 0:
+        match = _GROUP_BOX_RE.search(path.as_posix())
+        if match:
+            group, box = int(match.group(1)), int(match.group(2))
+    return refimage, frames, group, box
+
+
+def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
+    """
+    Find mosaic boxes under ``<reduction>/reference/`` for DOLPHOT prep.
+
+    Prefers ``dolphot_frames.txt`` manifests. If a coadd exists without a
+    manifest, pairs it with all ``jhat/*jhat.fits`` under *reduction_dir*.
+    """
+    root = Path(reduction_dir)
+    jobs: list[MosaicPhotJob] = []
+    ref_root = root / 'reference'
+    if not ref_root.is_dir():
+        return jobs
+
+    manifests = sorted(ref_root.glob('group_*/ref_*/' + _FRAME_LIST_NAME))
+    if manifests:
+        for manifest in manifests:
+            refimage, frames, group, box = parse_dolphot_frame_list(manifest)
+            jobs.append(
+                MosaicPhotJob(
+                    group=group,
+                    box=box,
+                    refimage=refimage,
+                    frames=tuple(frames),
+                    phot_outdir=root / f'phot_{group}_{box}',
+                    frame_list=manifest,
+                )
+            )
+        return jobs
+
+    # Fallback: coadd present, no manifest (legacy mosaic run).
+    jhat = sorted((root / 'jhat').glob('*jhat.fits'))
+    for coadd in sorted(ref_root.glob('group_*/ref_*/coadd_*_i2d.fits')):
+        match = _GROUP_BOX_RE.search(coadd.as_posix())
+        group = int(match.group(1)) if match else 0
+        box = int(match.group(2)) if match else 0
+        if not jhat:
+            continue
+        jobs.append(
+            MosaicPhotJob(
+                group=group,
+                box=box,
+                refimage=coadd,
+                frames=tuple(jhat),
+                phot_outdir=root / f'phot_{group}_{box}',
+                frame_list=coadd.parent / _FRAME_LIST_NAME,
+            )
+        )
+    return jobs
+
+
+def prepare_mosaic_phot_job(
+    job: MosaicPhotJob,
+    *,
+    instrument: str = 'nircam',
+    dolphot_bin: Optional[PathLike] = None,
+    skip_mask: bool = False,
+    skip_sky: bool = False,
+    copy_files: bool = True,
+) -> Path:
+    """
+    Stage a mosaic box into ``phot_*``, write ``dolphot.param``, mask + sky.
+
+    Returns
+    -------
+    Path
+        Path to ``dolphot.param``.
+    """
+    param = setup_paramfile(
+        job.phot_outdir,
+        job.refimage,
+        list(job.frames),
+        copy_files=copy_files,
+    )
+    work = [Path(p) for p in science_fits_paths(job.phot_outdir)]
+    prepare_frames(
+        work,
+        instrument=instrument,
+        dolphot_bin=dolphot_bin,
+        skip_mask=skip_mask,
+        skip_sky=skip_sky,
+    )
+    return param
 
 
 def _prepend_bin_env(env: Optional[MutableMapping[str, str]], bin_dir: Path) -> dict:
@@ -111,11 +271,16 @@ def apply_nircammask(
     files: Sequence[PathLike],
     *,
     dolphot_bin: Optional[PathLike] = None,
-    etctime: bool = True,
+    estnoise: bool = False,
+    noetctime: bool = False,
     check: bool = True,
 ) -> None:
     """
     Run ``nircammask`` on *files* (in-place), matching the mosaic NIRCam prep.
+
+    Current ``nircammask`` options (DOLPHOT NIRCam):
+    ``-estnoise``, ``-noetctime``. ETC exposure time is the default; there is
+    no ``-etctime`` flag.
 
     Parameters
     ----------
@@ -123,16 +288,20 @@ def apply_nircammask(
         FITS paths to mask.
     dolphot_bin
         Directory containing ``nircammask``.
-    etctime
-        If True (default), pass ``-etctime`` as in the existing mosaic pipeline.
+    estnoise
+        If True, pass ``-estnoise`` (readout noise from ``VAR_RNOISE``).
+    noetctime
+        If True, pass ``-noetctime`` to use ``EFFEXPTM`` instead of ETC time.
     check
         Raise if the subprocess exits non-zero.
     """
     bin_dir = dolphot_bin_dir(dolphot_bin)
     cwd, names = _run_cwd_for_files(files)
     cmd = [str(bin_dir / 'nircammask')]
-    if etctime:
-        cmd.append('-etctime')
+    if estnoise:
+        cmd.append('-estnoise')
+    if noetctime:
+        cmd.append('-noetctime')
     cmd.extend(names)
     subprocess.run(
         cmd, check=check, env=_prepend_bin_env(None, bin_dir), cwd=cwd
@@ -305,8 +474,7 @@ def setup_paramfile(
     """
     Stage images into *phot_outdir* and write ``dolphot.param``.
 
-    Drop-in generalization of :func:`st123.mosaic.mosaic.setup_paramfile` that
-    also supports MIRI frames and an optional warm-start ``xytfile``.
+    Supports NIRCam and MIRI frames and an optional warm-start ``xytfile``.
     """
     outdir = Path(phot_outdir)
     outdir.mkdir(parents=True, exist_ok=True)

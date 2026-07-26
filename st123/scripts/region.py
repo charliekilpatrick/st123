@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,10 +12,14 @@ from st123.mosaic.region import (
     illuminated_s_region_from_fits,
     save_illuminated_region_plot,
 )
+from st123.scripts.utils.options import (
+    add_common_runtime,
+    create_parser as build_parser,
+)
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def create_parser():
+    parser = build_parser(
         description=(
             'Construct an S_REGION polygon for the right-hand illuminated '
             'portion of a FITS image and plot a verification figure.'
@@ -70,6 +73,7 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Display the plot interactively',
     )
+    add_common_runtime(parser, ncores=False, plot=True, verbose=True)
     return parser
 
 

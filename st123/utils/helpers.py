@@ -407,6 +407,11 @@ def input_list(input_images):
         if success:
             good.append(image)
     img = copy.copy(good)
+    if not img:
+        raise ValueError(
+            'No existing input images found. Check --base-dir points at the '
+            'dataset root (…/<object>) or reduction workdir containing jhat/.'
+        )
 
     hdu = fits.open(img[0])
     h = hdu[0].header

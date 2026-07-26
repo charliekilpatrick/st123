@@ -31,7 +31,7 @@ Package, module, and CLI names that previously used `jwst123` are renamed to
 | Path | Role |
 | --- | --- |
 | `st123/` | Installable package (library, scripts, and notebooks) |
-| `st123/scripts/` | Command-line entry points (required location for all `__main__` CLIs) |
+| `st123/scripts/` | Console-script entry points (`__main__` CLIs); helpers in `scripts/utils/` |
 | `st123/notebooks/` | Generic notebooks for download, alignment, and mosaics |
 | `extdeps/` | Vendored / customized external packages (see below) |
 | `extdeps/jhat/` | **Custom JHAT build for this repository** (not PyPI) |
@@ -42,17 +42,13 @@ Package, module, and CLI names that previously used `jwst123` are renamed to
 
 | Module | Role |
 | --- | --- |
-| `st123.alignment` | Alignment package (JHAT drivers, MIRI pipeline, calibrators) |
-| `st123.alignment.align` | JHAT / Gaia alignment and visit grouping |
-| `st123.alignment.relative_align` | Single-frame JHAT relative align + iterative refine |
-| `st123.alignment.alignment_wrap` | MIRI↔reference overlap + filter-wave orchestration |
-| `st123.alignment.alignment_fallback` | MIRI→MIRI parent ranking and provenance |
-| `st123.alignment.alignment_parallel` | Spawn-safe REFERENCE / MIRI_REL workers |
-| `st123.alignment.calibrators` | Per-filter JHAT/refine knobs and quality-hold thresholds |
-| `st123.mosaic` | Footprints, overlap, Level-3 mosaics / coadds / GWCS / DOLPHOT prep |
+| `st123.alignment` | Alignment package; re-exports the public surface of `align` |
+| `st123.alignment.align` | Single unified module: per-filter calibrators, MIRI→MIRI fallback ranking and provenance, JHAT / Gaia alignment and visit grouping, relative align + iterative refine, MIRI↔reference overlap discovery, spawn-safe REFERENCE / MIRI_REL workers, and filter-wave orchestration |
+| `st123.mosaic` | Footprints, overlap, Level-3 mosaics / coadds / GWCS |
 | `st123.mosaic.region` | Illuminated footprint / `S_REGION` from science+DQ |
 | `st123.mosaic.image_overlap` | Science vs reference footprint overlap |
-| `st123.mosaic.mosaic` | Overlap splitting, PSF matching, coadds, GWCS, DOLPHOT prep |
+| `st123.mosaic.mosaic` | Overlap splitting, PSF matching, coadds, GWCS |
+| `st123.photometry.dolphot_prep` | DOLPHOT staging (paramfile, nircammask/mirimask, calcsky) |
 | `st123.mast` | MAST query and download helpers (`mast`, `download` submodules) |
 | `st123.photometry` | Per-image / combined photometry catalog helpers |
 | `st123.photometry.catalog` | DOLPHOT column mapping and combined catalogs |
@@ -67,19 +63,19 @@ Package, module, and CLI names that previously used `jwst123` are renamed to
 | Script | Role |
 | --- | --- |
 | `st123/scripts/download.py` | Download JWST products from MAST |
-| `st123/scripts/align.py` | Group / visit JHAT alignment pipeline CLI |
-| `st123/scripts/relative_align.py` | Single-frame relative-align CLI |
-| `st123/scripts/alignment_wrap.py` | Full MIRI pipeline CLI (overlap → REFERENCE → MIRI_REL) |
-| `st123/scripts/mosaic.py` | Mosaic / coadd / DOLPHOT prep |
+| `st123/scripts/align.py` | Unified alignment CLI (`--mode visit|reference|pair`) |
+| `st123/scripts/mosaic.py` | Mosaic / coadd (writes `dolphot_frames.txt` for prep) |
+| `st123/scripts/dolphot_prep.py` | DOLPHOT prep (`--from-mosaic` or explicit files) |
 | `st123/scripts/link_raw.py` | Symlink FITS into a reduction `raw/` directory |
 | `st123/scripts/image_overlap.py` | Maximum-overlap reference selection |
 | `st123/scripts/region.py` | Illuminated `S_REGION` CLI |
-| `st123/scripts/apply_gwcs.py` | Attach GWCS to coadd datamodels |
 | `st123/scripts/catalog.py` | Combined photometry catalog CLI |
 
 All CLI entry points with a `__main__` block live under `st123/scripts/`
-(including `alignment_wrap.py` and `jwst_download.py`). See the local Cursor
-rule in `.cursor/` (untracked) and `tests/test_entry_point_convention.py`.
+(package root only) and are registered in `pyproject.toml`
+`[project.scripts]`. Shared CLI helpers (e.g. `scripts/utils/options.py`)
+are not entry points. See `tests/test_entry_point_convention.py` and the
+local (gitignored) `.cursor/rules/`.
 
 ### Notebooks
 
@@ -98,9 +94,11 @@ unmodified PyPI package (`jhat` on PyPI).
 
 Use this tree for all JHAT-backed alignment code in st123, including:
 
-- `st123.alignment.align` / `align_jwst_image` (`jhat_params`, soft-fail behavior)
-- `st123.alignment.relative_align` (master catalogs, iterative refine, F560W/F770W knobs)
-- `st123.alignment.alignment_wrap` (REFERENCE → MIRI_REL pipeline)
+- `align_jwst_image` (`jhat_params`, soft-fail behavior)
+- `run_alignment` (master catalogs, iterative refine, F560W/F770W knobs)
+- `align_from_frames` (REFERENCE → MIRI_REL pipeline)
+
+all in `st123.alignment.align`.
 
 `pip install -e .` (or `pip install -e ".[dev]"`) installs this tree
 automatically via the `jhat @ file:./extdeps/jhat` entry in
@@ -167,7 +165,7 @@ python -c "import jhat, st123; print(jhat.__version__, jhat.__file__); print(st1
 # jhat.__version__ should be 0.3.7+st123
 # st123.__version__ comes from git tags via setuptools-scm (see Versioning)
 download --help
-alignment-wrap --help
+align --help
 ```
 
 This install path was validated with Python 3.12
@@ -198,60 +196,49 @@ installed metadata pick up the new tag. Do not set `version` manually in
 
 ## Quick start
 
-### Download JWST data
+### Download MAST data
 
 ```bash
-python st123/scripts/download.py \
+download \
   --ra "10:38:47.961" --dec "+53:30:34.10" \
-  --obj NGC3310 \
-  --outdir /path/to/NGC3310
+  --base-dir /data/ckilpatrick/JWST/NGC3310
 ```
 
-MIRI-only download into the canonical
+The object name is the basename of `--base-dir` (here `NGC3310`). MIRI-only
+download into the canonical
 `<telescope>/<instrument>/<filter>/<obsid>/mastDownload/...` layout used by
-`alignment_wrap` (e.g. `JWST/MIRI/F560W/<obsid>/...`):
+`align --mode reference` (e.g. `JWST/MIRI/F560W/<obsid>/...`). Missing output
+directories are created automatically:
 
 ```bash
-python -m st123.scripts.jwst_download \
-  --ra 159.694014 --dec 53.502851 --obj NGC3310 \
-  --download-dir /data/rwisenbaker/jwst_data/NGC3310 \
-  --radius 3 --stage 2
-```
-
-or equivalently:
-
-```bash
-python -m st123.scripts.download \
-  --ra 159.694014 --dec 53.502851 --obj NGC3310 \
-  --download-dir /data/rwisenbaker/jwst_data/NGC3310 \
-  --radius 3 --stage 2 --instruments MIRI \
-  --layout telescope/instrument/filter/obsid
-# after pip install -e .:  jwst-download ...   or   download ...
+download \
+  --ra 159.694014 --dec 53.502851 \
+  --base-dir /data/ckilpatrick/JWST/NGC3310 \
+  --radius 3 --stage 2 --instruments MIRI
 ```
 
 ### MIRI ↔ NIRCam alignment pipeline
 
 With MIRI cals under
-`--data-dir/JWST/MIRI/<FILTER>/<obsid>/mastDownload/...` and NIRCam
-coadds under `--data-dir/reference/`:
+`--base-dir/JWST/MIRI/<FILTER>/<obsid>/mastDownload/...` and NIRCam
+coadds under `--base-dir/reference/`:
 
 ```bash
-python -m st123.scripts.alignment_wrap \
-  --data-dir /data/rwisenbaker/jwst_data/NGC3310 \
-  --plot --continue-on-error --workers 8
+align --base-dir /data/ckilpatrick/JWST/NGC3310 \
+  --mode reference --instrument MIRI --plot --ncores 8
 ```
 
-or the `alignment-wrap` console script after `pip install -e .`.
+Per-frame failures are recorded as `FAILURE` rows in the alignment summary
+and do not abort the run.
 
 For proprietary data, pass a MAST API token
 ([create one here](https://auth.mast.stsci.edu/info)), the same way hst123
 used `--token` with `Observations.login`:
 
 ```bash
-python st123/scripts/download.py \
+download \
   --ra 189.9976 --dec -11.623 \
-  --obj NGC4536 \
-  --outdir /path/to/NGC4536 \
+  --base-dir /path/to/NGC4536 \
   --token YOUR_MAST_TOKEN
 ```
 
@@ -259,59 +246,68 @@ Or export the token and omit `--token`:
 
 ```bash
 export MAST_API_TOKEN=YOUR_MAST_TOKEN
-python st123/scripts/download.py \
+download \
   --ra 189.9976 --dec -11.623 \
-  --obj NGC4536 \
-  --outdir /path/to/NGC4536
+  --base-dir /path/to/NGC4536
 ```
 
 Useful options:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--outdir` | `jwst_data/<obj>` | Output directory |
+| `--base-dir` | (required) | Dataset root; object name = directory basename |
 | `--radius` | `3.0` | Search radius in arcminutes |
 | `--stage` | `2` | `2` = CAL, `3` = I2D |
 | `--instruments` | `NIRCAM MIRI` | Instrument name filters |
 | `--token` | `MAST_API_TOKEN` / `MAST_TOKEN` | MAST API token for proprietary data |
 
-After install, console scripts from `pyproject.toml` are available (`download`, `align`, `mosaic`, `link-raw`, `image-overlap`, `region`, `illuminated-s-region`, `relative-align`, `apply-gwcs`, `catalog`).
+After install, console scripts from `pyproject.toml` are available (`download`, `align`, `mosaic`, `link-raw`, `image-overlap`, `region`, `catalog`, `dolphot-prep`, `dolphot-warmstart`).
 
 ### Stage files for a reduction
 
 ```bash
-python st123/scripts/link_raw.py \
-  --datadir /path/to/downloaded/data \
-  --symlinkdir /path/to/reduction
+link-raw --base-dir /path/to/NGC4536 --instrument NIRCAM
 ```
 
-### Relative alignment (one image → reference)
+### Pair alignment (one image → reference)
 
 ```bash
-python st123/scripts/relative_align.py \
+align \
   --ref /path/to/coadd_i2d.fits \
-  --align /path/to/cal_or_i2d.fits \
-  --outdir /path/to/alignment_output
+  --image /path/to/cal_or_i2d.fits \
+  --base-dir /path/to/alignment_output
+# optional: --photfile existing.phot.txt
 ```
 
 ### Visit-level alignment pipeline
 
+Self-align NIRCam (or another visit-mode instrument) under `reduction/`:
+
 ```bash
-python st123/scripts/align.py --workdir /path/to/reduction --object TARGET
+align --base-dir /path/to/NGC4536 --ncores 8
+# equivalent:
+align --base-dir /path/to/NGC4536 --mode visit --instrument NIRCAM --ncores 8
 ```
 
 ### Mosaics / DOLPHOT prep
 
 ```bash
-python st123/scripts/mosaic.py --basedir /path/to/reduction --object TARGET
+mosaic --base-dir /path/to/NGC4536 --ncores 8
+dolphot-prep --from-mosaic --base-dir /path/to/NGC4536 --instrument nircam
 ```
+
+`mosaic` builds a shared `FITSImagingWCSTransform` output WCS
+(`create_gwcs` → `mosaic_gwcs.asdf`), drizzles each filter, writes the
+coadd, and leaves a `dolphot_frames.txt` manifest per box. DOLPHOT staging
+(`dolphot.param`, `nircammask` / `mirimask`, `calcsky`) is a separate
+`dolphot-prep` step.
 
 ## Notes
 
 - This repository targets **space telescopes in general** (HST, JWST, Roman).
-  Some CLIs and modules are still JWST-oriented (e.g. MIRI alignment wrap,
-  `jwst-download`) while shared MAST / alignment / mosaic / DOLPHOT paths are
-  meant to grow across facilities.
+  Some CLIs and modules are still JWST-oriented (e.g. `align --mode reference`)
+  while shared MAST / alignment / mosaic / DOLPHOT paths (`download`, etc.)
+  are meant to grow across facilities.
 - CRDS reference files are required for `jwst` pipeline steps; set `CRDS_PATH` /
   `CRDS_SERVER_URL` as recommended by STScI.
 - JHAT alignment parameters live in `st123/utils/settings.py` (`strict_*` /

@@ -69,7 +69,7 @@ relaxed_jwst_params = { 'telescope' : 'jwst',
                         'binsize_px' : 1.0,
                         'savephottable' : 0 }
 
-# DOLPHOT params (NIRCam defaults used by mosaic.setup_paramfile)
+# DOLPHOT params (NIRCam defaults used by dolphot_prep.setup_paramfile)
 base_params = {'FitSky' : '2',
                 'SigPSF' : '5.0',
                 'FlagMask' : '4',

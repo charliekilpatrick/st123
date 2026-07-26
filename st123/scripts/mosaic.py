@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Build mosaics / coadds from JHAT-aligned frames and prepare DOLPHOT."""
+"""Build mosaics / coadds from JHAT-aligned frames (no DOLPHOT prep)."""
 
 from __future__ import annotations
 
-import argparse
 import glob
 import os
-from multiprocessing import Pool
+import sys
 
 import numpy as np
 
 from st123.mosaic.mosaic import (
-    apply_nircammask,
-    calc_sky,
+    apply_wcs_to_coadd,
     coadd,
     convolve_images,
     copy_files,
@@ -20,43 +18,78 @@ from st123.mosaic.mosaic import (
     create_dirs,
     create_gwcs,
     edit_spec_groups,
-    mp_init,
-    setup_paramfile,
     split_observations,
     update_path,
+    write_dolphot_frame_list,
+)
+from st123.scripts.utils.options import (
+    add_base_dir,
+    add_common_runtime,
+    create_parser as build_parser,
+    dataset_label,
+    resolve_reduction_dir,
 )
 from st123.utils.helpers import input_list
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Mosaic / coadd JWST JHAT frames')
-    parser.add_argument('--basedir', type=str, default='.', help='Root directory to search for data')
-    parser.add_argument('--object', type=str, default='dolphot', help='Object to reduce')
-    parser.add_argument('--nmax', type=int, default=150, help='Maximum number of images in a dolphot run')
-    parser.add_argument('--spec_groups', type=str, default=None, help='List of images to be grouped')
-    parser.add_argument('--ncores', type=int, default=1, help='Number of CPU cores')
+def create_parser():
+    parser = build_parser(
+        description=(
+            'Mosaic / coadd JWST JHAT frames. DOLPHOT staging (nircammask, '
+            'calcsky, dolphot.param) is a separate step: dolphot-prep.'
+        ),
+    )
+    add_base_dir(
+        parser,
+        required=False,
+        default='.',
+        help=(
+            'Project root (…/<object>) or reduction workdir. Coadds are '
+            'written under <reduction>/reference/. Aliases: --basedir, '
+            '--workdir, --data-dir.'
+        ),
+    )
+    parser.add_argument(
+        '--nmax',
+        type=int,
+        default=150,
+        help='Maximum number of images per mosaic box',
+    )
+    parser.add_argument(
+        '--spec_groups',
+        type=str,
+        default=None,
+        help='List of images to be grouped',
+    )
+    add_common_runtime(parser, plot=False, verbose=True)
     return parser
 
 
 def main(argv=None) -> int:
     parser = create_parser()
     args = parser.parse_args(argv)
-    base_dir = args.basedir
-    obj = args.object
+    base_dir = str(resolve_reduction_dir(args.base_dir))
     nmax = args.nmax
     spec_group_file = args.spec_groups
-    ncores = args.ncores
+    if args.verbose:
+        print(f'Dataset: {dataset_label(args.base_dir)}')
+        print(f'Reduction workdir: {base_dir}')
 
-    phot_root = os.path.join(base_dir, obj)
-    inputfiles = glob.glob(os.path.join(base_dir, 'jhat', '*jhat.fits'))
+    inputfiles = sorted(glob.glob(os.path.join(base_dir, 'jhat', '*jhat.fits')))
+    if not inputfiles:
+        print(
+            f'ERROR: no jhat/*jhat.fits under {base_dir}. '
+            'Pass --base-dir to the dataset root (…/<object>) or the '
+            'reduction workdir that contains jhat/.',
+            file=sys.stderr,
+        )
+        return 1
     table = input_list(inputfiles)
     if spec_group_file:
         table = edit_spec_groups(table, spec_group_file)
     ngroups = np.unique(table['group'])
 
     out_dict = create_dirs(base_dir, len(ngroups))
-
-    Pool(initializer=mp_init, processes=ncores, initargs=(0, 0, []))
 
     for group_id in ngroups:
         group_table = table[table['group'] == group_id]
@@ -73,12 +106,8 @@ def main(argv=None) -> int:
                 split_obs.split_boxes[box_index],
             )
             box_outdir = os.path.join(outdir, f'ref_{box_index}')
-            phot_outdir = os.path.join(phot_root, f'phot_{group_id}_{box_index}')
             if not os.path.exists(box_outdir):
                 os.makedirs(box_outdir)
-
-            if not os.path.exists(phot_outdir):
-                os.makedirs(phot_outdir)
 
             minx = int(np.abs(np.floor(min(bbox.exterior.xy[0]))))
             maxx = int(np.abs(np.ceil(max(bbox.exterior.xy[0]))))
@@ -104,8 +133,6 @@ def main(argv=None) -> int:
                     filter_table[filter_name],
                     outdir=box_outdir,
                     filt=filter_name,
-                    centroid=None,
-                    output_shape=None,
                     gwcs_file=gwcs_path,
                 )
                 mosaics.append(driz_image)
@@ -114,12 +141,21 @@ def main(argv=None) -> int:
                 box_outdir, f'coadd_{group_id}_{box_index}_{target_filter}_i2d.fits'
             )
             coadd(mosaics, target_filter, coadd_filename)
+            apply_wcs_to_coadd(coadd_filename)
 
-            setup_paramfile(phot_outdir, coadd_filename, subimages)
-
-            phot_images = glob.glob(os.path.join(phot_outdir, '*fits'))
-            apply_nircammask(phot_images)
-            calc_sky(phot_images)
+            # Manifest for dolphot-prep (no DOLPHOT binaries invoked here).
+            write_dolphot_frame_list(
+                box_outdir,
+                refimage=coadd_filename,
+                frames=subimages,
+                group=int(group_id),
+                box=int(box_index),
+            )
+            if args.verbose:
+                print(
+                    f'Wrote coadd {coadd_filename}; '
+                    f'run dolphot-prep --from-mosaic --base-dir {args.base_dir}'
+                )
     return 0
 
 

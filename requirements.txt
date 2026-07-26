@@ -29,6 +29,9 @@ python-dateutil==2.9.0.post0
 progressbar33==2.4
 ccdproc==2.5.1
 reproject==0.21.0
+# photutils 3 breaks jwst 1.20.2 Image3 source_catalog in two ways (npixels→
+# n_pixels; single-source xypos→scalar ApertureMask). st123.utils.jwst_compat
+# patch_jwst_for_photutils3() bridges both. Prefer upgrading jwst when feasible.
 photutils==3.0.0
 gwcs==0.26.1
 asdf==5.3.1

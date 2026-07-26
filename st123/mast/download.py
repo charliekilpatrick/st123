@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 from st123.mast.mast import (
     DEFAULT_DOWNLOAD_LAYOUT,
     download_jwst_observations,
+    filter_jwst_observations_by_stage,
     normalize_filter_name,
     query_jwst,
     resolve_mast_token,
@@ -31,24 +32,34 @@ def suppress_stdout():
             sys.stderr = old_stderr
 
 
-def resolve_outdir(obj, outdir=None):
+def resolve_outdir(outdir, *, create: bool = True, obj=None):
     '''
     Resolve the download output directory.
 
     Parameters:
     ----------
-    obj : str
-        Object name used for the default path
-    outdir : str or None
-        Explicit output directory. If None, uses ``jwst_data/<obj>``.
+    outdir : str
+        Explicit output directory (required).
+    create : bool
+        If True (default), create ``outdir`` (and parents) when missing.
+    obj : str or None
+        Deprecated. Ignored; kept only for older call signatures.
 
     Returns:
     -------
     str
         Absolute or relative output directory path
     '''
+    del obj  # legacy keyword compatibility
     if outdir is None:
-        outdir = os.path.join('jwst_data', obj)
+        raise ValueError('outdir / --base-dir is required')
+    if create:
+        try:
+            os.makedirs(outdir, exist_ok=True)
+        except OSError as exc:
+            raise PermissionError(
+                f'Cannot create download directory {outdir!r}: {exc}'
+            ) from exc
     return outdir
 
 
@@ -114,7 +125,14 @@ def query_mast_jwst(
         ]
         obs_table = obs_table[keep]
 
-    print(f'Found {len(obs_table)} JWST observation(s)')
+    n_matched = len(obs_table)
+    obs_table = filter_jwst_observations_by_stage(obs_table, stage)
+    n_skipped = n_matched - len(obs_table)
+    print(
+        f'Found {len(obs_table)} JWST observation(s) with '
+        f'calib_level>={stage}'
+        + (f' ({n_skipped} skipped: no matching products expected)' if n_skipped else '')
+    )
     if len(obs_table) == 0:
         return 0
 
@@ -136,7 +154,7 @@ def query_and_download_miri(
     download_dir: str | Path,
     radius,
     stage: int = 2,
-    obj: str = 'target',
+    obj: str | None = None,
     allowed_filters: Optional[Sequence[str]] = None,
     dry_run: bool = False,
     token: Optional[str] = None,
@@ -145,10 +163,12 @@ def query_and_download_miri(
     Download public MIRI imager products into
     ``<download_dir>/JWST/MIRI/<FILTER>/<obsid>/``.
 
-    This is the canonical layout expected by ``alignment_wrap``.
+    This is the canonical layout expected by ``align --mode reference``.
+    ``obj`` is deprecated; the dataset label is ``download_dir.name``.
     """
     download_dir = Path(download_dir).expanduser().resolve()
-    print(f'Target: {obj}')
+    label = obj or download_dir.name
+    print(f'Target: {label}')
     print(f'Coordinates: {coord.to_string("hmsdms")}')
     print(f'Search radius: {radius}')
     print(f'Download directory: {download_dir}')

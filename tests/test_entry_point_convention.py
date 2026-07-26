@@ -98,10 +98,26 @@ def test_no_main_blocks_outside_st123_scripts():
 
 
 def test_required_cli_modules_exist():
-    """Preserve alignment_wrap / jwst_download entry modules under st123/scripts/."""
-    assert (REPO_ROOT / 'st123' / 'scripts' / 'alignment_wrap.py').is_file()
-    assert (REPO_ROOT / 'st123' / 'scripts' / 'jwst_download.py').is_file()
+    """Preserve packaged CLI modules under st123/scripts/."""
+    assert (REPO_ROOT / 'st123' / 'scripts' / 'align.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'download.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'scripts' / 'utils' / 'options.py').is_file()
+    # Shared helpers must not sit beside entry-point modules.
+    assert not (REPO_ROOT / 'st123' / 'scripts' / 'options.py').exists()
+    assert not (REPO_ROOT / 'st123' / 'scripts' / 'alignment_wrap.py').exists()
+    assert not (REPO_ROOT / 'st123' / 'scripts' / 'relative_align.py').exists()
+    assert not (REPO_ROOT / 'st123' / 'scripts' / 'jwst_download.py').exists()
+    # Alignment library is a single module (no wrap/relative/parallel split).
+    align_pkg = REPO_ROOT / 'st123' / 'alignment'
+    assert (align_pkg / 'align.py').is_file()
+    for gone in (
+        'relative_align.py',
+        'alignment_wrap.py',
+        'alignment_parallel.py',
+        'alignment_fallback.py',
+        'calibrators.py',
+    ):
+        assert not (align_pkg / gone).exists(), gone
     # Repo-root scripts/ must not be reintroduced.
     assert not (REPO_ROOT / 'scripts').exists()
 
@@ -109,9 +125,8 @@ def test_required_cli_modules_exist():
 @pytest.mark.parametrize(
     'module_name',
     [
-        'st123.scripts.alignment_wrap',
+        'st123.scripts.align',
         'st123.scripts.download',
-        'st123.scripts.jwst_download',
     ],
 )
 def test_packaged_entry_modules_expose_main(module_name: str):

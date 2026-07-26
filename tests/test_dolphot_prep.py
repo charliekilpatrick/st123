@@ -117,3 +117,93 @@ def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
     assert Path(sky_cmd[1]).name == 'x_mirimage_jhat'
     assert [float(x) for x in sky_cmd[2:7]] == [10.0, 25.0, -64.0, 2.25, 2.0]
     assert mock_run.call_args_list[1].kwargs.get('cwd') == fits.resolve().parent
+
+
+@mock.patch('st123.photometry.dolphot_prep.subprocess.run')
+def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
+    """Installed nircammask has no -etctime; ETC time is the default."""
+    from st123.photometry.dolphot_prep import apply_nircammask
+
+    fits = tmp_path / 'x_nrcb1_jhat.fits'
+    fits.write_text('')
+    apply_nircammask([fits], dolphot_bin='/data/software/dolphot/bin')
+    cmd = mock_run.call_args.args[0]
+    assert cmd[0].endswith('nircammask')
+    assert '-etctime' not in cmd
+    assert cmd[-1] == 'x_nrcb1_jhat.fits'
+    assert mock_run.call_args.kwargs.get('cwd') == fits.resolve().parent
+
+
+def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
+    from st123.photometry.dolphot_prep import (
+        discover_mosaic_phot_jobs,
+        parse_dolphot_frame_list,
+    )
+    from st123.mosaic.mosaic import write_dolphot_frame_list
+
+    reduction = tmp_path / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_0'
+    jhat = reduction / 'jhat'
+    box.mkdir(parents=True)
+    jhat.mkdir(parents=True)
+    ref = box / 'coadd_0_0_f150w2_i2d.fits'
+    ref.write_text('ref')
+    frames = [jhat / 'a_jhat.fits', jhat / 'b_jhat.fits']
+    for path in frames:
+        path.write_text('f')
+    write_dolphot_frame_list(
+        str(box),
+        refimage=str(ref),
+        frames=[str(p) for p in frames],
+        group=0,
+        box=0,
+    )
+    parsed_ref, parsed_frames, group, box_i = parse_dolphot_frame_list(
+        box / 'dolphot_frames.txt'
+    )
+    assert group == 0 and box_i == 0
+    assert parsed_ref == ref.resolve()
+    assert [p.resolve() for p in parsed_frames] == [p.resolve() for p in frames]
+
+    jobs = discover_mosaic_phot_jobs(reduction)
+    assert len(jobs) == 1
+    assert jobs[0].phot_outdir == reduction / 'phot_0_0'
+    assert len(jobs[0].frames) == 2
+
+
+def test_dolphot_prep_from_mosaic_cli(tmp_path: Path):
+    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.scripts import dolphot_prep as prep_script
+
+    reduction = tmp_path / 'NGC3310' / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_0'
+    jhat = reduction / 'jhat'
+    box.mkdir(parents=True)
+    jhat.mkdir(parents=True)
+    (tmp_path / 'NGC3310' / 'JWST').mkdir(parents=True)
+    ref = box / 'coadd_0_0_f150w2_i2d.fits'
+    ref.write_bytes(b'')
+    frame = jhat / 'x_nrcb1_jhat.fits'
+    frame.write_bytes(b'')
+    write_dolphot_frame_list(
+        str(box), refimage=str(ref), frames=[str(frame)], group=0, box=0
+    )
+
+    with mock.patch(
+        'st123.scripts.dolphot_prep.prepare_mosaic_phot_job',
+        return_value=reduction / 'phot_0_0' / 'dolphot.param',
+    ) as prep:
+        rc = prep_script.main(
+            [
+                '--from-mosaic',
+                '--base-dir',
+                str(tmp_path / 'NGC3310'),
+                '--instrument',
+                'nircam',
+            ]
+        )
+    assert rc == 0
+    prep.assert_called_once()
+    job = prep.call_args.args[0]
+    assert job.group == 0 and job.box == 0
+    assert job.refimage.resolve() == ref.resolve()

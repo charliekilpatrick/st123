@@ -11,9 +11,8 @@ from st123.scripts import link_raw
 def test_create_symlink_and_skip_existing(tmp_path: Path):
     src = tmp_path / 'src.fits'
     src.write_bytes(b'fits')
-    dst_dir = tmp_path / 'raw'
-    dst_dir.mkdir()
-    dst = dst_dir / 'src.fits'
+    # Parent dirs (including raw/) are created automatically.
+    dst = tmp_path / 'nested' / 'raw' / 'src.fits'
     create_symlink(str(src), str(dst))
     assert dst.is_symlink()
     assert dst.resolve() == src.resolve()
@@ -47,8 +46,7 @@ def test_link_raw_main(tmp_path: Path):
     fits_path = nested / 'img.fits'
     fits_path.write_bytes(b'data')
     symlinkdir = tmp_path / 'reduction'
-    (symlinkdir / 'raw').mkdir(parents=True)
-
+    # Do not pre-create raw/; link-raw must create it.
     rc = link_raw.main(
         ['--datadir', str(datadir), '--symlinkdir', str(symlinkdir)]
     )
@@ -61,5 +59,6 @@ def test_link_raw_main(tmp_path: Path):
 def test_link_raw_parser():
     parser = link_raw.create_parser()
     args = parser.parse_args(['--datadir', '/d', '--symlinkdir', '/s', '--proc_dirs', '/p'])
-    assert args.datadir == '/d'
+    assert args.source_dir == '/d'
+    assert args.symlink_dir == '/s'
     assert args.proc_dirs == ['/p']

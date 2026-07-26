@@ -19,10 +19,16 @@ from st123.scripts import download as download_script
 from st123.utils import is_number, parse_coord
 
 
-def test_resolve_outdir_default_and_explicit(tmp_path):
-    assert resolve_outdir('NGC3310') == 'jwst_data/NGC3310'
-    custom = str(tmp_path / 'out')
-    assert resolve_outdir('NGC3310', outdir=custom) == custom
+def test_resolve_outdir_requires_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / 'nested' / 'out'
+    assert resolve_outdir(str(custom)) == str(custom)
+    assert custom.is_dir()
+    skipped = tmp_path / 'skip_me'
+    assert resolve_outdir(str(skipped), create=False) == str(skipped)
+    assert not skipped.exists()
+    with pytest.raises(ValueError):
+        resolve_outdir(None)
 
 
 def test_parse_coord_decimal_and_sexagesimal():
@@ -50,16 +56,16 @@ def test_resolve_mast_token_precedence(monkeypatch):
 
 
 def test_query_mast_jwst_empty_table(tmp_path):
-    from astropy.table import Table
-
     coord = SkyCoord(150.0, 2.0, unit='deg')
     outdir = tmp_path / 'dl'
     with (
-        patch('st123.mast.download.resolve_mast_token', return_value=None),
-        patch('st123.mast.download.query_jwst', return_value=Table()),
+        patch('st123.mast.download.query_jwst') as mock_q,
         patch('st123.mast.download.download_jwst_observations') as mock_dl,
     ):
-        n = query_mast_jwst(coord, str(outdir), radius=3 * u.arcmin)
+        from astropy.table import Table
+
+        mock_q.return_value = Table()
+        n = query_mast_jwst(coord, outdir=str(outdir), radius=1 * u.arcmin)
     assert n == 0
     mock_dl.assert_not_called()
     assert outdir.is_dir()
@@ -69,10 +75,22 @@ def test_download_parser_requires_core_args():
     parser = download_script.create_parser()
     with pytest.raises(SystemExit):
         parser.parse_args([])
+    with pytest.raises(SystemExit):
+        # --base-dir is required
+        parser.parse_args(['--ra', '150.0', '--dec', '2.0'])
     args = parser.parse_args(
-        ['--ra', '150.0', '--dec', '2.0', '--obj', 'TEST', '--radius', '1.5']
+        [
+            '--ra',
+            '150.0',
+            '--dec',
+            '2.0',
+            '--base-dir',
+            '/tmp/out',
+            '--radius',
+            '1.5',
+        ]
     )
-    assert args.obj == 'TEST'
+    assert args.base_dir == '/tmp/out'
     assert args.radius == 1.5
 
 
@@ -106,8 +124,6 @@ def test_download_parser_accepts_download_dir_and_layout():
             '150.0',
             '--dec',
             '2.0',
-            '--obj',
-            'TEST',
             '--download-dir',
             '/tmp/out',
             '--layout',
@@ -117,32 +133,50 @@ def test_download_parser_accepts_download_dir_and_layout():
             '--dry-run',
         ]
     )
-    assert args.download_dir == '/tmp/out'
+    assert args.base_dir == '/tmp/out'
     assert args.layout == 'telescope/instrument/filter/obsid'
     assert args.dry_run is True
+
+
+def test_parse_instruments_comma_and_space():
+    assert download_script.parse_instruments(None) is None
+    assert download_script.parse_instruments(['NIRCAM,MIRI']) == ['NIRCAM', 'MIRI']
+    assert download_script.parse_instruments(['NIRCAM', 'MIRI']) == ['NIRCAM', 'MIRI']
+    assert download_script.parse_instruments(['NIRCAM, MIRI', 'NIRISS']) == [
+        'NIRCAM',
+        'MIRI',
+        'NIRISS',
+    ]
 
 
 def test_download_main_success(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with patch('st123.scripts.download.query_mast_jwst', return_value=3) as mock_q:
         rc = download_script.main(
-            ['--ra', '150.0', '--dec', '2.0', '--obj', 'OBJ', '--outdir', str(tmp_path / 'o')]
+            [
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--outdir',
+                str(tmp_path / 'o'),
+            ]
         )
     assert rc == 0
     mock_q.assert_called_once()
 
 
 def test_download_main_bad_coords():
-    rc = download_script.main(['--ra', 'bad', '--dec', 'coords', '--obj', 'OBJ'])
+    rc = download_script.main(
+        ['--ra', 'bad', '--dec', 'coords', '--base-dir', '/tmp/x']
+    )
     assert rc == 1
 
 
-def test_download_main_runtime_error(tmp_path):
-    with patch(
-        'st123.scripts.download.query_mast_jwst',
-        side_effect=RuntimeError('login failed'),
-    ):
+def test_download_main_zero_products(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with patch('st123.scripts.download.query_mast_jwst', return_value=0):
         rc = download_script.main(
-            ['--ra', '150.0', '--dec', '2.0', '--obj', 'OBJ', '--outdir', str(tmp_path)]
+            ['--ra', '150.0', '--dec', '2.0', '--outdir', str(tmp_path)]
         )
     assert rc == 1

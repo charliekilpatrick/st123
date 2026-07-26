@@ -3,23 +3,26 @@
 
 from __future__ import annotations
 
-import argparse
-
 from st123.mosaic.image_overlap import find_best_refs
+from st123.scripts.utils.options import (
+    add_common_runtime,
+    add_image_arg,
+    create_parser as build_parser,
+)
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def create_parser():
+    parser = build_parser(
         description=(
             'Find the reference image with maximum footprint overlap '
             'for each science frame (e.g. MIRI cal products).'
         )
     )
-    parser.add_argument(
-        '--miri',
+    add_image_arg(
+        parser,
         nargs='+',
         required=True,
-        help='Science *_cal.fits image(s) to score for overlap (historically MIRI).',
+        help='Science *_cal.fits image(s) to score for overlap.',
     )
     parser.add_argument(
         '--ref',
@@ -33,12 +36,13 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help='Optional text file for summary lines (default: print only).',
     )
+    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
-    science_images = list(args.miri)
+    science_images = list(args.image)
     refs = list(args.ref)
 
     print(f'Science images ({len(science_images)}):')

@@ -9,16 +9,11 @@ import pytest
 
 EXPECTED_SCRIPTS = {
     'download': 'st123.scripts.download:main',
-    'jwst-download': 'st123.scripts.download:main_jwst_download',
     'align': 'st123.scripts.align:main',
     'mosaic': 'st123.scripts.mosaic:main',
     'link-raw': 'st123.scripts.link_raw:main',
     'image-overlap': 'st123.scripts.image_overlap:main',
     'region': 'st123.scripts.region:main',
-    'illuminated-s-region': 'st123.scripts.region:main',
-    'relative-align': 'st123.scripts.relative_align:main',
-    'alignment-wrap': 'st123.scripts.alignment_wrap:main',
-    'apply-gwcs': 'st123.scripts.apply_gwcs:main',
     'catalog': 'st123.scripts.catalog:main',
     'dolphot-prep': 'st123.scripts.dolphot_prep:main',
     'dolphot-warmstart': 'st123.scripts.dolphot_warmstart:main',
@@ -26,15 +21,11 @@ EXPECTED_SCRIPTS = {
 
 SCRIPT_MODULES = [
     'st123.scripts.download',
-    'st123.scripts.jwst_download',
     'st123.scripts.align',
     'st123.scripts.mosaic',
     'st123.scripts.link_raw',
     'st123.scripts.image_overlap',
     'st123.scripts.region',
-    'st123.scripts.relative_align',
-    'st123.scripts.alignment_wrap',
-    'st123.scripts.apply_gwcs',
     'st123.scripts.catalog',
     'st123.scripts.dolphot_prep',
     'st123.scripts.dolphot_warmstart',

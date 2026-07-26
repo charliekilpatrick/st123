@@ -19,7 +19,7 @@ from astropy.modeling import models
 from astropy import coordinates as coord
 from astropy import units as u
 from astropy.table import Column
-from gwcs import coordinate_frames as cf
+from gwcs import FITSImagingWCSTransform, coordinate_frames as cf
 from astropy import wcs
 from gwcs import WCS as g_wcs
 from asdf import AsdfFile
@@ -37,6 +37,7 @@ from reproject.mosaicking import find_optimal_celestial_wcs
 import subprocess
 from st123.utils.helpers import get_detector_chip
 from st123.mast import parse_s_region
+from st123.utils.jwst_compat import patch_jwst_for_photutils3
 from st123.utils.settings import *  # noqa: F403
 
 
@@ -300,6 +301,7 @@ def create_default_mosaic(inputfiles, outdir, filt):
     -------
     None
     '''
+    patch_jwst_for_photutils3()
     if not os.path.exists(outdir):
         os.makedirs(outdir)
 
@@ -332,12 +334,24 @@ def create_default_mosaic(inputfiles, outdir, filt):
 
     image3.run(asn_file)
 
-def create_coadd_mosaic(table, outdir, filt, centroid=None, 
-                        output_shape=None, gwcs_file=None):
+def create_coadd_mosaic(
+    table,
+    outdir,
+    filt,
+    *,
+    sci_header=None,
+    wcs_out=None,
+    shape_out=None,
+    gwcs_file=None,
+):
     '''
     Create level3 drizzled mosaic from level2 input files
-    using the JWST pipeline. Centroid and output_shape or gwcs_file
-    can be passed in to create uniformly drizzled mosaics
+    using the JWST pipeline with a required shared output GWCS.
+
+    A ``FITSImagingWCSTransform``-based output WCS is always applied
+    (via :func:`create_gwcs`) so resample can write FITS WCS keywords
+    under jwst>=1.20. Provide an existing ``gwcs_file``, or inputs to
+    build one (``sci_header``, or ``wcs_out`` + ``shape_out``).
 
     Parameters
     ----------
@@ -347,20 +361,35 @@ def create_coadd_mosaic(table, outdir, filt, centroid=None,
         Output directory
     filt: str
         Filter of images to be resampled
-    centroid: optional, shapely.geometry.point.Point
-        Centroid of the drizzled field
-    output_shape: optional, tuple
-        (xbound, ybound) for the drizzled field
-    gwcs_file: optional, str
-        Path to gwcs file to drizzle uniformly
+    sci_header : optional, astropy.io.fits.Header
+        FITS WCS header used to build ``mosaic_gwcs.asdf`` when
+        ``gwcs_file`` is not given
+    wcs_out : optional, astropy.wcs.WCS
+        Astropy WCS used with ``shape_out`` when ``gwcs_file`` /
+        ``sci_header`` are not given
+    shape_out : optional, tuple
+        ``(NAXIS2, NAXIS1)`` for ``wcs_out``
+    gwcs_file : optional, str
+        Path to an existing GWCS asdf file (from :func:`create_gwcs`)
 
     Returns
     -------
     filepath: str
         Path to resampled i2d image
     '''
+    patch_jwst_for_photutils3()
     if not os.path.exists(outdir):
         os.makedirs(outdir)
+
+    if gwcs_file is None:
+        gwcs_file = create_gwcs(
+            outdir=outdir,
+            sci_header=sci_header,
+            wcs_out=wcs_out,
+            shape_out=shape_out,
+        )
+    elif not os.path.exists(gwcs_file):
+        raise FileNotFoundError(f'gwcs_file not found: {gwcs_file}')
 
     asn_file = f'{outdir}/{filt}.json'
     base_filenames = np.array([os.path.basename(r['image']) for r in table])
@@ -386,12 +415,7 @@ def create_coadd_mosaic(table, outdir, filt, centroid=None,
     image3.resample.pixfrac = 1.0
     image3.pixel_scale = 0.0311
     image3.weight_type = 'ivm'
-    if gwcs_file:
-        image3.resample.output_wcs = gwcs_file
-
-    elif centroid:
-        image3.resample.crval = (centroid.x , centroid.y)
-        image3.resample.output_shape = output_shape[0], output_shape[1]
+    image3.resample.output_wcs = gwcs_file
 
     image3.run(asn_file)
     
@@ -425,17 +449,25 @@ def create_gwcs(outdir, sci_header=None, wcs_out=None, shape_out=None, return_gw
     else:
         raise ValueError("Please provide header or wcs object")
 
-    shift_by_crpix = models.Shift(-(sci_header['CRPIX1'] - 1)) & models.Shift(-(sci_header['CRPIX2'] - 1))
-    matrix = np.array([[sci_header['PC1_1'], sci_header['PC1_2']],
-                    [sci_header['PC2_1'] , sci_header['PC2_2']]])
-    rotation = models.AffineTransformation2D(matrix , translation=[0, 0])
-
-    tan = models.Pix2Sky_TAN()
-    pixelscale = models.Scale(sci_header['CDELT1']) & models.Scale(sci_header['CDELT2'])
-    celestial_rotation =  models.RotateNative2Celestial(sci_header['CRVAL1'], sci_header['CRVAL2'], 180)
-
-    det2sky = shift_by_crpix | rotation | pixelscale | tan | celestial_rotation
-    det2sky.name = "linear_transform"
+    # jwst>=1.20 ResampleImage.update_fits_wcsinfo expects a
+    # FITSImagingWCSTransform (with .crpix/.cdelt/.crval/.pc). A plain
+    # CompoundModel of Shift|Affine|Scale|TAN|Rotate raises
+    # AttributeError: Attribute "crpix" not found (jwst#10377).
+    # crpix here is 0-indexed detector pixels (FITS CRPIX minus 1).
+    matrix = np.array(
+        [
+            [sci_header['PC1_1'], sci_header['PC1_2']],
+            [sci_header['PC2_1'], sci_header['PC2_2']],
+        ]
+    )
+    det2sky = FITSImagingWCSTransform(
+        models.Pix2Sky_TAN(),
+        crpix=[sci_header['CRPIX1'] - 1, sci_header['CRPIX2'] - 1],
+        crval=[sci_header['CRVAL1'], sci_header['CRVAL2']],
+        cdelt=[sci_header['CDELT1'], sci_header['CDELT2']],
+        pc=matrix,
+    )
+    det2sky.name = 'linear_transform'
 
     detector_frame = cf.Frame2D(name="detector", axes_names=("x", "y"),
                                 unit=(u.pix, u.pix))
@@ -595,13 +627,38 @@ def coadd(ref_files, filt, filename = 'coadd_i2d.fits'):
 
 def create_dirs(base_dir, n=1):
     out_dict = dict.fromkeys(range(n))
+    os.makedirs(base_dir, exist_ok=True)
     for i in range(n):
         outdir = os.path.join(base_dir, f'reference/group_{i}')
         out_dict[i] = outdir
-        if not os.path.exists(outdir):
-            os.makedirs(outdir)
-    
+        os.makedirs(outdir, exist_ok=True)
+
+    # When reducing under <data-root>/reduction, expose reference/ at the
+    # dataset root so align --mode reference can find coadds without a manual ln/mkdir.
+    ensure_dataset_reference_link(base_dir)
+
     return out_dict
+
+
+def ensure_dataset_reference_link(base_dir: str) -> str | None:
+    """
+    If *base_dir* is named ``reduction``, symlink ``../reference`` →
+    ``reduction/reference`` (idempotent). Returns the dataset-root reference
+    path when linked/created, else ``None``.
+    """
+    base = Path(base_dir).resolve()
+    if base.name != 'reduction':
+        return None
+    src = base / 'reference'
+    os.makedirs(src, exist_ok=True)
+    dst = base.parent / 'reference'
+    if dst.exists() or dst.is_symlink():
+        return str(dst)
+    try:
+        os.symlink(src, dst)
+    except OSError:
+        return None
+    return str(dst)
 
 def copy_files(filter_table, outdir):
     infiles = np.hstack([filter_table[i]['image'].value for i in filter_table.keys()])
@@ -617,65 +674,41 @@ def update_path(filter_table, outdir):
     
     return filter_table
 
-def setup_paramfile(phot_outdir, refimage, files):
-    '''
-    Generate the dolphot parameter file
+def write_dolphot_frame_list(
+    box_outdir,
+    *,
+    refimage,
+    frames,
+    group: int = 0,
+    box: int = 0,
+):
+    """
+    Write a manifest of coadd + JHAT frames for ``dolphot-prep --from-mosaic``.
 
     Parameters
     ----------
-    basedir : str
-        Base directory to search for files
-    files : list
-        List of files to be included in the paramfile
+    box_outdir : str
+        Mosaic box directory (``reference/group_G/ref_B``).
+    refimage : str
+        Path to the coadd ``*_i2d.fits`` reference.
+    frames : sequence
+        JHAT frame paths belonging to this box.
+    group, box : int, optional
+        Indices used by ``dolphot-prep`` for ``phot_{group}_{box}``.
 
     Returns
     -------
-    None
-    '''
-    from st123.photometry.dolphot_prep import setup_paramfile as _setup_paramfile
+    str
+        Path to ``dolphot_frames.txt``.
+    """
+    out = os.path.join(box_outdir, 'dolphot_frames.txt')
+    with open(out, 'w') as fh:
+        fh.write(f'# group={int(group)} box={int(box)}\n')
+        fh.write(f'# ref {os.path.abspath(refimage)}\n')
+        for path in frames:
+            fh.write(f'{os.path.abspath(path)}\n')
+    return out
 
-    _setup_paramfile(phot_outdir, refimage, files, copy_files=True)
-
-
-def apply_nircammask(files):
-    '''
-    Apply nircammask from dolphot to input files to mask pixels in 
-    images using DQ mask
-    
-    Parameters
-    ----------
-    files : list
-        List of files to apply nircammask to
-        
-    Returns
-    -------
-    None
-    '''
-    from st123.photometry.dolphot_prep import apply_nircammask as _apply_nircammask
-
-    _apply_nircammask(files)
-
-
-def calc_sky(files, instrument='nircam'):
-    '''
-    Calculate the sky for input files using calcsky in dolphot
-
-    Parameters
-    ----------
-    files : list
-        List of files to calculate the sky for
-    instrument : str
-        ``nircam`` (default) or ``miri`` for instrument-specific rin/rout.
-
-    Returns
-    -------
-    None
-    '''
-    from st123.photometry.dolphot_prep import calc_sky as _calc_sky
-
-    for fl in files:
-        print(str(fl).replace('.fits', ''))
-    _calc_sky(files, instrument=instrument)
 
 def edit_spec_groups(table, spec_group_file):
     files = np.loadtxt(spec_group_file, dtype=str)
@@ -692,16 +725,33 @@ def assign_gwcs(box_outdir, wcs_hdr):
     return wcsobj
 
 
-def apply_wcs_to_coadd(coadd_file):
-    """Attach a GWCS object to a coadd datamodel and save a corrected file."""
+def apply_wcs_to_coadd(coadd_file, output=None):
+    """
+    Attach a :func:`create_gwcs` GWCS object to a coadd datamodel.
+
+    By default the coadd is updated in place so mosaic products already
+    carry a pipeline-compatible GWCS (no separate ``apply-gwcs`` step).
+
+    Parameters
+    ----------
+    coadd_file : str
+        Path to a coadd ``*_i2d.fits`` product
+    output : str or None
+        Optional alternate save path; default overwrites ``coadd_file``
+
+    Returns
+    -------
+    str
+        Path to the saved coadd with GWCS attached
+    """
     from jwst import datamodels
 
-    new_file = coadd_file.replace('coadd_', 'coadd_corrected_')
+    out_path = output or coadd_file
     with fits.open(coadd_file) as hdul:
         wcs_hdr = hdul['SCI'].header
     im = datamodels.open(coadd_file)
     wcsobj = assign_gwcs(box_outdir=os.path.dirname(coadd_file), wcs_hdr=wcs_hdr)
     im.meta.wcs = wcsobj
-    im.save(new_file)
-    return new_file
+    im.save(out_path)
+    return out_path
 

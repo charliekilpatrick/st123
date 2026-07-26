@@ -1,4 +1,4 @@
-"""Tests for the MIRI alignment_wrap pipeline helpers and CLI."""
+"""Tests for the MIRI reference-alignment pipeline helpers and CLI."""
 
 from __future__ import annotations
 
@@ -10,17 +10,16 @@ import pytest
 from astropy.io import fits
 
 from helpers import write_illuminated_fits, write_ref_with_s_region
-from st123.alignment import alignment_wrap as wrap
-from st123.alignment.alignment_fallback import (
-    SuccessfulAlignment,
-    combine_dispersion_mas,
-    rank_fallback_parents,
-)
-from st123.alignment.calibrators import (
+from st123.alignment import align as align_lib
+from st123.alignment.align import (
     FILTER_MAX_REFERENCE_DISPERSION_MAS,
     F770W_CALIBRATOR_SETTINGS,
+    AlignWorkerResult,
+    SuccessfulAlignment,
     calibrator_settings_for_filter,
+    combine_dispersion_mas,
     max_reference_dispersion_mas,
+    rank_fallback_parents,
 )
 from st123.mosaic.image_overlap import (
     BestOverlap,
@@ -29,7 +28,7 @@ from st123.mosaic.image_overlap import (
     compute_cumulative_overlap_fraction,
     compute_overlap,
 )
-from st123.scripts import alignment_wrap as wrap_script
+from st123.scripts import align as align_script
 
 
 def _write_miri_cal(path: Path, *, filter_name: str = 'F560W', crval=(150.0, 2.0)) -> Path:
@@ -78,7 +77,7 @@ def test_combine_dispersion_and_rank_parents():
         ),
     ]
     with patch(
-        'st123.alignment.alignment_fallback.sky_overlap_fraction',
+        'st123.alignment.align.sky_overlap_fraction',
         side_effect=lambda child, parent: 0.8 if 'f560' in parent else 0.9,
     ):
         ranked = rank_fallback_parents(
@@ -96,19 +95,19 @@ def test_filter_name_from_miri_path_layouts():
         '/data/x/JWST/MIRI/F560W/144084448/mastDownload/JWST/'
         'jw01783007001_02101_00001_mirimage/jw01783007001_02101_00001_mirimage_cal.fits'
     )
-    assert wrap.filter_name_from_miri_path(p0) == 'F560W'
+    assert align_lib.filter_name_from_miri_path(p0) == 'F560W'
     p1 = (
         '/data/x/F560W/144084448/mastDownload/JWST/'
         'jw01783007001_02101_00001_mirimage/jw01783007001_02101_00001_mirimage_cal.fits'
     )
-    assert wrap.filter_name_from_miri_path(p1) == 'F560W'
+    assert align_lib.filter_name_from_miri_path(p1) == 'F560W'
     p2 = (
         '/data/x/F770W_999/mastDownload/JWST/'
         'jw_x_mirimage/jw_x_mirimage_cal.fits'
     )
-    assert wrap.filter_name_from_miri_path(p2) == 'F770W'
-    assert wrap.parse_filters_arg('F560W, F770W') == ['F560W', 'F770W']
-    assert wrap.parse_filters_arg(None) is None
+    assert align_lib.filter_name_from_miri_path(p2) == 'F770W'
+    assert align_lib.parse_filters_arg('F560W, F770W') == ['F560W', 'F770W']
+    assert align_lib.parse_filters_arg(None) is None
 
 
 def test_discover_and_filter_miri_images(tmp_path: Path):
@@ -128,10 +127,10 @@ def test_discover_and_filter_miri_images(tmp_path: Path):
     other = cal.parent / 'jw_x_mirimage_rate.fits'
     other.write_bytes(b'')
 
-    found = wrap.discover_miri_images(data_dir)
+    found = align_lib.discover_miri_images(data_dir)
     assert [Path(p).name for p in found] == ['jw_x_mirimage_cal.fits']
-    assert wrap.filter_miri_images(found, ['F560W']) == found
-    assert wrap.filter_miri_images(found, ['F770W']) == []
+    assert align_lib.filter_miri_images(found, ['F560W']) == found
+    assert align_lib.filter_miri_images(found, ['F770W']) == []
 
 
 def test_discover_ref_images(tmp_path: Path):
@@ -139,12 +138,28 @@ def test_discover_ref_images(tmp_path: Path):
     ref = data_dir / 'reference' / 'group_0' / 'ref_0' / 'coadd_0_0_f150w2_i2d.fits'
     ref.parent.mkdir(parents=True)
     write_ref_with_s_region(ref)
-    refs = wrap.discover_ref_images(data_dir)
+    refs = align_lib.discover_ref_images(data_dir)
+    assert refs == [str(ref.resolve())]
+
+
+def test_discover_ref_images_under_reduction(tmp_path: Path):
+    data_dir = tmp_path / 'GAL'
+    ref = (
+        data_dir
+        / 'reduction'
+        / 'reference'
+        / 'group_0'
+        / 'ref_0'
+        / 'coadd_0_0_f150w2_i2d.fits'
+    )
+    ref.parent.mkdir(parents=True)
+    write_ref_with_s_region(ref)
+    refs = align_lib.discover_ref_images(data_dir)
     assert refs == [str(ref.resolve())]
 
 
 def test_alignment_summary_roundtrip(tmp_path: Path):
-    row = wrap.AlignmentSummaryRow(
+    row = align_lib.AlignmentSummaryRow(
         miri_path='/data/a_cal.fits',
         filter='F560W',
         status='SUCCESS',
@@ -157,7 +172,7 @@ def test_alignment_summary_roundtrip(tmp_path: Path):
         aligned_to='/data/ref.fits',
     )
     out = tmp_path / 'sum.txt'
-    wrap.write_alignment_summary([row], out)
+    align_lib.write_alignment_summary([row], out)
     text = out.read_text()
     assert 'F560W' in text
     assert 'REFERENCE' in text
@@ -178,7 +193,7 @@ def test_find_frame_overlaps_builds_union_fraction(tmp_path: Path):
     with fits.open(sci, mode='update') as hdul:
         hdul[0].header['FILTER'] = 'F560W'
     ref = write_ref_with_s_region(tmp_path / 'ref.fits')
-    frames = wrap.find_frame_overlaps(
+    frames = align_lib.find_frame_overlaps(
         [str(sci)],
         [str(ref)],
         MirIFootprint=MirIFootprint,
@@ -190,12 +205,14 @@ def test_find_frame_overlaps_builds_union_fraction(tmp_path: Path):
     assert frames[0].union_overlap_fraction > 0.0
 
 
-def test_alignment_wrap_parser_and_help():
-    parser = wrap_script.create_parser()
+def test_align_reference_parser_and_help():
+    parser = align_script.create_parser()
     args = parser.parse_args(
         [
             '--data-dir',
             '/tmp/data',
+            '--mode',
+            'reference',
             '--align-only',
             '--workers',
             '2',
@@ -203,24 +220,37 @@ def test_alignment_wrap_parser_and_help():
             'F560W',
         ]
     )
+    assert args.mode == 'reference'
     assert args.align_only is True
-    assert args.workers == 2
+    assert args.base_dir == '/tmp/data'
+    assert args.ncores == 2
     assert args.filters == 'F560W'
+    # --continue-on-error was removed; always continue on per-frame failures.
+    with pytest.raises(SystemExit):
+        parser.parse_args(['--mode', 'reference', '--continue-on-error'])
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(['--help'])
     assert exc.value.code == 0
 
 
-def test_alignment_wrap_main_missing_overlap_json(tmp_path: Path):
+def test_align_reference_main_missing_overlap_json(tmp_path: Path):
     data_dir = tmp_path / 'empty'
     data_dir.mkdir()
-    rc = wrap_script.main(
-        ['--data-dir', str(data_dir), '--align-only', '--workers', '1']
+    rc = align_script.main(
+        [
+            '--data-dir',
+            str(data_dir),
+            '--mode',
+            'reference',
+            '--align-only',
+            '--workers',
+            '1',
+        ]
     )
     assert rc == 1
 
 
-def test_alignment_wrap_main_overlap_only(tmp_path: Path):
+def test_align_reference_main_overlap_only(tmp_path: Path):
     data_dir = tmp_path / 'GAL'
     cal = (
         data_dir
@@ -236,14 +266,96 @@ def test_alignment_wrap_main_overlap_only(tmp_path: Path):
     ref.parent.mkdir(parents=True)
     write_ref_with_s_region(ref)
 
-    rc = wrap_script.main(
-        ['--data-dir', str(data_dir), '--overlap-only', '--workers', '1']
+    rc = align_script.main(
+        [
+            '--data-dir',
+            str(data_dir),
+            '--mode',
+            'reference',
+            '--overlap-only',
+            '--workers',
+            '1',
+        ]
     )
     assert rc == 0
     overlap_json = data_dir / 'overlap' / 'overlap_summary.json'
     assert overlap_json.is_file()
     payload = json.loads(overlap_json.read_text())
     assert payload['frames']
+
+
+def test_align_from_frames_continues_on_failure(tmp_path: Path):
+    """Per-frame FAILURE rows are recorded; processing does not abort."""
+    miri = (
+        tmp_path
+        / 'JWST'
+        / 'MIRI'
+        / 'F560W'
+        / '1'
+        / 'mastDownload'
+        / 'JWST'
+        / 'jw_x_mirimage'
+        / 'jw_x_mirimage_cal.fits'
+    )
+    miri.parent.mkdir(parents=True)
+    miri.write_bytes(b'')
+    ref = '/fake/ref.fits'
+    frames = [
+        {
+            'miri_path': str(miri),
+            'best': {'ref_path': ref, 'overlap_area': {}},
+            'overlapping': [{'ref_path': ref, 'overlap_area': {}, 'ref_area': {}}],
+            'union_overlap_fraction': 0.5,
+        }
+    ]
+    summary = tmp_path / 'GAL_alignment_summary.txt'
+
+    def fake_run(jobs, _fn, *, workers, label, on_result):
+        del workers, label
+        for job in jobs:
+            on_result(
+                AlignWorkerResult(
+                    miri_path=job['miri_path'],
+                    filter=job['filter'],
+                    mode=job.get('mode', 'nircam'),
+                    ok=False,
+                    row={
+                        'miri_path': job['miri_path'],
+                        'filter': job['filter'],
+                        'status': 'FAILURE',
+                        'n_calibrators': 'NA',
+                        'dispersion_mas': 'NA',
+                        'aligned_path': 'NA',
+                        'align_mode': 'NA',
+                        'original_ref': job.get('best_ref', 'NA'),
+                        'aligned_to': 'NA',
+                        'ref_overlap_frac': job.get('ref_overlap_frac', 'NA'),
+                    },
+                    error='synthetic failure',
+                )
+            )
+
+    with (
+        patch.object(align_lib, '_run_jobs_parallel', side_effect=fake_run),
+        patch.object(align_lib, '_resolve_repo_root', return_value=tmp_path),
+    ):
+        n_fail, rows = align_lib.align_from_frames(
+            frames,
+            run_alignment=MagicMock(),
+            nbright=100,
+            plot=False,
+            verbose=False,
+            fallback=False,
+            summary_outfile=summary,
+            workers=1,
+            repo=tmp_path,
+        )
+
+    assert n_fail == 1
+    assert len(rows) == 1
+    assert rows[0].status == 'FAILURE'
+    assert summary.is_file()
+    assert 'FAILURE' in summary.read_text()
 
 
 def test_seed_offsets_only_for_tight_refine():

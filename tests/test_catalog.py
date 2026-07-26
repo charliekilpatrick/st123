@@ -73,5 +73,5 @@ def test_catalog_main_calls_create_common(tmp_path: Path):
 def test_catalog_parser():
     parser = catalog_script.create_parser()
     args = parser.parse_args(['--photdir', 'p', '--outfile', 'o.csv'])
-    assert args.photdir == 'p'
+    assert args.base_dir == 'p'
     assert args.outfile == 'o.csv'

@@ -3,24 +3,32 @@
 
 from __future__ import annotations
 
-import argparse
 import glob
 
 import numpy as np
 import pandas as pd
 
 from st123.photometry.catalog import create_common_catalog
+from st123.scripts.utils.options import (
+    add_base_dir,
+    add_common_runtime,
+    create_parser as build_parser,
+)
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def create_parser():
+    parser = build_parser(
         description='Combine per-filter CSV catalogs into one table.',
     )
-    parser.add_argument(
-        '--photdir',
-        type=str,
+    add_base_dir(
+        parser,
+        required=False,
         default='ngc628_phot',
-        help='Directory containing rsg*.csv and *columns files.',
+        aliases=('--basedir', '--workdir', '--data-dir', '--photdir'),
+        help=(
+            'Directory containing rsg*.csv and *columns files. '
+            'Aliases: --photdir, --data-dir.'
+        ),
     )
     parser.add_argument(
         '--outfile',
@@ -28,12 +36,13 @@ def create_parser() -> argparse.ArgumentParser:
         default='ngc628_combined_phot.csv',
         help='Output combined catalog path.',
     )
+    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
     return parser
 
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
-    photdir = args.photdir
+    photdir = args.base_dir
 
     csv_files = sorted(glob.glob(f'{photdir}/rsg*.csv'))
     if not csv_files:

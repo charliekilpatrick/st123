@@ -1,4 +1,5 @@
-import glob, os
+import glob
+import os
 
 
 def create_symlink(src, dst):
@@ -16,14 +17,18 @@ def create_symlink(src, dst):
     -------
     None
     '''
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     if not os.path.exists(dst):
         try:
             os.symlink(src, dst)
-        except:
+        except FileExistsError:
             os.unlink(dst)
             os.symlink(src, dst)
     else:
         print(f'{dst} already exists')
+
 
 def remove_proc_files(files, dir):
     """
@@ -41,7 +46,7 @@ def remove_proc_files(files, dir):
     new_files : list
         list of files that have not been processed
     """
-    proc_files = glob.glob(os.path.join(dir, 'raw', '*.fits'), recursive = True)
+    proc_files = glob.glob(os.path.join(dir, 'raw', '*.fits'), recursive=True)
     proc_files = [os.path.realpath(i) for i in proc_files]
     new_files = list(set(files) - set(proc_files))
 
