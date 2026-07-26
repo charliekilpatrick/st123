@@ -4,7 +4,7 @@ Photometry helpers for individual images and combined catalogs.
 Submodules
 ----------
 - :mod:`st123.photometry.catalog` — DOLPHOT column mapping and combined catalogs
-- :mod:`st123.photometry.dolphot_prep` — mask / calcsky / paramfile prep
+- :mod:`st123.photometry.dolphot` — mask / calcsky / paramfile prep
 - :mod:`st123.photometry.warmstart` — NIRCam→MIRI warm-start run setup
 """
 
@@ -16,7 +16,7 @@ from st123.photometry.catalog import (
     map_columns,
     save_photfiles,
 )
-from st123.photometry.dolphot_prep import (
+from st123.photometry.dolphot import (
     MosaicPhotJob,
     apply_mirimask,
     apply_nircammask,

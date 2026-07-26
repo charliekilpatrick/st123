@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from st123.photometry.dolphot_prep import (
+from st123.photometry.dolphot import (
     classify_image_kind,
     dolphot_command,
     phot_to_xyt,
@@ -28,7 +28,7 @@ def test_classify_image_kind():
 
 
 def test_science_fits_paths_excludes_sky(tmp_path: Path):
-    from st123.photometry.dolphot_prep import science_fits_paths
+    from st123.photometry.dolphot import science_fits_paths
 
     (tmp_path / 'a_jhat.fits').write_text('')
     (tmp_path / 'a_jhat.sky.fits').write_text('')
@@ -39,7 +39,7 @@ def test_science_fits_paths_excludes_sky(tmp_path: Path):
 
 
 def test_parse_dolphot_frame_list(tmp_path: Path):
-    from st123.photometry.dolphot_prep import parse_dolphot_frame_list
+    from st123.photometry.dolphot import parse_dolphot_frame_list
 
     manifest = tmp_path / 'dolphot_frames.txt'
     ref = tmp_path / 'coadd_i2d.fits'
@@ -61,7 +61,7 @@ def test_parse_dolphot_frame_list(tmp_path: Path):
 
 
 def test_parse_param_image_list(tmp_path: Path):
-    from st123.photometry.dolphot_prep import parse_param_image_list
+    from st123.photometry.dolphot import parse_param_image_list
 
     param = tmp_path / 'dolphot.param'
     param.write_text(
@@ -76,7 +76,7 @@ def test_parse_param_image_list(tmp_path: Path):
 
 
 def test_per_image_params_kinds():
-    from st123.photometry.dolphot_prep import per_image_params
+    from st123.photometry.dolphot import per_image_params
     from st123.utils import settings
 
     assert per_image_params('short') is settings.short_params
@@ -155,7 +155,7 @@ def test_dolphot_command(tmp_path: Path):
 
 
 def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
-    from st123.photometry.dolphot_prep import resolve_dolphot_bin
+    from st123.photometry.dolphot import resolve_dolphot_bin
 
     fake_bin = tmp_path / 'bin'
     fake_bin.mkdir()
@@ -169,10 +169,10 @@ def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
 def test_resolve_dolphot_bin_missing_warns_and_required_raises(monkeypatch, caplog):
     import logging
 
-    from st123.photometry.dolphot_prep import resolve_dolphot_bin
+    from st123.photometry.dolphot import resolve_dolphot_bin
 
     monkeypatch.setenv('PATH', '')
-    with caplog.at_level(logging.WARNING, logger='st123.photometry.dolphot_prep'):
+    with caplog.at_level(logging.WARNING, logger='st123.photometry.dolphot'):
         assert resolve_dolphot_bin(required=False) is None
     assert 'DOLPHOT not found on PATH' in caplog.text
     with pytest.raises(FileNotFoundError, match='DOLPHOT not found'):
@@ -195,9 +195,9 @@ def test_discover_miri_jhat_from_summary(tmp_path: Path):
     assert len(found) == 1
 
 
-@mock.patch('st123.photometry.dolphot_prep.run_logged_subprocess')
+@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
 def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
-    from st123.photometry.dolphot_prep import prepare_frames
+    from st123.photometry.dolphot import prepare_frames
 
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -216,10 +216,10 @@ def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
     assert mock_run.call_args_list[1].kwargs.get('cwd') == fits.resolve().parent
 
 
-@mock.patch('st123.photometry.dolphot_prep.run_logged_subprocess')
+@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
 def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
     """Installed nircammask has no -etctime; ETC time is the default."""
-    from st123.photometry.dolphot_prep import apply_nircammask
+    from st123.photometry.dolphot import apply_nircammask
 
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -234,7 +234,7 @@ def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
 
 
 def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
-    from st123.photometry.dolphot_prep import (
+    from st123.photometry.dolphot import (
         discover_mosaic_phot_jobs,
         parse_dolphot_frame_list,
     )
@@ -270,9 +270,9 @@ def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
     assert len(jobs[0].frames) == 2
 
 
-def test_dolphot_prep_from_mosaic_cli(tmp_path: Path):
+def test_dolphot_from_mosaic_cli(tmp_path: Path):
     from st123.mosaic.mosaic import write_dolphot_frame_list
-    from st123.scripts import dolphot_prep as prep_script
+    from st123.scripts import dolphot as prep_script
 
     reduction = tmp_path / 'NGC3310' / 'reduction'
     box = reduction / 'reference' / 'group_0' / 'ref_0'
@@ -289,7 +289,7 @@ def test_dolphot_prep_from_mosaic_cli(tmp_path: Path):
     )
 
     with mock.patch(
-        'st123.scripts.dolphot_prep.prepare_mosaic_phot_job',
+        'st123.scripts.dolphot.prepare_mosaic_phot_job',
         return_value=reduction / 'phot_0_0' / 'dolphot.param',
     ) as prep:
         rc = prep_script.main(

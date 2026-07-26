@@ -25,7 +25,7 @@ from astropy.table import Table
 from gwcs import FITSImagingWCSTransform
 
 from st123.mosaic.mosaic import create_coadd_mosaic, create_gwcs
-from st123.photometry.dolphot_prep import apply_nircammask, science_fits_paths
+from st123.photometry.dolphot import apply_nircammask, science_fits_paths
 from st123.scripts import mosaic as mosaic_script
 from st123.scripts.utils.options import resolve_reduction_dir
 from st123.utils.helpers import input_list
@@ -208,7 +208,7 @@ def test_science_fits_paths_excludes_sky_products(tmp_path: Path):
     assert names == {'a_jhat.fits', 'coadd_0_0_f150w2_i2d.fits'}
 
 
-@patch('st123.photometry.dolphot_prep.run_logged_subprocess')
+@patch('st123.photometry.dolphot.run_logged_subprocess')
 def test_apply_nircammask_command_has_no_etctime(mock_run, tmp_path: Path):
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()

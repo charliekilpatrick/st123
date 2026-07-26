@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
-from st123.photometry.dolphot_prep import (
+from st123.photometry.dolphot import (
     classify_image_kind,
     dolphot_command,
     parse_param_image_list,

@@ -121,6 +121,9 @@ raw/
 plots/
 data/
 *temp*
+# Sphinx layout templates (must not be caught by *temp* above)
+!docs/_templates/
+!docs/_templates/**
 
 # One-off local dataset folder that previously sat in an older checkout
 frb20250316a/

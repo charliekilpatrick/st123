@@ -8,7 +8,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from st123.photometry.dolphot_prep import (
+from st123.photometry.dolphot import (
     discover_mosaic_phot_jobs,
     dolphot_command,
     prepare_frames,

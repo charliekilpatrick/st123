@@ -20,7 +20,7 @@ Alignment quality holds
     Per-filter MIRI REFERENCE→MIRI_REL dispersion thresholds.
 JHAT / DOLPHOT parameter dictionaries
     Merged into JHAT runs and DOLPHOT paramfiles by
-    :mod:`st123.alignment.align` and :mod:`st123.photometry.dolphot_prep`.
+    :mod:`st123.alignment.align` and :mod:`st123.photometry.dolphot`.
 """
 
 from __future__ import annotations
