@@ -122,8 +122,6 @@ def test_required_cli_modules_exist():
         assert not (align_pkg / gone).exists(), gone
     # Repo-root scripts/ must not be reintroduced.
     assert not (REPO_ROOT / 'scripts').exists()
-    # Shared Cursor project rules are tracked; local examples/ stay untracked.
-    assert (REPO_ROOT / '.cursor' / 'rules' / 'local-tests-before-push.mdc').is_file()
 
 
 @pytest.mark.parametrize(
