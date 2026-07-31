@@ -21,6 +21,7 @@ ALLOWED_MAIN_PREFIXES = (
 SKIP_PREFIXES = (
     'extdeps/',
     'tests/',
+    'examples/',
     '.cursor/',
     '.git/',
     'build/',
@@ -101,6 +102,7 @@ def test_required_cli_modules_exist():
     """Preserve packaged CLI modules under st123/scripts/."""
     assert (REPO_ROOT / 'st123' / 'scripts' / 'align.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'download.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'scripts' / 'coadd_phot.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'utils' / 'options.py').is_file()
     # Shared helpers must not sit beside entry-point modules.
     assert not (REPO_ROOT / 'st123' / 'scripts' / 'options.py').exists()
@@ -120,6 +122,8 @@ def test_required_cli_modules_exist():
         assert not (align_pkg / gone).exists(), gone
     # Repo-root scripts/ must not be reintroduced.
     assert not (REPO_ROOT / 'scripts').exists()
+    # Shared Cursor project rules are tracked; local examples/ stay untracked.
+    assert (REPO_ROOT / '.cursor' / 'rules' / 'local-tests-before-push.mdc').is_file()
 
 
 @pytest.mark.parametrize(

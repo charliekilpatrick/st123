@@ -379,6 +379,58 @@ def test_dolphot_from_mosaic_cli(tmp_path: Path):
     assert job.refimage.resolve() == ref.resolve()
 
 
+@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
+def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
+    mock_run, tmp_path: Path
+):
+    """MIRI mosaic prep must stage frames and write dolphotMIRI defaults."""
+    from st123.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
+    from st123.utils import settings
+
+    outdir = tmp_path / 'dolphot' / 'miri_0_0'
+    ref = tmp_path / 'coadd_0_0_f560w_i2d.fits'
+    frame = tmp_path / 'x_mirimage_jhat.fits'
+    ref.write_bytes(b'')
+    frame.write_bytes(b'')
+    job = MosaicPhotJob(
+        group=0,
+        box=0,
+        refimage=ref,
+        frames=(frame,),
+        phot_outdir=outdir,
+        frame_list=tmp_path / 'dolphot_frames.txt',
+    )
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    param = prepare_mosaic_phot_job(
+        job, instrument='miri', dolphot_bin=bin_dir
+    )
+    text = param.read_text()
+    assert 'img0_file = coadd_0_0_f560w_i2d' in text
+    assert 'img1_file = x_mirimage_jhat' in text
+    assert f"img1_raper = {settings.miri_params['raper']}" in text
+    assert 'UseWCS = 2' in text
+    assert 'MIRIvega = 0' in text
+    assert 'RCentroid = 1' in text
+    assert (outdir / ref.name).is_file()
+    assert (outdir / frame.name).is_file()
+    # mirimask + calcsky for ref and science frame
+    assert mock_run.call_count >= 2
+
+
+def test_dolphot_prep_parser_miri_defaults():
+    from st123.scripts import dolphot as prep_script
+
+    parser = prep_script.create_parser()
+    args = parser.parse_args(
+        ['--from-mosaic', '--instrument', 'miri', '--base-dir', '/tmp/x', '--ncores', '32']
+    )
+    assert args.instrument == 'miri'
+    assert args.from_mosaic is True
+    assert args.ncores == 32
+    assert args.ref_filter is None  # runtime default F560W applied in main
+
+
 def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
     from st123.mosaic.mosaic import write_dolphot_frame_list
     from st123.scripts import dolphot as prep_script

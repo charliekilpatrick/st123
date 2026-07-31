@@ -51,6 +51,36 @@ NIRCAM_LW_PIXEL_SCALE = 0.063
 MIRI_PIXEL_SCALE = 0.11
 
 
+def nircam_sw_filter_code(filter_name: str) -> int:
+    """
+    Return the numeric JWST filter code used for NIRCam SW selection.
+
+    Parameters
+    ----------
+    filter_name : str
+        Filter name such as ``F150W2`` or ``f1130w``.
+
+    Returns
+    -------
+    int
+        Full numeric code (``F1130W`` → ``1130``). Returns a large sentinel
+        when the name cannot be parsed.
+    """
+    match = re.match(r'f(\d+)', str(filter_name).lower())
+    return int(match.group(1)) if match else 10**9
+
+
+def is_nircam_sw_broadband(filter_name: str) -> bool:
+    """
+    True for NIRCam short-wavelength broadband filters (excludes narrowbands
+    and MIRI, whose codes are ≥560).
+    """
+    name = str(filter_name).lower()
+    if 'n' in name:
+        return False
+    return nircam_sw_filter_code(name) < 215
+
+
 def mosaic_pixel_scale_arcsec(
     filter_name: str,
     instrument: str | None = None,
@@ -398,8 +428,9 @@ class split_observations(object):
         for b in range(len(self.split_boxes)):
             bbox, reftable, refpgons = self.split_boxes[b], self.reftables[b], self.refpgons[b]
             filters = np.unique(reftable['filter'])
-            swmask = np.array([int(i[1:4]) for i in filters]) < 215
-            swmask = swmask & np.array(['n' not in i for i in filters])
+            # Full numeric codes (F1130W → 1130). Truncating to three digits
+            # previously misclassified MIRI F1130W as NIRCam SW.
+            swmask = np.array([is_nircam_sw_broadband(i) for i in filters])
 
             filter_footprints = []
             for filter_name in filters[swmask]:
@@ -577,7 +608,7 @@ def create_coadd_mosaic(
     filt : str
         Filter name for the resampled product.
     sci_header : fits.Header, optional
-        FITS WCS header used to build ``mosaic_gwcs.asdf`` when
+        FITS WCS header used to build ``mosaic_gwcs_<filt>.asdf`` when
         ``gwcs_file`` is not given.
     wcs_out : astropy.wcs.WCS, optional
         Astropy WCS used with ``shape_out`` when ``gwcs_file`` /

@@ -153,7 +153,9 @@ def test_create_coadd_mosaic_builds_and_sets_output_wcs(tmp_path: Path):
             table, outdir=str(tmp_path), filt='f150w', sci_header=hdr
         )
 
-    gwcs_path = tmp_path / 'mosaic_gwcs.asdf'
+    # Filter-specific GWCS filename avoids collisions when multiple filters
+    # share an outdir (see create_coadd_mosaic / mosaic_gwcs_{filt}.asdf).
+    gwcs_path = tmp_path / 'mosaic_gwcs_f150w.asdf'
     assert gwcs_path.is_file()
     assert image3.resample.output_wcs == str(gwcs_path)
     assert out == str(tmp_path / 'out_f150w' / 'f150w_i2d.fits')

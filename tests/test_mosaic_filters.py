@@ -16,7 +16,9 @@ from st123.mosaic.mosaic import (
     MIRI_PIXEL_SCALE,
     NIRCAM_LW_PIXEL_SCALE,
     NIRCAM_SW_PIXEL_SCALE,
+    is_nircam_sw_broadband,
     mosaic_pixel_scale_arcsec,
+    nircam_sw_filter_code,
     rescale_wcs_to_pixel_scale,
 )
 from st123.scripts import mosaic as mosaic_script
@@ -30,6 +32,18 @@ def test_mosaic_pixel_scale_by_filter_and_instrument():
     assert mosaic_pixel_scale_arcsec('F444W', 'NIRCAM') == NIRCAM_LW_PIXEL_SCALE
     assert mosaic_pixel_scale_arcsec('F560W') == MIRI_PIXEL_SCALE
     assert mosaic_pixel_scale_arcsec('F1000W', 'MIRI') == MIRI_PIXEL_SCALE
+
+
+def test_nircam_sw_broadband_excludes_miri_and_narrowbands():
+    """Regression: F1130W must use code 1130, not truncated 113."""
+    assert nircam_sw_filter_code('f1130w') == 1130
+    assert nircam_sw_filter_code('F150W2') == 150
+    assert is_nircam_sw_broadband('f150w2')
+    assert is_nircam_sw_broadband('f200w')
+    assert not is_nircam_sw_broadband('f1130w')
+    assert not is_nircam_sw_broadband('f560w')
+    assert not is_nircam_sw_broadband('f444w')
+    assert not is_nircam_sw_broadband('f187n')
 
 
 def test_parse_filter_list_comma_separated():

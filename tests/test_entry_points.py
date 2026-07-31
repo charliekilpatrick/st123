@@ -17,6 +17,7 @@ EXPECTED_SCRIPTS = {
     'catalog': 'st123.scripts.catalog:main',
     'dolphot-prep': 'st123.scripts.dolphot:main',
     'dolphot-warmstart': 'st123.scripts.dolphot_warmstart:main',
+    'coadd-phot': 'st123.scripts.coadd_phot:main',
 }
 
 SCRIPT_MODULES = [
@@ -29,6 +30,7 @@ SCRIPT_MODULES = [
     'st123.scripts.catalog',
     'st123.scripts.dolphot',
     'st123.scripts.dolphot_warmstart',
+    'st123.scripts.coadd_phot',
 ]
 
 

@@ -11,7 +11,9 @@ from st123.scripts import mosaic as mosaic_script
 from st123.scripts.utils.options import (
     create_parser,
     dataset_label,
+    default_miri_outdir,
     default_phot_dir,
+    default_warmstart_outdir,
     resolve_project_root,
     resolve_reduction_dir,
     st123_version_string,
@@ -78,6 +80,18 @@ def test_default_phot_dir_has_no_extra_obj_level(tmp_path: Path):
     # Only one NGC3310 in the full path (the project root)
     assert str(phot).count('NGC3310') == 1
     assert phot.parts[-2:] == ('reduction', 'phot_0_0')
+
+
+def test_default_dolphot_outdirs(tmp_path: Path):
+    root = tmp_path / 'NGC3310'
+    (root / 'JWST').mkdir(parents=True)
+    assert default_miri_outdir(root) == (root / 'dolphot' / 'miri_0_0').resolve()
+    assert default_warmstart_outdir(root) == (
+        root / 'dolphot' / 'nircam_miri_0_0'
+    ).resolve()
+    assert default_miri_outdir(root, group=1, box=2) == (
+        root / 'dolphot' / 'miri_1_2'
+    ).resolve()
 
 
 def test_align_accepts_base_dir_without_obj():
