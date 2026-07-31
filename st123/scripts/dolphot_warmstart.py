@@ -108,6 +108,54 @@ def create_parser():
         action='store_true',
         help='Copy NIRCam products instead of hardlinking.',
     )
+    parser.add_argument(
+        '--prune-xyt-for-miri',
+        action='store_true',
+        help=(
+            'Thin warmstart.xyt for MIRI: type=1, SNR>=10, crowd<=0.5, '
+            'sharp^2<=0.01, minsep=0.30 arcsec (overridable below).'
+        ),
+    )
+    parser.add_argument(
+        '--xyt-types',
+        type=int,
+        nargs='+',
+        default=None,
+        help='DOLPHOT object types to keep in warmstart.xyt (e.g. 1).',
+    )
+    parser.add_argument(
+        '--xyt-snr-min',
+        type=float,
+        default=None,
+        help='Minimum NIRCam SNR for warmstart.xyt seeds.',
+    )
+    parser.add_argument(
+        '--xyt-crowd-max',
+        type=float,
+        default=None,
+        help='Maximum NIRCam crowding for warmstart.xyt seeds.',
+    )
+    parser.add_argument(
+        '--xyt-sharp2-max',
+        type=float,
+        default=None,
+        help='Maximum sharpness^2 for warmstart.xyt seeds.',
+    )
+    parser.add_argument(
+        '--xyt-min-sep-arcsec',
+        type=float,
+        default=None,
+        help='Minimum seed separation on the NIRCam reference (arcsec).',
+    )
+    parser.add_argument(
+        '--xyt-force-xy',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated reference X,Y to always keep in warmstart.xyt '
+            '(e.g. 1584.25,2793.24 for SN 2026sqf).'
+        ),
+    )
     add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
@@ -156,6 +204,14 @@ def main(argv=None) -> int:
             logger.info('Data root:  %s', data_root)
             logger.info('Summary:    %s', summary)
 
+        force_xy = None
+        if args.xyt_force_xy:
+            parts = [float(x) for x in str(args.xyt_force_xy).split(',')]
+            if len(parts) != 2:
+                logger.error('--xyt-force-xy must be X,Y')
+                return 1
+            force_xy = [(parts[0], parts[1])]
+
         try:
             result = setup_miri_warmstart(
                 nircam_dir,
@@ -169,6 +225,13 @@ def main(argv=None) -> int:
                 phot_out=args.phot_out,
                 prepare_miri=not args.skip_miri_prep,
                 use_hardlink=not args.copy,
+                xyt_types=args.xyt_types,
+                xyt_snr_min=args.xyt_snr_min,
+                xyt_crowd_max=args.xyt_crowd_max,
+                xyt_sharp2_max=args.xyt_sharp2_max,
+                xyt_min_sep_arcsec=args.xyt_min_sep_arcsec,
+                xyt_force_xy=force_xy,
+                prune_xyt_for_miri=args.prune_xyt_for_miri,
                 ncores=args.ncores,
             )
         except FileNotFoundError as exc:

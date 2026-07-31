@@ -969,12 +969,24 @@ def phot_to_xyt(
     xyt_file: PathLike,
     *,
     types: Optional[Iterable[int]] = None,
+    snr_min: Optional[float] = None,
+    crowd_max: Optional[float] = None,
+    sharp2_max: Optional[float] = None,
+    min_sep_pix: Optional[float] = None,
+    force_xy: Optional[Sequence[tuple[float, float]]] = None,
+    force_tol_pix: float = 0.05,
 ) -> Path:
     """
     Build a warm-start star list from a DOLPHOT ``.phot`` catalog.
 
     Columns (1-based from the DOLPHOT manual): extension, Z, X, Y, type (col
     11), and SNR (col 6). Extension, Z, and type are written as integers.
+    Optional quality cuts use sharpness (col 7) and crowding (col 10).
+
+    When ``min_sep_pix`` is set, survivors are ranked by descending SNR and
+    kept greedily so no two retained seeds are closer than that separation
+    (MIRI-appropriate thinning). Coordinates in ``force_xy`` are always kept
+    if present in the catalog (even when they fail quality cuts).
 
     Parameters
     ----------
@@ -984,6 +996,18 @@ def phot_to_xyt(
         Output warm-start list path (typically ``warmstart.xyt``).
     types : iterable of int or None, optional
         If provided, keep only objects whose DOLPHOT type appears in this set.
+    snr_min : float or None, optional
+        Minimum object SNR (DOLPHOT column 6).
+    crowd_max : float or None, optional
+        Maximum crowding (DOLPHOT column 10).
+    sharp2_max : float or None, optional
+        Maximum ``sharpness**2`` (DOLPHOT column 7); e.g. ``0.01``.
+    min_sep_pix : float or None, optional
+        Minimum separation in reference-image pixels between retained seeds.
+    force_xy : sequence of (x, y) or None, optional
+        Positions that must be retained when present in the catalog.
+    force_tol_pix : float, optional
+        Match tolerance for ``force_xy`` (pixels).
 
     Returns
     -------
@@ -993,33 +1017,108 @@ def phot_to_xyt(
     Raises
     ------
     ValueError
-        If no stars pass the type filter and are written to the output.
+        If no stars pass the filters and are written to the output.
     """
     phot_path = Path(photfile)
     out = Path(xyt_file)
     out.parent.mkdir(parents=True, exist_ok=True)
     type_set = set(int(t) for t in types) if types is not None else None
+    force_list = list(force_xy) if force_xy else []
 
-    n_written = 0
-    with phot_path.open() as fin, out.open('w') as fout:
+    # Collect rows that pass quality cuts (or are force-matched).
+    # Each item: (snr, ext, z, x, y, obj_type, snr_str, forced)
+    candidates: list[tuple[float, int, int, str, str, int, str, bool]] = []
+    forced_rows: list[tuple[float, int, int, str, str, int, str, bool]] = []
+
+    with phot_path.open() as fin:
         for line in fin:
             parts = line.split()
             if len(parts) < 11:
                 continue
             ext = int(float(parts[0]))
             z = int(float(parts[1]))
-            x = parts[2]
-            y = parts[3]
-            snr = parts[5]
+            x_str, y_str = parts[2], parts[3]
+            x = float(x_str)
+            y = float(y_str)
+            snr = float(parts[5])
+            sharp = float(parts[6])
+            crowd = float(parts[9])
             obj_type = int(float(parts[10]))
+            snr_str = parts[5]
+
+            is_forced = any(
+                abs(x - fx) <= force_tol_pix and abs(y - fy) <= force_tol_pix
+                for fx, fy in force_list
+            )
+            if is_forced:
+                forced_rows.append(
+                    (snr, ext, z, x_str, y_str, obj_type, snr_str, True)
+                )
+                continue
+
             if type_set is not None and obj_type not in type_set:
                 continue
-            fout.write(f'{ext} {z} {x} {y} {obj_type} {snr}\n')
-            n_written += 1
+            if snr_min is not None and snr < snr_min:
+                continue
+            if crowd_max is not None and crowd > crowd_max:
+                continue
+            if sharp2_max is not None and sharp * sharp > sharp2_max:
+                continue
+            candidates.append(
+                (snr, ext, z, x_str, y_str, obj_type, snr_str, False)
+            )
 
-    if n_written == 0:
+    # Greedy min-separation (when requested): forced seeds first, then
+    # brightest remaining. Otherwise preserve catalog order (forced rows
+    # that skipped quality cuts are emitted first, then quality survivors).
+    kept: list[tuple[float, int, int, str, str, int, str, bool]] = []
+    kept_xy: list[tuple[float, float]] = []
+    use_min_sep = min_sep_pix is not None and min_sep_pix > 0
+
+    def _accept(row: tuple[float, int, int, str, str, int, str, bool]) -> bool:
+        x = float(row[3])
+        y = float(row[4])
+        if use_min_sep:
+            for kx, ky in kept_xy:
+                if (x - kx) ** 2 + (y - ky) ** 2 < float(min_sep_pix) ** 2:
+                    return False
+        kept.append(row)
+        kept_xy.append((x, y))
+        return True
+
+    if use_min_sep:
+        ordered = sorted(forced_rows, key=lambda r: -r[0]) + sorted(
+            candidates, key=lambda r: -r[0]
+        )
+    else:
+        ordered = list(forced_rows) + list(candidates)
+    for row in ordered:
+        _accept(row)
+
+    with out.open('w') as fout:
+        for _snr, ext, z, x_str, y_str, obj_type, snr_str, _forced in kept:
+            fout.write(f'{ext} {z} {x_str} {y_str} {obj_type} {snr_str}\n')
+
+    if not kept:
         raise ValueError(f'No stars written to warm-start list from {phot_path}')
+    logger.info(
+        'Wrote %s (%d stars; forced=%d, quality=%d)',
+        out,
+        len(kept),
+        sum(1 for r in kept if r[7]),
+        sum(1 for r in kept if not r[7]),
+    )
     return out
+
+
+# Recommended warm-start seed cuts for MIRI (match catalog.save_photfiles
+# quality cuts, plus a MIRI-scale minimum separation).
+MIRI_WARMSTART_XYT_TYPES = (1,)
+MIRI_WARMSTART_SNR_MIN = 10.0
+MIRI_WARMSTART_CROWD_MAX = 0.5
+MIRI_WARMSTART_SHARP2_MAX = 0.01
+# ~0.30" on a 0.031"/pix NIRCam reference → ~10 pix.
+MIRI_WARMSTART_MIN_SEP_ARCSEC = 0.30
 
 
 def parse_param_image_list(param_file: PathLike) -> tuple[str, list[str]]:

@@ -13,7 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
+from astropy.io import fits
+
 from st123.photometry.dolphot import (
+    MIRI_WARMSTART_CROWD_MAX,
+    MIRI_WARMSTART_MIN_SEP_ARCSEC,
+    MIRI_WARMSTART_SHARP2_MAX,
+    MIRI_WARMSTART_SNR_MIN,
+    MIRI_WARMSTART_XYT_TYPES,
     classify_image_kind,
     dolphot_command,
     parse_param_image_list,
@@ -266,6 +273,12 @@ def setup_miri_warmstart(
     prepare_miri: bool = True,
     use_hardlink: bool = True,
     xyt_types: Optional[Sequence[int]] = None,
+    xyt_snr_min: Optional[float] = None,
+    xyt_crowd_max: Optional[float] = None,
+    xyt_sharp2_max: Optional[float] = None,
+    xyt_min_sep_arcsec: Optional[float] = None,
+    xyt_force_xy: Optional[Sequence[tuple[float, float]]] = None,
+    prune_xyt_for_miri: bool = False,
     ncores: int = 1,
 ) -> WarmStartResult:
     """
@@ -316,6 +329,15 @@ def setup_miri_warmstart(
     xyt_types : sequence of int or None, optional
         DOLPHOT object types to retain in ``warmstart.xyt`` (forwarded to
         :func:`phot_to_xyt`).
+    xyt_snr_min, xyt_crowd_max, xyt_sharp2_max : float or None, optional
+        Quality cuts for ``warmstart.xyt`` (see :func:`phot_to_xyt`).
+    xyt_min_sep_arcsec : float or None, optional
+        Minimum seed separation on the NIRCam reference (arcsec).
+    xyt_force_xy : sequence of (x, y) or None, optional
+        Reference-pixel coordinates that must be retained (e.g. the SN).
+    prune_xyt_for_miri : bool, optional
+        If True, apply the recommended MIRI seed cuts (type=1, SNR≥10,
+        crowd≤0.5, sharp²≤0.01, minsep=0.30″) unless overridden above.
     ncores : int, optional
         ``MaxThreads`` for the generated DOLPHOT launch command.
 
@@ -385,8 +407,41 @@ def setup_miri_warmstart(
         if need_prep:
             prepare_frames(need_prep, instrument='miri', dolphot_bin=dolphot_bin)
 
+    if prune_xyt_for_miri:
+        if xyt_types is None:
+            xyt_types = MIRI_WARMSTART_XYT_TYPES
+        if xyt_snr_min is None:
+            xyt_snr_min = MIRI_WARMSTART_SNR_MIN
+        if xyt_crowd_max is None:
+            xyt_crowd_max = MIRI_WARMSTART_CROWD_MAX
+        if xyt_sharp2_max is None:
+            xyt_sharp2_max = MIRI_WARMSTART_SHARP2_MAX
+        if xyt_min_sep_arcsec is None:
+            xyt_min_sep_arcsec = MIRI_WARMSTART_MIN_SEP_ARCSEC
+
+    min_sep_pix = None
+    if xyt_min_sep_arcsec is not None and xyt_min_sep_arcsec > 0:
+        from astropy.wcs import WCS
+        import astropy.units as u
+
+        with fits.open(ref_dst) as hdul:
+            sci = hdul['SCI'] if 'SCI' in hdul else hdul[0]
+            pixscale = float(
+                abs(WCS(sci.header).proj_plane_pixel_scales()[0].to(u.arcsec).value)
+            )
+        min_sep_pix = float(xyt_min_sep_arcsec) / pixscale
+
     xyt_path = out / 'warmstart.xyt'
-    phot_to_xyt(phot_src, xyt_path, types=xyt_types)
+    phot_to_xyt(
+        phot_src,
+        xyt_path,
+        types=xyt_types,
+        snr_min=xyt_snr_min,
+        crowd_max=xyt_crowd_max,
+        sharp2_max=xyt_sharp2_max,
+        min_sep_pix=min_sep_pix,
+        force_xy=xyt_force_xy,
+    )
 
     all_images = list(nircam_staged) + list(miri_staged)
     kinds = [classify_image_kind(p) for p in all_images]
@@ -412,12 +467,20 @@ def setup_miri_warmstart(
     )
 
     # Record a small README with the launch command.
+    n_xyt = sum(1 for _ in xyt_path.open())
     readme = out / 'WARMSTART_README.txt'
     readme.write_text(
         'DOLPHOT NIRCam+MIRI warm-start run\n'
         f'NIRCam source: {nircam_dir}\n'
         f'Photometry seed: {phot_src}\n'
-        f'xytfile: {xyt_path.name} ({sum(1 for _ in xyt_path.open())} stars)\n'
+        f'xytfile: {xyt_path.name} ({n_xyt} stars)\n'
+        f'xyt prune_for_miri: {prune_xyt_for_miri}\n'
+        f'xyt types: {list(xyt_types) if xyt_types is not None else None}\n'
+        f'xyt snr_min: {xyt_snr_min}\n'
+        f'xyt crowd_max: {xyt_crowd_max}\n'
+        f'xyt sharp2_max: {xyt_sharp2_max}\n'
+        f'xyt min_sep_arcsec: {xyt_min_sep_arcsec}\n'
+        f'xyt force_xy: {list(xyt_force_xy) if xyt_force_xy else None}\n'
         f'NIRCam frames: {len(nircam_staged)}\n'
         f'MIRI frames: {len(miri_staged)}\n'
         f'Parameter file: {param_path.name}\n'

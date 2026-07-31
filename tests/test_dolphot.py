@@ -88,7 +88,7 @@ def test_per_image_params_kinds():
 
 def test_phot_to_xyt(tmp_path: Path):
     phot = tmp_path / 'run.phot'
-    # ext Z X Y chi SNR ... type(at col 11)
+    # ext Z X Y chi SNR sharp round maj crowd type ...
     phot.write_text(
         '1 1 10.5 20.5 1.0 50.0 0.0 0.0 0.0 0.0 1 1\n'
         '1 1 11.0 21.0 1.0 5.0 0.0 0.0 0.0 0.0 2 1\n'
@@ -103,6 +103,35 @@ def test_phot_to_xyt(tmp_path: Path):
 
     phot_to_xyt(phot, xyt, types=[1])
     assert xyt.read_text().splitlines() == ['1 1 10.5 20.5 1 50.0']
+
+
+def test_phot_to_xyt_miri_prune_and_force(tmp_path: Path):
+    phot = tmp_path / 'run.phot'
+    # Bright SN, close bright neighbor (should drop via min_sep), faint junk.
+    phot.write_text(
+        '1 1 100.0 200.0 1.0 100.0 0.01 0.0 0.0 0.2 1 1\n'
+        '1 1 103.0 200.0 1.0 40.0 0.01 0.0 0.0 0.2 1 1\n'
+        '1 1 150.0 250.0 1.0 5.0 0.01 0.0 0.0 0.2 1 1\n'
+        '1 1 180.0 280.0 1.0 30.0 0.5 0.0 0.0 0.2 1 1\n'
+        '1 1 200.0 300.0 1.0 25.0 0.01 0.0 0.0 2.0 1 1\n'
+    )
+    xyt = tmp_path / 'warmstart.xyt'
+    phot_to_xyt(
+        phot,
+        xyt,
+        types=[1],
+        snr_min=10.0,
+        crowd_max=0.5,
+        sharp2_max=0.01,
+        min_sep_pix=5.0,
+        force_xy=[(100.0, 200.0)],
+    )
+    rows = xyt.read_text().splitlines()
+    assert any(r.startswith('1 1 100.0 200.0') for r in rows)
+    assert not any(r.startswith('1 1 103.0 200.0') for r in rows)  # too close
+    assert not any(r.startswith('1 1 150.0 250.0') for r in rows)  # low SNR
+    assert not any(r.startswith('1 1 180.0 280.0') for r in rows)  # sharp^2
+    assert not any(r.startswith('1 1 200.0 300.0') for r in rows)  # crowded
 
 
 def test_write_paramfile_includes_miri_and_xyt(tmp_path: Path):

@@ -84,6 +84,12 @@ Thumbs.db
 
 # Local analysis / scratch scripts (not part of the package)
 examples/
+# Track the reusable M51/M82 warm-start driver (not per-host JHAT lists)
+!examples/m51_m82_warmstart/
+!examples/m51_m82_warmstart/**
+examples/m51_m82_warmstart/**/__pycache__/
+examples/m51_m82_warmstart/**/*.pyc
+
 
 # -----------------------------------------------------------------------------
 # Secrets / local env (never commit credentials)
