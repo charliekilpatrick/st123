@@ -82,9 +82,9 @@ Thumbs.db
 # Local Cursor state (project rules stay machine-local; never push)
 .cursor/
 
-# Local analysis / scratch scripts (not part of the package)
-examples/
-# Track the reusable M51/M82 warm-start driver (not per-host JHAT lists)
+# Local analysis / scratch scripts (not part of the package).
+# Ignore contents of examples/, then re-include the reusable M51/M82 driver.
+examples/*
 !examples/m51_m82_warmstart/
 !examples/m51_m82_warmstart/**
 examples/m51_m82_warmstart/**/__pycache__/
