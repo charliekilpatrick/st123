@@ -107,7 +107,11 @@ def get_filter(image: str | Path) -> str:
 
 def get_module(image: str | Path) -> str:
     """
-    Read the JWST module or NIRCam letter from a FITS header.
+    Read the JWST module identifier from a FITS header.
+
+    NIRCam exposures use ``MODULE`` (``A`` / ``B``) or the letter embedded in
+    ``DETECTOR`` (``NRCB1`` → ``b``). MIRI has no module keyword and is
+    returned as ``miri``.
 
     Parameters
     ----------
@@ -117,14 +121,44 @@ def get_module(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase module identifier (``MODULE`` or first NRC detector letter).
+        Lowercase module identifier (``a``, ``b``, ``miri``, …).
     """
     try:
-        f = str(fits.getval(image, 'MODULE'))
+        module = str(fits.getval(image, 'MODULE')).strip()
+        if module:
+            return module.lower()
     except Exception:
-        f = str(fits.getval(image, 'DETECTOR'))
-        f = f.split('NRC')[1][0]
-    return f.lower()
+        pass
+
+    detector = ''
+    try:
+        detector = str(fits.getval(image, 'DETECTOR')).strip().upper()
+    except Exception:
+        detector = ''
+
+    # NIRCam: NRCA1 / NRCBLONG → module letter.
+    if detector.startswith('NRC') and len(detector) > 3:
+        return detector[3].lower()
+
+    instrument = ''
+    try:
+        instrument = str(fits.getval(image, 'INSTRUME')).strip().lower()
+    except Exception:
+        pass
+
+    if 'miri' in instrument or detector.startswith('MIR'):
+        return 'miri'
+
+    # Last resort: parse detector token from the file name.
+    chip = get_detector_chip(str(image))
+    if chip:
+        chip_l = chip.lower()
+        if chip_l.startswith('nrc') and len(chip_l) > 3:
+            return chip_l[3]
+        if 'mir' in chip_l:
+            return 'miri'
+
+    return 'unknown'
 
 
 def get_instrument(image: str | Path) -> str:
@@ -531,7 +565,13 @@ def input_list(input_images: list[str | Path]) -> Table:
     chip = [get_chip(image) for image in img]
     zpt = [get_zpt(i, ccdchip=c, zptype='abmag') for i, c in zip(img, chip)]
     visit = [fits.getval(i, 'VISIT_ID', ext=0) for i in img]
-    pupil = [fits.getval(i, 'PUPIL', ext=0) for i in img]
+    # MIRI (and some HST) products omit PUPIL; treat as clear / unused.
+    pupil = []
+    for path in img:
+        try:
+            pupil.append(str(fits.getval(path, 'PUPIL', ext=0)))
+        except Exception:
+            pupil.append('CLEAR')
     image_number = [0] * len(img)
 
     obstable = Table(

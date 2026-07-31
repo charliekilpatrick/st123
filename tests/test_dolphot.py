@@ -153,6 +153,41 @@ def test_dolphot_command(tmp_path: Path):
     )
     assert 'MaxThreads=1' in default_cmd
 
+    nohup_cmd = dolphot_command(
+        '/tmp/run',
+        phot_out='out.phot',
+        param_file='dolphot.param',
+        dolphot_bin=bin_dir,
+        ncores=32,
+        nohup=True,
+    )
+    assert 'nohup' in nohup_cmd
+    assert '> dolphot.out 2> dolphot.err' in nohup_cmd
+    assert nohup_cmd.endswith('&')
+
+
+def test_filter_frames_and_resolve_coadd_ref(tmp_path: Path):
+    from st123.photometry.dolphot import (
+        filter_frames_for_instrument,
+        resolve_coadd_ref,
+    )
+
+    miri = tmp_path / 'a_mirimage_jhat.fits'
+    nircam = tmp_path / 'b_nrcb1_jhat.fits'
+    miri.write_text('')
+    nircam.write_text('')
+    assert filter_frames_for_instrument([miri, nircam], 'miri') == [miri]
+    assert filter_frames_for_instrument([miri, nircam], 'nircam') == [nircam]
+
+    box = tmp_path / 'ref_0'
+    box.mkdir()
+    f560 = box / 'coadd_0_0_f560w_i2d.fits'
+    f770 = box / 'coadd_0_0_f770w_i2d.fits'
+    f560.write_text('')
+    f770.write_text('')
+    assert resolve_coadd_ref(box, 'F560W', fallback=f770) == f560
+    assert resolve_coadd_ref(box, None, fallback=f770) == f770
+
 
 def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
     from st123.photometry.dolphot import resolve_dolphot_bin
@@ -270,6 +305,42 @@ def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
     assert len(jobs[0].frames) == 2
 
 
+def test_discover_mosaic_phot_jobs_miri_only(tmp_path: Path):
+    from st123.photometry.dolphot import discover_mosaic_phot_jobs
+    from st123.mosaic.mosaic import write_dolphot_frame_list
+
+    project = tmp_path / 'NGC3310'
+    reduction = project / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_0'
+    jhat = reduction / 'jhat'
+    box.mkdir(parents=True)
+    jhat.mkdir(parents=True)
+    ref_f560 = box / 'coadd_0_0_f560w_i2d.fits'
+    ref_f150 = box / 'coadd_0_0_f150w2_i2d.fits'
+    miri = jhat / 'a_mirimage_jhat.fits'
+    nircam = jhat / 'b_nrcb1_jhat.fits'
+    for path in (ref_f560, ref_f150, miri, nircam):
+        path.write_text('x')
+    write_dolphot_frame_list(
+        str(box),
+        refimage=str(ref_f150),
+        frames=[str(miri), str(nircam)],
+        group=0,
+        box=0,
+    )
+    jobs = discover_mosaic_phot_jobs(
+        reduction,
+        instrument='miri',
+        ref_filter='F560W',
+        phot_outdir_root=project / 'dolphot',
+        outdir_prefix='miri',
+    )
+    assert len(jobs) == 1
+    assert jobs[0].refimage.resolve() == ref_f560.resolve()
+    assert list(jobs[0].frames) == [miri]
+    assert jobs[0].phot_outdir == project / 'dolphot' / 'miri_0_0'
+
+
 def test_dolphot_from_mosaic_cli(tmp_path: Path):
     from st123.mosaic.mosaic import write_dolphot_frame_list
     from st123.scripts import dolphot as prep_script
@@ -306,3 +377,51 @@ def test_dolphot_from_mosaic_cli(tmp_path: Path):
     job = prep.call_args.args[0]
     assert job.group == 0 and job.box == 0
     assert job.refimage.resolve() == ref.resolve()
+
+
+def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
+    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.scripts import dolphot as prep_script
+
+    project = tmp_path / 'NGC3310'
+    reduction = project / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_0'
+    jhat = reduction / 'jhat'
+    box.mkdir(parents=True)
+    jhat.mkdir(parents=True)
+    (project / 'JWST').mkdir(parents=True)
+    ref = box / 'coadd_0_0_f560w_i2d.fits'
+    miri = jhat / 'x_mirimage_jhat.fits'
+    nircam = jhat / 'y_nrcb1_jhat.fits'
+    for path in (ref, miri, nircam):
+        path.write_bytes(b'')
+    write_dolphot_frame_list(
+        str(box),
+        refimage=str(ref),
+        frames=[str(miri), str(nircam)],
+        group=0,
+        box=0,
+    )
+
+    with mock.patch(
+        'st123.scripts.dolphot.prepare_mosaic_phot_job',
+        return_value=project / 'dolphot' / 'miri_0_0' / 'dolphot.param',
+    ) as prep:
+        rc = prep_script.main(
+            [
+                '--from-mosaic',
+                '--base-dir',
+                str(project),
+                '--instrument',
+                'miri',
+                '--ncores',
+                '32',
+            ]
+        )
+    assert rc == 0
+    prep.assert_called_once()
+    job = prep.call_args.args[0]
+    assert job.phot_outdir == project / 'dolphot' / 'miri_0_0'
+    assert job.refimage.resolve() == ref.resolve()
+    assert list(job.frames) == [miri]
+    assert prep.call_args.kwargs['instrument'] == 'miri'

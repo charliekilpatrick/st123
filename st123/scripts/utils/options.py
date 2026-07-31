@@ -245,6 +245,27 @@ def default_warmstart_outdir(base_dir: Path, *, group: int = 0, box: int = 0) ->
     return resolve_project_root(base_dir) / 'dolphot' / f'nircam_miri_{group}_{box}'
 
 
+def default_miri_outdir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
+    """
+    Return ``{project}/dolphot/miri_{group}_{box}``.
+
+    Parameters
+    ----------
+    base_dir : pathlib.Path
+        Project root or reduction workdir from ``--base-dir``.
+    group : int, optional
+        Mosaic overlap group index.
+    box : int, optional
+        Mosaic box index within the group.
+
+    Returns
+    -------
+    pathlib.Path
+        Default MIRI-only DOLPHOT output directory.
+    """
+    return resolve_project_root(base_dir) / 'dolphot' / f'miri_{group}_{box}'
+
+
 def default_alignment_summary(base_dir: Path) -> Path:
     """
     Return ``{project}/{label}_alignment_summary.txt``.

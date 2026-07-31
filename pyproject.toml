@@ -75,6 +75,7 @@ region = "st123.scripts.region:main"
 catalog = "st123.scripts.catalog:main"
 dolphot-prep = "st123.scripts.dolphot:main"
 dolphot-warmstart = "st123.scripts.dolphot_warmstart:main"
+coadd-phot = "st123.scripts.coadd_phot:main"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }

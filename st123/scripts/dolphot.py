@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 
 from st123.photometry.dolphot import (
+    MosaicPhotJob,
     discover_mosaic_phot_jobs,
     dolphot_command,
     prepare_frames,
@@ -21,8 +22,10 @@ from st123.scripts.utils.options import (
     configure_logging_from_args,
     create_parser as build_parser,
     dataset_label,
+    resolve_project_root,
     resolve_reduction_dir,
 )
+from st123.utils.settings import miri_base_params
 from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
@@ -33,21 +36,26 @@ def create_parser():
         description=(
             'Stage JHAT frames for DOLPHOT: write dolphot.param, run '
             'nircammask/mirimask and calcsky. Use --from-mosaic after mosaic, '
-            'or pass --files / --refimage explicitly.'
+            'or pass --files / --refimage explicitly. For MIRI-only runs, use '
+            '--from-mosaic --instrument miri (default ref filter F560W; '
+            'stages under <project>/dolphot/miri_*).'
         ),
     )
     parser.add_argument(
         '--instrument',
         choices=('nircam', 'miri'),
         default='nircam',
-        help='Instrument module (selects mask binary and calcsky defaults).',
+        help=(
+            'Instrument module (selects mask binary, calcsky defaults, and '
+            'frame filtering with --from-mosaic).'
+        ),
     )
     parser.add_argument(
         '--from-mosaic',
         action='store_true',
         help=(
             'Discover coadds under <reduction>/reference/group_*/ref_*/ '
-            '(and dolphot_frames.txt when present) and prep phot_* runs.'
+            '(and dolphot_frames.txt when present) and prep phot/miri runs.'
         ),
     )
     parser.add_argument(
@@ -71,8 +79,9 @@ def create_parser():
         type=str,
         default=None,
         help=(
-            'Staging directory for --files mode (writes dolphot.param when '
-            '--refimage is set). Ignored with --from-mosaic.'
+            'Staging directory. With --from-mosaic, overrides the default '
+            '(reduction/phot_* or <project>/dolphot/miri_*). With --files, '
+            'stages frames and writes dolphot.param when --refimage is set.'
         ),
     )
     parser.add_argument(
@@ -80,6 +89,16 @@ def create_parser():
         type=str,
         default=None,
         help='Reference image for dolphot.param (--files mode).',
+    )
+    parser.add_argument(
+        '--ref-filter',
+        type=str,
+        default=None,
+        help=(
+            'With --from-mosaic, prefer coadd_*_<filter>_i2d.fits as the '
+            'reference. Default: F560W when --instrument miri, else the '
+            'manifest # ref line.'
+        ),
     )
     parser.add_argument(
         '--dolphot-bin',
@@ -104,48 +123,118 @@ def create_parser():
     return parser
 
 
+def _log_run_commands(
+    outdir: Path,
+    *,
+    phot_out: str,
+    param_file: str,
+    dolphot_bin: str | None,
+    ncores: int,
+) -> None:
+    logger.info(
+        'Run DOLPHOT with:\n  %s',
+        dolphot_command(
+            outdir,
+            phot_out=phot_out,
+            param_file=param_file,
+            dolphot_bin=dolphot_bin,
+            ncores=ncores,
+        ),
+    )
+    logger.info(
+        'Or detach with nohup:\n  %s',
+        dolphot_command(
+            outdir,
+            phot_out=phot_out,
+            param_file=param_file,
+            dolphot_bin=dolphot_bin,
+            ncores=ncores,
+            nohup=True,
+        ),
+    )
+
+
 def _run_from_mosaic(args) -> int:
     if args.base_dir is None:
         logger.error('--from-mosaic requires --base-dir')
         return 1
     reduction = Path(resolve_reduction_dir(args.base_dir))
+    project = Path(resolve_project_root(args.base_dir))
     if args.verbose:
         logger.info('Dataset: %s', dataset_label(args.base_dir))
         logger.info('Reduction workdir: %s', reduction)
-    jobs = discover_mosaic_phot_jobs(reduction)
+
+    instrument = args.instrument
+    ref_filter = args.ref_filter
+    if ref_filter is None and instrument == 'miri':
+        ref_filter = 'F560W'
+
+    if instrument == 'miri':
+        out_root = project / 'dolphot'
+        outdir_prefix = 'miri'
+    else:
+        out_root = reduction
+        outdir_prefix = 'phot'
+
+    jobs = discover_mosaic_phot_jobs(
+        reduction,
+        instrument=instrument,
+        ref_filter=ref_filter,
+        phot_outdir_root=out_root,
+        outdir_prefix=outdir_prefix,
+    )
     if not jobs:
         logger.error(
             'no mosaic coadds / dolphot_frames.txt under %s',
             reduction / 'reference',
         )
         return 1
+
+    # Optional single-outdir override (one box expected).
+    if args.outdir is not None:
+        if len(jobs) > 1:
+            logger.error(
+                '--outdir with --from-mosaic requires a single mosaic box '
+                '(found %d)',
+                len(jobs),
+            )
+            return 1
+        job0 = jobs[0]
+        jobs = [
+            MosaicPhotJob(
+                group=job0.group,
+                box=job0.box,
+                refimage=job0.refimage,
+                frames=job0.frames,
+                phot_outdir=Path(args.outdir),
+                frame_list=job0.frame_list,
+            )
+        ]
+
     for job in jobs:
         if args.verbose:
             logger.info(
-                'Prep phot_%s_%s: ref=%s frames=%d',
-                job.group,
-                job.box,
+                'Prep %s: ref=%s frames=%d outdir=%s',
+                job.phot_outdir.name,
                 job.refimage.name,
                 len(job.frames),
+                job.phot_outdir,
             )
         param = prepare_mosaic_phot_job(
             job,
-            instrument=args.instrument,
+            instrument=instrument,
             dolphot_bin=args.dolphot_bin,
             skip_mask=args.skip_mask,
             skip_sky=args.skip_sky,
         )
         logger.info('Wrote %s (%d frames + ref)', param, len(job.frames))
-        phot_out = f'phot_{job.group}_{job.box}.phot'
-        logger.info(
-            'Run DOLPHOT with: %s',
-            dolphot_command(
-                job.phot_outdir,
-                phot_out=phot_out,
-                param_file=param.name,
-                dolphot_bin=args.dolphot_bin,
-                ncores=args.ncores,
-            ),
+        phot_out = f'{job.phot_outdir.name}.phot'
+        _log_run_commands(
+            job.phot_outdir,
+            phot_out=phot_out,
+            param_file=param.name,
+            dolphot_bin=args.dolphot_bin,
+            ncores=args.ncores,
         )
     return 0
 
@@ -189,22 +278,23 @@ def _run_explicit(args) -> int:
             ref_dst = outdir / ref_src.name
             if not ref_dst.exists():
                 shutil.copy2(ref_src, ref_dst)
+            global_params = (
+                miri_base_params if args.instrument == 'miri' else None
+            )
             setup_paramfile(
                 outdir,
                 ref_dst,
                 work,
                 copy_files=False,
+                global_params=global_params,
             )
             logger.info('Wrote %s', outdir / 'dolphot.param')
-            logger.info(
-                'Run DOLPHOT with: %s',
-                dolphot_command(
-                    outdir,
-                    phot_out=f'{outdir.name}.phot',
-                    param_file='dolphot.param',
-                    dolphot_bin=args.dolphot_bin,
-                    ncores=args.ncores,
-                ),
+            _log_run_commands(
+                outdir,
+                phot_out=f'{outdir.name}.phot',
+                param_file='dolphot.param',
+                dolphot_bin=args.dolphot_bin,
+                ncores=args.ncores,
             )
 
     prepare_frames(

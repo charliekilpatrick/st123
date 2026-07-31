@@ -223,21 +223,31 @@ def find_photfile(nircam_rundir: PathLike) -> Path:
         If no suitable ``.phot`` catalog is found under *nircam_rundir*.
     """
     rundir = Path(nircam_rundir)
+
+    def _is_usable_phot(path: Path) -> bool:
+        # Skip empty stubs left by interrupted DOLPHOT runs.
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
     # Prefer a top-level *.phot that is not a sidecar (no extra dots before .phot)
     candidates = sorted(
         p
         for p in rundir.glob('*.phot')
-        if p.is_file() and p.name.count('.') == 1
+        if _is_usable_phot(p) and p.name.count('.') == 1
     )
     if not candidates:
         # Fallback: any *.phot without .psf/.res in the name
         candidates = sorted(
             p
             for p in rundir.glob('*.phot')
-            if p.is_file() and '.psf.' not in p.name and '.res.' not in p.name
+            if _is_usable_phot(p) and '.psf.' not in p.name and '.res.' not in p.name
         )
     if not candidates:
-        raise FileNotFoundError(f'No .phot catalog found under {rundir}')
+        raise FileNotFoundError(
+            f'No non-empty .phot catalog found under {rundir}'
+        )
     # Prefer the largest catalog (main photometry product).
     return max(candidates, key=lambda p: p.stat().st_size)
 

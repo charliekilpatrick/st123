@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,11 +35,139 @@ from photutils.psf.matching import SplitCosineBellWindow, create_matching_kernel
 from reproject.mosaicking import find_optimal_celestial_wcs
 
 from st123.mast import parse_s_region
-from st123.utils.compatibility import patch_jwst_for_photutils3
+from st123.utils.compatibility import (
+    ensure_local_crds_context,
+    patch_jwst_for_photutils3,
+)
 from st123.utils.helpers import create_filter_table, input_list
 from st123.utils.logging import capture_output
 
 logger = logging.getLogger(__name__)
+
+# JWST imaging native / recommended mosaic pixel scales (arcsec / pixel).
+# https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-observing-modes/nircam-imaging
+NIRCAM_SW_PIXEL_SCALE = 0.031
+NIRCAM_LW_PIXEL_SCALE = 0.063
+MIRI_PIXEL_SCALE = 0.11
+
+
+def mosaic_pixel_scale_arcsec(
+    filter_name: str,
+    instrument: str | None = None,
+) -> float:
+    """
+    Recommended mosaic pixel scale (arcsec) for a JWST filter / instrument.
+
+    Parameters
+    ----------
+    filter_name : str
+        Filter name (e.g. ``F150W``, ``f444w``, ``F560W``).
+    instrument : str, optional
+        Instrument name when known (``NIRCAM`` / ``MIRI``). Used to
+        disambiguate when the filter code alone is insufficient.
+
+    Returns
+    -------
+    float
+        Pixel scale in arcseconds per pixel (NIRCam SW 0.031, NIRCam LW
+        0.063, MIRI 0.11).
+    """
+    filt = str(filter_name).strip().lower()
+    inst = str(instrument or '').strip().lower()
+    match = re.match(r'f(\d+)', filt)
+    code = int(match.group(1)) if match else 0
+    if 'miri' in inst or code >= 560:
+        return MIRI_PIXEL_SCALE
+    if code >= 240:
+        return NIRCAM_LW_PIXEL_SCALE
+    return NIRCAM_SW_PIXEL_SCALE
+
+
+def _ensure_pc_cdelt_header(hdr: fits.Header, w: wcs.WCS | None = None) -> fits.Header:
+    """Ensure ``PC*`` + ``CDELT*`` keywords exist for :func:`create_gwcs`."""
+    out = hdr.copy()
+    if w is None:
+        w = wcs.WCS(out)
+    if 'PC1_1' in out and 'CDELT1' in out:
+        return out
+    cd = np.asarray(w.pixel_scale_matrix, dtype=float)
+    cdelt = np.array(
+        [np.hypot(cd[0, 0], cd[1, 0]), np.hypot(cd[0, 1], cd[1, 1])],
+        dtype=float,
+    )
+    if cd[0, 0] < 0:
+        cdelt[0] *= -1.0
+    if cd[1, 1] < 0:
+        cdelt[1] *= -1.0
+    # Avoid divide-by-zero for degenerate matrices.
+    cdelt = np.where(np.abs(cdelt) > 0, cdelt, np.array([-1.0, 1.0]) * np.abs(cdelt).max())
+    pc = cd / cdelt
+    out['CDELT1'] = float(cdelt[0])
+    out['CDELT2'] = float(cdelt[1])
+    out['PC1_1'] = float(pc[0, 0])
+    out['PC1_2'] = float(pc[0, 1])
+    out['PC2_1'] = float(pc[1, 0])
+    out['PC2_2'] = float(pc[1, 1])
+    for key in ('CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'):
+        if key in out:
+            del out[key]
+    return out
+
+
+def rescale_wcs_to_pixel_scale(
+    box_wcs: wcs.WCS,
+    pixel_scale_arcsec: float,
+) -> fits.Header:
+    """
+    Rebuild a mosaic WCS header at a new pixel scale, keeping the same sky footprint.
+
+    The output covers the same RA/Dec extent and orientation as ``box_wcs``, but
+    with ``pixel_scale_arcsec`` sampling (so NIRCam SW / LW / MIRI can share a
+    bounding box while using their recommended mosaic scales).
+
+    Parameters
+    ----------
+    box_wcs : astropy.wcs.WCS
+        Existing box WCS (typically a slice of the group mosaic WCS).
+    pixel_scale_arcsec : float
+        Desired output pixel scale in arcseconds.
+
+    Returns
+    -------
+    fits.Header
+        FITS WCS header with ``NAXIS*``, ``CRPIX*``, ``CRVAL*``, ``PC*``, and
+        ``CDELT*`` suitable for :func:`create_gwcs`.
+    """
+    celestial = box_wcs.celestial
+    # wcs.utils.proj_plane_pixel_scales returns degrees (plain floats).
+    old_scale = float(np.asarray(wcs.utils.proj_plane_pixel_scales(celestial))[0]) * 3600.0
+    if not np.isfinite(old_scale) or old_scale <= 0:
+        raise ValueError(f'Invalid existing mosaic pixel scale: {old_scale}')
+    scale_factor = float(pixel_scale_arcsec) / old_scale
+
+    if box_wcs.pixel_shape is not None:
+        naxis1, naxis2 = (int(box_wcs.pixel_shape[0]), int(box_wcs.pixel_shape[1]))
+    else:
+        naxis1, naxis2 = (int(box_wcs._naxis[0]), int(box_wcs._naxis[1]))
+
+    new_naxis1 = max(1, int(np.ceil(naxis1 / scale_factor)))
+    new_naxis2 = max(1, int(np.ceil(naxis2 / scale_factor)))
+    crpix = celestial.wcs.crpix
+    new_crpix = [
+        (float(crpix[0]) - 0.5) / scale_factor + 0.5,
+        (float(crpix[1]) - 0.5) / scale_factor + 0.5,
+    ]
+
+    new = wcs.WCS(naxis=2)
+    new.wcs.crpix = new_crpix
+    new.wcs.crval = celestial.wcs.crval.copy()
+    new.wcs.ctype = list(celestial.wcs.ctype)
+    new.wcs.cd = celestial.pixel_scale_matrix * scale_factor
+    new.pixel_shape = (new_naxis1, new_naxis2)
+    hdr = new.to_header()
+    hdr['NAXIS1'] = new_naxis1
+    hdr['NAXIS2'] = new_naxis2
+    return _ensure_pc_cdelt_header(hdr, new)
 
 
 def mp_init(
@@ -385,6 +514,13 @@ def create_default_mosaic(
 
     table = input_list(inputfiles)
     table = table[table['filter'] == filt]
+    preferred_ctx = None
+    if len(table) > 0:
+        try:
+            preferred_ctx = fits.getval(str(table['image'][0]), 'CRDS_CTX', ext=0)
+        except Exception:
+            preferred_ctx = None
+    ensure_local_crds_context(preferred=preferred_ctx)
     asn_file = f'{outdir}/{filt}.json'
     base_filenames = np.array([os.path.basename(r['image']) for r in table])
     asn3 = asn_from_list.asn_from_list(base_filenames,
@@ -407,7 +543,7 @@ def create_default_mosaic(
     image3.skymatch.match_down = False
     image3.source_catalog.skip=False
     image3.resample.pixfrac = 1.0
-    image3.pixel_scale = 0.0311
+    image3.pixel_scale = mosaic_pixel_scale_arcsec(filt)
     image3.weight_type = 'ivm'
 
     with capture_output():
@@ -422,6 +558,7 @@ def create_coadd_mosaic(
     wcs_out: wcs.WCS | None = None,
     shape_out: tuple[int, int] | None = None,
     gwcs_file: str | None = None,
+    pixel_scale: float | None = None,
 ) -> str:
     """
     Create a Level-3 drizzled mosaic with a shared output GWCS.
@@ -449,6 +586,10 @@ def create_coadd_mosaic(
         ``(NAXIS2, NAXIS1)`` for ``wcs_out``.
     gwcs_file : str, optional
         Path to an existing GWCS asdf file (from :func:`create_gwcs`).
+    pixel_scale : float, optional
+        Absolute mosaic pixel scale in arcsec. Defaults to the JWST
+        recommended scale for ``filt`` (NIRCam SW/LW or MIRI). Ignored by
+        resample when ``output_wcs`` / ``gwcs_file`` is set.
 
     Returns
     -------
@@ -459,12 +600,28 @@ def create_coadd_mosaic(
     if not os.path.exists(outdir):
         os.makedirs(outdir)
 
+    if pixel_scale is None:
+        inst = None
+        if 'instrument' in table.colnames and len(table) > 0:
+            inst = str(table['instrument'][0])
+        pixel_scale = mosaic_pixel_scale_arcsec(filt, inst)
+
+    # Prefer the CRDS context used to calibrate the input frames when cached.
+    preferred_ctx = None
+    if len(table) > 0:
+        try:
+            preferred_ctx = fits.getval(str(table['image'][0]), 'CRDS_CTX', ext=0)
+        except Exception:
+            preferred_ctx = None
+    ensure_local_crds_context(preferred=preferred_ctx)
+
     if gwcs_file is None:
         gwcs_file = create_gwcs(
             outdir=outdir,
             sci_header=sci_header,
             wcs_out=wcs_out,
             shape_out=shape_out,
+            filename=f'mosaic_gwcs_{str(filt).lower()}.asdf',
         )
     elif not os.path.exists(gwcs_file):
         raise FileNotFoundError(f'gwcs_file not found: {gwcs_file}')
@@ -491,7 +648,7 @@ def create_coadd_mosaic(
     image3.skymatch.match_down = False
     image3.source_catalog.skip=False
     image3.resample.pixfrac = 1.0
-    image3.pixel_scale = 0.0311
+    image3.pixel_scale = float(pixel_scale)
     image3.weight_type = 'ivm'
     image3.resample.output_wcs = gwcs_file
 
@@ -508,6 +665,7 @@ def create_gwcs(
     wcs_out: wcs.WCS | None = None,
     shape_out: tuple[int, int] | None = None,
     return_gwcs: bool = False,
+    filename: str = 'mosaic_gwcs.asdf',
 ) -> str | g_wcs:
     """
     Convert an astropy WCS to GWCS and write or return it.
@@ -515,7 +673,7 @@ def create_gwcs(
     Parameters
     ----------
     outdir : str
-        Directory for ``mosaic_gwcs.asdf`` when ``return_gwcs`` is False.
+        Directory for the asdf product when ``return_gwcs`` is False.
     sci_header : fits.Header, optional
         FITS WCS header defining the output mosaic grid.
     wcs_out : astropy.wcs.WCS, optional
@@ -524,20 +682,23 @@ def create_gwcs(
         ``(NAXIS2, NAXIS1)`` shape paired with ``wcs_out``.
     return_gwcs : bool, optional
         When True, return the in-memory GWCS object instead of writing asdf.
+    filename : str, optional
+        Basename of the asdf file written under ``outdir``. Default
+        ``mosaic_gwcs.asdf``.
 
     Returns
     -------
     str or gwcs.wcs.WCS
-        Path to ``mosaic_gwcs.asdf``, or the GWCS object when
-        ``return_gwcs`` is True.
+        Path to the asdf file, or the GWCS object when ``return_gwcs`` is True.
     """
 
     if sci_header:
-        pass
+        sci_header = _ensure_pc_cdelt_header(sci_header)
     elif wcs_out:
         sci_header = wcs_out.to_header()
         sci_header['NAXIS1'] = shape_out[1]
         sci_header['NAXIS2'] = shape_out[0]
+        sci_header = _ensure_pc_cdelt_header(sci_header, wcs_out)
     else:
         raise ValueError("Please provide header or wcs object")
 
@@ -579,7 +740,7 @@ def create_gwcs(
         #write gwcs to asdf file
         tree = {"wcs": wcsobj}
         wcs_file = AsdfFile(tree)
-        gwcs_path = f"{outdir}/mosaic_gwcs.asdf"
+        gwcs_path = os.path.join(outdir, filename)
         wcs_file.write_to(gwcs_path)
 
     return gwcs_path

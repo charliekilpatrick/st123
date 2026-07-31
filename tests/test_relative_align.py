@@ -38,6 +38,42 @@ def test_has_jwst_gwcs(tmp_path: Path):
     assert align_lib.has_jwst_gwcs(str(with_asdf)) is True
 
 
+def test_is_level3_i2d():
+    assert align_lib.is_level3_i2d('coadd_0_0_f150w2_i2d.fits')
+    assert align_lib.is_level3_i2d('/tmp/foo_i2d.fits.gz')
+    assert not align_lib.is_level3_i2d('jw_x_mirimage_cal.fits')
+
+
+def test_build_ref_catalog_uses_fix_phot_for_i2d_even_with_asdf(tmp_path: Path):
+    """Level-3 i2d references must use fix_phot, not native jwst_phot."""
+    i2d = tmp_path / 'coadd_0_0_f150w2_i2d.fits'
+    fits.HDUList(
+        [
+            fits.PrimaryHDU(),
+            fits.ImageHDU(np.ones((8, 8), dtype=np.float32), name='SCI'),
+            fits.ImageHDU(name='ASDF'),
+        ]
+    ).writeto(i2d)
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    fixed = tmp_path / 'coadd_0_0_f150w2_i2d.corr.phot.txt'
+    fixed.write_text('ra dec mag dmag\n1 2 20 0.1\n')
+
+    with (
+        patch.object(align_lib, 'fix_phot', return_value=str(fixed)) as mock_fix,
+        patch.object(align_lib, 'jwst_phot') as mock_jwst,
+        patch.object(align_lib, 'photutils_phot') as mock_pu,
+    ):
+        staged = align_lib.build_ref_catalog(str(i2d), str(outdir))
+
+    mock_fix.assert_called_once()
+    assert mock_fix.call_args.args[0] == str(i2d)
+    assert 'workdir' in mock_fix.call_args.kwargs
+    mock_jwst.assert_not_called()
+    mock_pu.assert_not_called()
+    assert Path(staged).is_file()
+
+
 def test_write_jhat_phot_table_and_stage(tmp_path: Path):
     table = Table({'ra': [1.0], 'dec': [2.0], 'mag': [20.0], 'dmag': [0.1]})
     phot = tmp_path / 'cat.phot.txt'

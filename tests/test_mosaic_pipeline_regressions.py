@@ -177,8 +177,9 @@ def test_create_coadd_mosaic_always_sets_output_wcs(tmp_path: Path):
             filt='f150w2',
             sci_header=_sample_wcs_header(),
         )
-    assert image3.resample.output_wcs == str(tmp_path / 'mosaic_gwcs.asdf')
+    assert image3.resample.output_wcs == str(tmp_path / 'mosaic_gwcs_f150w2.asdf')
     assert Path(image3.resample.output_wcs).is_file()
+    assert image3.pixel_scale == pytest.approx(0.031)
 
 
 def test_create_coadd_mosaic_rejects_missing_gwcs_file(tmp_path: Path):

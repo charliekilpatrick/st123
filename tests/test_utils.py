@@ -120,6 +120,30 @@ def test_get_filter_module_instrument_chip(tmp_path: Path):
     assert helpers.get_chip(str(path)) == 'NRCA1'
 
 
+def test_get_module_miri_and_nircam_without_module(tmp_path: Path):
+    """MIRI has no MODULE keyword; NIRCam can fall back to DETECTOR letter."""
+    miri = tmp_path / 'jw03295006001_02101_00001_mirimage_jhat.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'MIRI'
+    primary.header['DETECTOR'] = 'MIRIMAGE'
+    primary.header['FILTER'] = 'F560W'
+    fits.HDUList(
+        [primary, fits.ImageHDU(np.ones((5, 5), dtype=np.float32), name='SCI')]
+    ).writeto(miri)
+    assert helpers.get_module(str(miri)) == 'miri'
+
+    nrc = tmp_path / 'jw09246001001_02101_00001_nrcb1_jhat.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'NIRCAM'
+    primary.header['DETECTOR'] = 'NRCB1'
+    primary.header['FILTER'] = 'F150W'
+    # Intentionally omit MODULE.
+    fits.HDUList(
+        [primary, fits.ImageHDU(np.ones((5, 5), dtype=np.float32), name='SCI')]
+    ).writeto(nrc)
+    assert helpers.get_module(str(nrc)) == 'b'
+
+
 def test_get_filter_falls_back_to_filter2(tmp_path: Path):
     path = tmp_path / 'filt2.fits'
     primary = fits.PrimaryHDU()

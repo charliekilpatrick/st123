@@ -238,7 +238,105 @@ def parse_dolphot_frame_list(path: PathLike) -> tuple[Path, list[Path], int, int
     return refimage, frames, group, box
 
 
-def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
+def filter_frames_for_instrument(
+    frames: Sequence[PathLike],
+    instrument: str,
+) -> list[Path]:
+    """
+    Keep frames matching *instrument* (``'nircam'`` or ``'miri'``).
+
+    Classification uses :func:`classify_image_kind`. Frames that cannot be
+    classified are dropped with a warning.
+
+    Parameters
+    ----------
+    frames : sequence of str or os.PathLike
+        Candidate science FITS paths.
+    instrument : str
+        ``'nircam'`` (short/long) or ``'miri'``.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Filtered frame paths in input order.
+    """
+    inst = instrument.lower()
+    keep_kinds = {'miri'} if inst == 'miri' else {'short', 'long'}
+    out: list[Path] = []
+    for frame in frames:
+        path = Path(frame)
+        try:
+            kind = classify_image_kind(path)
+        except ValueError:
+            logger.warning('Skipping unclassifiable frame: %s', path)
+            continue
+        if kind in keep_kinds:
+            out.append(path)
+    return out
+
+
+def resolve_coadd_ref(
+    box_dir: PathLike,
+    ref_filter: Optional[str] = None,
+    *,
+    fallback: Optional[PathLike] = None,
+) -> Path:
+    """
+    Resolve a mosaic coadd reference image, optionally by filter name.
+
+    Parameters
+    ----------
+    box_dir : str or os.PathLike
+        Mosaic box directory (``reference/group_*/ref_*``).
+    ref_filter : str or None, optional
+        Filter name (e.g. ``'F560W'``). When set, prefer
+        ``coadd_*_<filter>_i2d.fits`` (case-insensitive).
+    fallback : str or os.PathLike or None, optional
+        Path returned when *ref_filter* is ``None`` or no matching coadd exists.
+
+    Returns
+    -------
+    pathlib.Path
+        Resolved coadd path.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *ref_filter* is set, no match is found, and *fallback* is ``None``.
+    """
+    box = Path(box_dir)
+    if ref_filter:
+        key = ref_filter.lower().replace(' ', '')
+        matches = sorted(
+            p
+            for p in box.glob('coadd_*_i2d.fits')
+            if f'_{key}_' in p.name.lower()
+        )
+        if matches:
+            return matches[0]
+        if fallback is None:
+            raise FileNotFoundError(
+                f'No coadd matching filter {ref_filter!r} under {box}'
+            )
+        logger.warning(
+            'No coadd matching filter %s under %s; using %s',
+            ref_filter,
+            box,
+            fallback,
+        )
+    if fallback is None:
+        raise FileNotFoundError(f'No reference coadd under {box}')
+    return Path(fallback)
+
+
+def discover_mosaic_phot_jobs(
+    reduction_dir: PathLike,
+    *,
+    instrument: Optional[str] = None,
+    ref_filter: Optional[str] = None,
+    phot_outdir_root: Optional[PathLike] = None,
+    outdir_prefix: str = 'phot',
+) -> list[MosaicPhotJob]:
     """
     Find mosaic boxes under ``<reduction>/reference/`` for DOLPHOT prep.
 
@@ -249,14 +347,26 @@ def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
     ----------
     reduction_dir : str or os.PathLike
         Mosaic reduction root (contains ``reference/`` and optionally ``jhat/``).
+    instrument : str or None, optional
+        When ``'miri'`` or ``'nircam'``, keep only matching science frames.
+    ref_filter : str or None, optional
+        Prefer a coadd whose filename contains this filter (e.g. ``'F560W'``).
+    phot_outdir_root : str or os.PathLike or None, optional
+        Parent directory for staging runs. Default: *reduction_dir*.
+        MIRI-only runs typically use ``<project>/dolphot``.
+    outdir_prefix : str, optional
+        Staging directory name prefix (default ``'phot'`` → ``phot_0_0``;
+        use ``'miri'`` → ``miri_0_0``).
 
     Returns
     -------
     list of MosaicPhotJob
         One job per mosaic box, sorted by manifest path. Empty when
-        ``reference/`` is missing or no boxes are found.
+        ``reference/`` is missing or no boxes are found. Boxes that yield no
+        frames after instrument filtering are omitted.
     """
     root = Path(reduction_dir)
+    out_root = Path(phot_outdir_root) if phot_outdir_root is not None else root
     jobs: list[MosaicPhotJob] = []
     ref_root = root / 'reference'
     if not ref_root.is_dir():
@@ -266,13 +376,27 @@ def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
     if manifests:
         for manifest in manifests:
             refimage, frames, group, box = parse_dolphot_frame_list(manifest)
+            refimage = resolve_coadd_ref(
+                manifest.parent,
+                ref_filter,
+                fallback=refimage,
+            )
+            if instrument is not None:
+                frames = filter_frames_for_instrument(frames, instrument)
+            if not frames:
+                logger.warning(
+                    'No %s frames in %s; skipping box',
+                    instrument or 'science',
+                    manifest,
+                )
+                continue
             jobs.append(
                 MosaicPhotJob(
                     group=group,
                     box=box,
                     refimage=refimage,
                     frames=tuple(frames),
-                    phot_outdir=root / f'phot_{group}_{box}',
+                    phot_outdir=out_root / f'{outdir_prefix}_{group}_{box}',
                     frame_list=manifest,
                 )
             )
@@ -280,19 +404,25 @@ def discover_mosaic_phot_jobs(reduction_dir: PathLike) -> list[MosaicPhotJob]:
 
     # Fallback: coadd present, no manifest (legacy mosaic run).
     jhat = sorted((root / 'jhat').glob('*jhat.fits'))
+    if instrument is not None:
+        jhat = filter_frames_for_instrument(jhat, instrument)
     for coadd in sorted(ref_root.glob('group_*/ref_*/coadd_*_i2d.fits')):
         match = _GROUP_BOX_RE.search(coadd.as_posix())
         group = int(match.group(1)) if match else 0
         box = int(match.group(2)) if match else 0
+        refimage = resolve_coadd_ref(coadd.parent, ref_filter, fallback=coadd)
+        # When filtering by ref_filter, skip coadds that are not the chosen ref.
+        if ref_filter and refimage.resolve() != coadd.resolve():
+            continue
         if not jhat:
             continue
         jobs.append(
             MosaicPhotJob(
                 group=group,
                 box=box,
-                refimage=coadd,
+                refimage=refimage,
                 frames=tuple(jhat),
-                phot_outdir=root / f'phot_{group}_{box}',
+                phot_outdir=out_root / f'{outdir_prefix}_{group}_{box}',
                 frame_list=coadd.parent / _FRAME_LIST_NAME,
             )
         )
@@ -309,7 +439,8 @@ def prepare_mosaic_phot_job(
     copy_files: bool = True,
 ) -> Path:
     """
-    Stage a mosaic box into ``phot_*``, write ``dolphot.param``, mask + sky.
+    Stage a mosaic box into ``phot_*`` / ``miri_*``, write ``dolphot.param``,
+    mask + sky.
 
     Parameters
     ----------
@@ -317,6 +448,8 @@ def prepare_mosaic_phot_job(
         Mosaic box descriptor from :func:`discover_mosaic_phot_jobs`.
     instrument : str, optional
         ``'nircam'`` or ``'miri'``; selects mask and calcsky defaults.
+        MIRI uses recommended ``dolphotMIRI.pdf`` globals via
+        :data:`st123.utils.settings.miri_base_params`.
     dolphot_bin : str or os.PathLike or None, optional
         Override path to the DOLPHOT ``bin`` directory.
     skip_mask : bool, optional
@@ -332,16 +465,19 @@ def prepare_mosaic_phot_job(
     pathlib.Path
         Path to the written ``dolphot.param`` file.
     """
+    inst = instrument.lower()
+    global_params = miri_base_params if inst == 'miri' else None
     param = setup_paramfile(
         job.phot_outdir,
         job.refimage,
         list(job.frames),
         copy_files=copy_files,
+        global_params=global_params,
     )
     work = [Path(p) for p in science_fits_paths(job.phot_outdir)]
     prepare_frames(
         work,
-        instrument=instrument,
+        instrument=inst,
         dolphot_bin=dolphot_bin,
         skip_mask=skip_mask,
         skip_sky=skip_sky,
@@ -939,6 +1075,7 @@ def dolphot_command(
     param_file: str = 'dolphot.param',
     dolphot_bin: Optional[PathLike] = None,
     ncores: int = 1,
+    nohup: bool = False,
 ) -> str:
     """
     Build a shell command to run DOLPHOT (does not execute it).
@@ -963,6 +1100,9 @@ def dolphot_command(
         Override path to the DOLPHOT ``bin`` directory prepended to ``PATH``.
     ncores : int, optional
         ``MaxThreads`` value for DOLPHOT (minimum 1).
+    nohup : bool, optional
+        If True, wrap as a detachable ``nohup`` job writing ``dolphot.out`` /
+        ``dolphot.err`` in *outdir*.
 
     Returns
     -------
@@ -972,13 +1112,11 @@ def dolphot_command(
     out = Path(outdir).resolve()
     threads = max(1, int(ncores))
     bin_dir = resolve_dolphot_bin(dolphot_bin, required=False)
-    if bin_dir is not None:
+    path_prefix = f'PATH={bin_dir}:$PATH ' if bin_dir is not None else ''
+    run = f'{path_prefix}dolphot {phot_out} -p{param_file} MaxThreads={threads}'
+    if nohup:
         return (
             f'cd {out} && '
-            f'PATH={bin_dir}:$PATH '
-            f'dolphot {phot_out} -p{param_file} MaxThreads={threads}'
+            f'nohup {run} > dolphot.out 2> dolphot.err < /dev/null &'
         )
-    return (
-        f'cd {out} && '
-        f'dolphot {phot_out} -p{param_file} MaxThreads={threads}'
-    )
+    return f'cd {out} && {run}'

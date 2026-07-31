@@ -44,7 +44,8 @@ def test_calibrator_settings_and_quality_hold_thresholds():
     assert calibrator_settings_for_filter('F560W').max_residual_arcsec is None
     f770 = calibrator_settings_for_filter('F770W')
     assert f770.nbright == F770W_CALIBRATOR_SETTINGS.nbright
-    assert f770.max_residual_arcsec == pytest.approx(0.08)
+    assert f770.max_residual_arcsec == pytest.approx(0.20)
+    assert f770.min_calibrators == 40
     assert max_reference_dispersion_mas('F560W') is None
     assert max_reference_dispersion_mas('F770W') == FILTER_MAX_REFERENCE_DISPERSION_MAS['F770W']
     assert max_reference_dispersion_mas('F9999W') == 70.0
@@ -419,7 +420,8 @@ def _write_jhat_product(
     if dispersion_arcsec is not None:
         hdr['JWDISPM'] = dispersion_arcsec
         hdr['JWDISPS'] = 0.01
-        hdr['JWNCAL'] = 12
+        # Above F560W min_calibrators (20) so REFERENCE workers stay SUCCESS.
+        hdr['JWNCAL'] = 25
     fits.PrimaryHDU(header=hdr).writeto(jhat, overwrite=True)
     return jhat
 
@@ -492,5 +494,217 @@ def test_visit_and_reference_workers_share_harvest_contract(tmp_path: Path):
             assert hdul[0].header['ALGNMODE'] in ('VISIT', 'REFERENCE')
 
 
-def test_reference_worker_alias():
-    assert align_lib.run_nircam_align_job is align_lib.run_reference_align_job
+def test_prefer_nircam_reference_paths(tmp_path: Path):
+    nircam = tmp_path / 'coadd_nircam_i2d.fits'
+    miri = tmp_path / 'coadd_miri_i2d.fits'
+    write_illuminated_fits(nircam, crval=(150.0, 2.0), include_s_region=True)
+    write_illuminated_fits(miri, crval=(150.0, 2.0), include_s_region=True)
+    with fits.open(nircam, mode='update') as hdul:
+        hdul[0].header['INSTRUME'] = 'NIRCAM'
+        hdul[0].header['FILTER'] = 'F150W2'
+    with fits.open(miri, mode='update') as hdul:
+        hdul[0].header['INSTRUME'] = 'MIRI'
+        hdul[0].header['FILTER'] = 'F560W'
+
+    preferred = align_lib.prefer_nircam_reference_paths([str(miri), str(nircam)])
+    assert preferred == [str(nircam)]
+    # No NIRCam → keep MIRI list unchanged.
+    assert align_lib.prefer_nircam_reference_paths([str(miri)]) == [str(miri)]
+
+
+def test_peer_sky_dispersion_mas(tmp_path: Path):
+    from astropy.table import Table
+    import numpy as np
+
+    a = tmp_path / 'a.phot.txt'
+    b = tmp_path / 'b.phot.txt'
+    ra = np.array([150.0, 150.001, 150.002])
+    dec = np.array([2.0, 2.001, 2.002])
+    # B is shifted by ~200 mas in dec relative to A.
+    Table({'ra': ra, 'dec': dec}).write(a, format='ascii', overwrite=True)
+    Table({'ra': ra, 'dec': dec + (0.2 / 3600.0)}).write(b, format='ascii', overwrite=True)
+
+    med, n = align_lib.peer_sky_dispersion_mas(a, b, match_radius_arcsec=1.0)
+    assert n == 3
+    assert med == pytest.approx(200.0, rel=0.05)
+
+
+def test_flag_peer_inconsistent_demotes_worse_frame(tmp_path: Path):
+    from astropy.table import Table
+    import numpy as np
+
+    def _make_success(name: str, disp: float, *, dec_shift_mas: float = 0.0):
+        miri = tmp_path / f'{name}_cal.fits'
+        jhat = tmp_path / f'{name}_jhat.fits'
+        phot = tmp_path / f'{name}_jhat_cal.phot.txt'
+        # Minimal illuminated FITS with S_REGION so overlap works.
+        write_illuminated_fits(miri, crval=(150.0, 2.0), include_s_region=True)
+        write_illuminated_fits(jhat, crval=(150.0, 2.0), include_s_region=True)
+        with fits.open(jhat, mode='update') as hdul:
+            hdul[0].header['FILTER'] = 'F770W'
+            hdul[0].header['ALGNMODE'] = 'REFERENCE'
+            hdul[0].header['JWDISPM'] = disp / 1000.0
+        ra = np.linspace(150.0, 150.01, 40)
+        dec = np.linspace(2.0, 2.01, 40) + (dec_shift_mas / 3600.0 / 1000.0)
+        Table({'ra': ra, 'dec': dec}).write(phot, format='ascii', overwrite=True)
+        row = align_lib.AlignmentSummaryRow(
+            miri_path=str(miri),
+            filter='F770W',
+            status='SUCCESS',
+            n_calibrators=50,
+            dispersion_mas=disp,
+            aligned_path=str(jhat),
+            align_mode='REFERENCE',
+            original_ref='ref.fits',
+            aligned_to='ref.fits',
+            ref_overlap_frac=1.0,
+        )
+        success = SuccessfulAlignment(
+            miri_path=str(miri),
+            jhat_path=str(jhat),
+            filter='F770W',
+            wavelength_um=7.7,
+            dispersion_mas=disp,
+            relative_dispersion_mas=disp,
+            align_mode='REFERENCE',
+            original_ref='ref.fits',
+            aligned_to='ref.fits',
+            photfile=str(phot),
+        )
+        return row, success
+
+    good_row, good_s = _make_success('good', disp=20.0, dec_shift_mas=0.0)
+    bad_row, bad_s = _make_success('bad', disp=30.0, dec_shift_mas=300.0)
+    rows = [good_row, bad_row]
+    row_by_miri = {good_row.miri_path: good_row, bad_row.miri_path: bad_row}
+    successes = [good_s, bad_s]
+
+    demoted = align_lib.flag_peer_inconsistent_reference_rows(
+        filter_name='F770W',
+        row_by_miri=row_by_miri,
+        rows=rows,
+        successes=successes,
+        max_peer_dispersion_mas=100.0,
+        min_overlap=0.01,
+        min_matches=10,
+    )
+    assert bad_row.miri_path in demoted
+    assert row_by_miri[bad_row.miri_path].status == 'PENDING'
+    assert row_by_miri[good_row.miri_path].status == 'SUCCESS'
+    assert all(s.miri_path != bad_row.miri_path for s in successes)
+
+
+def test_calc_dispersion_returns_clipped_match_count(tmp_path: Path):
+    from astropy.table import Table
+    import numpy as np
+
+    # 10 well-matched stars + 2 outliers beyond the match radius.
+    ra = np.linspace(150.0, 150.001, 10)
+    dec = np.linspace(2.0, 2.001, 10)
+    ref = Table({'ra': ra, 'dec': dec})
+    sci = tmp_path / 'sci.phot.txt'
+    Table(
+        {
+            'ra': np.concatenate([ra, ra[:2] + 0.01]),
+            'dec': np.concatenate([dec, dec[:2]]),
+            'x': np.arange(12, dtype=float),
+            'y': np.arange(12, dtype=float),
+        }
+    ).write(sci, format='ascii', overwrite=True)
+
+    mean, med, std, n_cal = align_lib.calc_dispersion(
+        ref, str(sci), dist_limit=0.5, sig=2.0, plot=False
+    )
+    assert n_cal == 10
+    assert np.isfinite(mean) and np.isfinite(med) and np.isfinite(std)
+
+
+def test_jwncal_plausibility_rejects_master_catalog_pollution():
+    assert align_lib.jwncal_is_plausible(0)
+    assert align_lib.jwncal_is_plausible(32)
+    assert not align_lib.jwncal_is_plausible(32875)
+    assert not align_lib.jwncal_is_plausible(-1)
+
+
+def test_harvest_prefers_dispersion_match_count_not_refcat_rows(tmp_path: Path):
+    """JWNCAL must not inherit the full unclipped master-catalog length."""
+    from astropy.table import Table
+    import numpy as np
+
+    outdir = tmp_path / 'alignment_output'
+    outdir.mkdir()
+    cal = _write_miri_cal(tmp_path / 'frame_cal.fits')
+    jhat = outdir / 'frame_jhat.fits'
+    write_illuminated_fits(jhat, crval=(150.0, 2.0), include_s_region=True)
+
+    # Science phot: 8 sources. Ref / JWCAT: huge catalog, but only 8 match.
+    ra = np.linspace(150.0, 150.002, 8)
+    dec = np.linspace(2.0, 2.002, 8)
+    Table({'ra': ra, 'dec': dec, 'x': np.arange(8.0), 'y': np.arange(8.0)}).write(
+        outdir / 'frame_jhat_cal.phot.txt', format='ascii', overwrite=True
+    )
+    # Full "master" dump that used to pollute n_calibrators via *.refcat.txt.
+    n_master = 500
+    ra_big = np.linspace(150.0, 150.1, n_master)
+    dec_big = np.linspace(2.0, 2.1, n_master)
+    # First 8 coincide with science; the rest are far away.
+    ra_big[:8] = ra
+    dec_big[:8] = dec
+    Table({'ra': ra_big, 'dec': dec_big}).write(
+        outdir / 'coadd_ref.phot.txt', format='ascii', overwrite=True
+    )
+    Table({'ra': ra_big, 'dec': dec_big}).write(
+        outdir / 'frame.refcat.txt', format='ascii', overwrite=True
+    )
+
+    with fits.open(jhat, mode='update') as hdul:
+        hdul[0].header['FILTER'] = 'F560W'
+        hdul[0].header['JWDISPM'] = 0.04
+        hdul[0].header['JWDISPS'] = 0.01
+        # Polluted count: full master length (old bug).
+        hdul[0].header['JWNCAL'] = n_master
+        hdul[0].header['JWCAT'] = 'coadd_ref.phot.txt'
+
+    row = align_lib.harvest_alignment_metrics(
+        str(cal), outdir, ran_ok=True, default_align_mode='REFERENCE'
+    )
+    assert row.status == 'SUCCESS'
+    assert row.n_calibrators == 8
+    with fits.open(jhat) as hdul:
+        assert int(hdul[0].header['JWNCAL']) == 8
+
+
+def test_harvest_keeps_soft_fail_zero_calibrators(tmp_path: Path):
+    outdir = tmp_path / 'alignment_output'
+    outdir.mkdir()
+    cal = _write_miri_cal(tmp_path / 'frame_cal.fits')
+    jhat = outdir / 'frame_jhat.fits'
+    write_illuminated_fits(jhat, crval=(150.0, 2.0), include_s_region=True)
+    with fits.open(jhat, mode='update') as hdul:
+        hdul[0].header['FILTER'] = 'F2550W'
+        hdul[0].header['JWDISPM'] = 0.045
+        hdul[0].header['JWDISPS'] = 0.045
+        hdul[0].header['JWNCAL'] = 0
+
+    row = align_lib.harvest_alignment_metrics(
+        str(cal), outdir, ran_ok=True, default_align_mode='REFERENCE'
+    )
+    assert row.status == 'SUCCESS'
+    assert row.n_calibrators == 0
+
+
+def test_write_provenance_jwncal_comment(tmp_path: Path):
+    jhat = tmp_path / 'x_jhat.fits'
+    fits.PrimaryHDU(header=fits.Header({'JWDISPM': 0.03})).writeto(jhat)
+    align_lib.write_alignment_provenance(
+        str(jhat),
+        align_mode='REFERENCE',
+        original_ref='/ref.fits',
+        aligned_to='/ref.fits',
+        relative_dispersion_mas=30.0,
+        absolute_dispersion_mas=30.0,
+        n_calibrators=17,
+    )
+    with fits.open(jhat) as hdul:
+        assert int(hdul[0].header['JWNCAL']) == 17
+        assert 'calibrator' in hdul[0].header.comments['JWNCAL'].lower()
