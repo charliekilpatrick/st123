@@ -83,12 +83,7 @@ Thumbs.db
 .cursor/
 
 # Local analysis / scratch scripts (not part of the package).
-# Ignore contents of examples/, then re-include the reusable M51/M82 driver.
-examples/*
-!examples/m51_m82_warmstart/
-!examples/m51_m82_warmstart/**
-examples/m51_m82_warmstart/**/__pycache__/
-examples/m51_m82_warmstart/**/*.pyc
+examples/
 
 
 # -----------------------------------------------------------------------------
