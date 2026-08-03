@@ -14,6 +14,7 @@ from st123.scripts.utils.options import (
     configure_logging_from_args,
     create_parser as build_parser,
     instrument_raw_dir,
+    resolve_project_root,
     resolve_reduction_dir,
 )
 from st123.utils.link import create_symlink, remove_proc_files
@@ -25,30 +26,36 @@ logger = logging.getLogger(__name__)
 def create_parser():
     parser = build_parser(
         description=(
-            'Symlink JWST FITS products into <base-dir>/reduction/raw. '
-            'Prefer --base-dir + --instrument; legacy --datadir/--symlinkdir '
-            'remain available when source and destination are distinct.'
+            'Symlink HST/JWST FITS products into <base-dir>/reduction/raw. '
+            'Prefer --base-dir + --telescope/--instrument; legacy '
+            '--datadir/--symlinkdir remain available when source and destination '
+            'are distinct.'
         ),
     )
     add_base_dir(
         parser,
         required=False,
         help=(
-            'Project root containing JWST/ (and reduction/). '
+            'Project root containing JWST/ or HST/ (and reduction/). '
             'Symlinks are created under <base-dir>/reduction/raw unless '
             '--symlinkdir is given.'
         ),
+    )
+    parser.add_argument(
+        '--telescope',
+        choices=('JWST', 'HST', 'jwst', 'hst'),
+        default=None,
+        help='Telescope tree under --base-dir (JWST or HST). Inferred from --instrument when omitted.',
     )
     parser.add_argument(
         '--instrument',
         type=str,
         default='NIRCAM',
         help=(
-            'Instrument subdirectory under JWST/ to link '
-            '(default: NIRCAM → JWST/NIRCam).'
+            'Instrument subdirectory to link (default: NIRCAM → JWST/NIRCam). '
+            'Use ALL with --telescope to link every instrument under that telescope.'
         ),
     )
-    # Distinct second directory when callers need an explicit source/dest pair.
     parser.add_argument(
         '--datadir',
         '--source-dir',
@@ -82,39 +89,39 @@ def create_parser():
     return parser
 
 
-def _resolve_link_paths(args) -> tuple[Path, Path]:
-    """Return (source_dir, reduction_dir)."""
-    if args.source_dir and args.symlink_dir:
-        return Path(args.source_dir).expanduser(), Path(args.symlink_dir).expanduser()
+def _source_dirs(args) -> list[Path]:
+    """Resolve one or more source directories of FITS products."""
+    if args.source_dir and args.symlink_dir and args.base_dir is None:
+        return [Path(args.source_dir).expanduser()]
 
     if args.base_dir is None and not args.source_dir:
         raise ValueError(
-            'provide --base-dir (with optional --instrument) '
+            'provide --base-dir (with optional --telescope/--instrument) '
             'or both --datadir/--source-dir and --symlinkdir/--reduction-dir'
         )
 
-    if args.base_dir is not None:
-        base = Path(args.base_dir).expanduser()
-        source = (
-            Path(args.source_dir).expanduser()
-            if args.source_dir
-            else instrument_raw_dir(base, args.instrument)
-        )
-        dest = (
-            Path(args.symlink_dir).expanduser()
-            if args.symlink_dir
-            else resolve_reduction_dir(base)
-        )
-        return source, dest
+    if args.source_dir:
+        return [Path(args.source_dir).expanduser()]
 
-    # source_dir alone: symlink into cwd/reduction
-    source = Path(args.source_dir).expanduser()
-    dest = (
-        Path(args.symlink_dir).expanduser()
-        if args.symlink_dir
-        else Path('reduction').resolve()
-    )
-    return source, dest
+    base = Path(args.base_dir).expanduser()
+    tel = args.telescope.upper() if args.telescope else None
+    inst = str(args.instrument).strip().upper()
+    if inst == 'ALL':
+        if tel is None:
+            raise ValueError('--instrument ALL requires --telescope HST|JWST')
+        root = resolve_project_root(base) / tel
+        if not root.is_dir():
+            raise ValueError(f'telescope tree missing: {root}')
+        return sorted(p for p in root.iterdir() if p.is_dir())
+    return [instrument_raw_dir(base, args.instrument, telescope=tel)]
+
+
+def _resolve_reduction(args) -> Path:
+    if args.symlink_dir:
+        return Path(args.symlink_dir).expanduser()
+    if args.base_dir is not None:
+        return resolve_reduction_dir(Path(args.base_dir).expanduser())
+    return Path('reduction').resolve()
 
 
 def main(argv=None) -> int:
@@ -123,7 +130,8 @@ def main(argv=None) -> int:
     configure_logging_from_args(args, 'link-raw')
     try:
         try:
-            datadir, symlinkdir = _resolve_link_paths(args)
+            sources = _source_dirs(args)
+            symlinkdir = _resolve_reduction(args)
         except ValueError as exc:
             logger.error('%s', exc)
             return 1
@@ -131,11 +139,16 @@ def main(argv=None) -> int:
         raw_dir = os.path.join(str(symlinkdir), 'raw')
         os.makedirs(raw_dir, exist_ok=True)
 
-        files = glob.glob(os.path.join(str(datadir), '**', '*.fits'), recursive=True)
+        files: list[str] = []
+        for datadir in sources:
+            files.extend(
+                glob.glob(os.path.join(str(datadir), '**', '*.fits'), recursive=True)
+            )
         for procdir in args.proc_dirs:
             files = remove_proc_files(files, procdir)
         if args.verbose:
-            logger.info('Source: %s', datadir)
+            for datadir in sources:
+                logger.info('Source: %s', datadir)
             logger.info('Reduction: %s', symlinkdir)
         logger.info('Creating symlinks for %d files under %s', len(files), raw_dir)
         for file in files:

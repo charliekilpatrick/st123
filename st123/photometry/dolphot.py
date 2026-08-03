@@ -21,13 +21,21 @@ from astropy.io import fits
 from st123.utils.helpers import get_detector_chip
 from st123.utils.logging import run_logged_subprocess
 from st123.utils.settings import (
+    acs_calcsky_params,
+    acs_params,
     base_params,
+    hst_base_params,
     long_params,
     miri_base_params,
     miri_calcsky_params,
     miri_params,
     nircam_calcsky_params,
     short_params,
+    wfc3_calcsky_params,
+    wfc3_ir_params,
+    wfc3_params,
+    wfpc2_calcsky_params,
+    wfpc2_params,
 )
 
 PathLike = Union[str, os.PathLike]
@@ -42,6 +50,44 @@ _DOLPHOT_MISSING_MSG = (
     '--dolphot-bin /path/to/dolphot/bin. DOLPHOT is required for photometry '
     'prep (nircammask/mirimask/calcsky) and for running dolphot.'
 )
+_HST_INSTRUMENTS = frozenset({'acs', 'wfc3', 'wfpc2'})
+# Mixed ACS+WFC3+WFPC2 DOLPHOT staging (option C / --instrument hst).
+_HST_MIXED_INSTRUMENT = 'hst'
+_HST_IMAGE_KINDS = frozenset({'acs', 'wfc3', 'wfc3_ir', 'wfpc2'})
+_JWST_INSTRUMENTS = frozenset({'nircam', 'miri'})
+
+
+def _hst_mask_instrument(kind: str) -> str:
+    """Map :func:`classify_image_kind` result → ``acsmask`` / ``wfc3mask`` / ``wfpc2mask``."""
+    k = kind.lower()
+    if k == 'acs':
+        return 'acs'
+    if k in ('wfc3', 'wfc3_ir'):
+        return 'wfc3'
+    if k == 'wfpc2':
+        return 'wfpc2'
+    raise ValueError(f'Not an HST image kind for masking: {kind}')
+
+
+def _classify_hst_science(path: PathLike) -> str:
+    """Classify an HST science frame; fall back to filename tokens if needed."""
+    p = Path(path)
+    try:
+        kind = classify_image_kind(p)
+        if kind in _HST_IMAGE_KINDS:
+            return kind
+    except ValueError:
+        pass
+    name = p.name.lower()
+    if 'wfpc2' in name or name.startswith('u'):
+        # WFPC2 roots are often uNNNN…; prefer header, but filename last-resort.
+        if 'wfpc2' in name or '_c0m' in name:
+            return 'wfpc2'
+    if 'acs' in name:
+        return 'acs'
+    if 'wfc3' in name or name.startswith('i'):
+        return 'wfc3'
+    raise ValueError(f'Cannot classify HST frame for DOLPHOT prep: {path}')
 
 
 @dataclass(frozen=True)
@@ -243,7 +289,7 @@ def filter_frames_for_instrument(
     instrument: str,
 ) -> list[Path]:
     """
-    Keep frames matching *instrument* (``'nircam'`` or ``'miri'``).
+    Keep frames matching *instrument*.
 
     Classification uses :func:`classify_image_kind`. Frames that cannot be
     classified are dropped with a warning.
@@ -253,7 +299,8 @@ def filter_frames_for_instrument(
     frames : sequence of str or os.PathLike
         Candidate science FITS paths.
     instrument : str
-        ``'nircam'`` (short/long) or ``'miri'``.
+        ``'nircam'`` (short/long), ``'miri'``, ``'acs'``, ``'wfc3'``, or
+        ``'wfpc2'``.
 
     Returns
     -------
@@ -261,7 +308,16 @@ def filter_frames_for_instrument(
         Filtered frame paths in input order.
     """
     inst = instrument.lower()
-    keep_kinds = {'miri'} if inst == 'miri' else {'short', 'long'}
+    if inst == 'miri':
+        keep_kinds = {'miri'}
+    elif inst == 'nircam':
+        keep_kinds = {'short', 'long'}
+    elif inst == 'wfc3':
+        keep_kinds = {'wfc3', 'wfc3_ir'}
+    elif inst in _HST_INSTRUMENTS:
+        keep_kinds = {inst}
+    else:
+        keep_kinds = {inst}
     out: list[Path] = []
     for frame in frames:
         path = Path(frame)
@@ -467,12 +523,14 @@ def prepare_mosaic_phot_job(
     """
     inst = instrument.lower()
     global_params = miri_base_params if inst == 'miri' else None
+    phot_out = f'{job.phot_outdir.name}.phot'
     param = setup_paramfile(
         job.phot_outdir,
         job.refimage,
         list(job.frames),
         copy_files=copy_files,
         global_params=global_params,
+        phot_out=phot_out,
     )
     work = [Path(p) for p in science_fits_paths(job.phot_outdir)]
     prepare_frames(
@@ -506,8 +564,8 @@ def classify_image_kind(path: PathLike) -> str:
     Returns
     -------
     str
-        One of ``'short'`` (NIRCam short-wavelength), ``'long'`` (NIRCam
-        long-wavelength), or ``'miri'`` (MIRI).
+        One of ``'short'`` / ``'long'`` (NIRCam), ``'miri'``, ``'acs'``,
+        ``'wfc3'``, ``'wfc3_ir'``, or ``'wfpc2'``.
 
     Raises
     ------
@@ -537,6 +595,35 @@ def classify_image_kind(path: PathLike) -> str:
                 if inst == 'NIRCAM':
                     det = str(hdu.header.get('DETECTOR', '')).upper()
                     return 'long' if 'LONG' in det else 'short'
+                if inst == 'ACS':
+                    return 'acs'
+                if inst == 'WFPC2':
+                    return 'wfpc2'
+                if inst == 'WFC3':
+                    det = str(hdu.header.get('DETECTOR', '')).upper()
+                    aper = str(hdul[0].header.get('APERTURE', '')).upper()
+                    phot = str(hdu.header.get('PHOTMODE', '')).upper()
+                    if 'IR' in det or aper.startswith('IR') or ' WFC3 IR' in f' {phot}':
+                        return 'wfc3_ir'
+                    return 'wfc3'
+            # JHAT may strip INSTRUME; fall back to PHOTMODE / APERTURE.
+            for hdu in hdul:
+                phot = str(hdu.header.get('PHOTMODE', '')).upper()
+                if phot.startswith('ACS') or ',ACS' in phot:
+                    return 'acs'
+                if phot.startswith('WFPC2') or 'WFPC2,' in phot:
+                    return 'wfpc2'
+                if phot.startswith('WFC3'):
+                    if ' IR' in f' {phot}' or phot.split()[1:2] == ['IR']:
+                        return 'wfc3_ir'
+                    return 'wfc3'
+            aper = str(hdul[0].header.get('APERTURE', '')).upper()
+            if aper.startswith('UVIS'):
+                return 'wfc3'
+            if aper.startswith('IR'):
+                return 'wfc3_ir'
+            if aper.startswith('WFC') or aper.startswith('HRC'):
+                return 'acs'
     except OSError:
         pass
 
@@ -550,7 +637,8 @@ def per_image_params(kind: str) -> Mapping[str, str]:
     Parameters
     ----------
     kind : str
-        One of ``'short'``, ``'long'``, or ``'miri'``.
+        One of ``'short'``, ``'long'``, ``'miri'``, ``'acs'``, ``'wfc3'``,
+        ``'wfc3_ir'``, or ``'wfpc2'``.
 
     Returns
     -------
@@ -569,6 +657,14 @@ def per_image_params(kind: str) -> Mapping[str, str]:
         return long_params
     if kind == 'miri':
         return miri_params
+    if kind == 'acs':
+        return acs_params
+    if kind == 'wfc3':
+        return wfc3_params
+    if kind == 'wfc3_ir':
+        return wfc3_ir_params
+    if kind == 'wfpc2':
+        return wfpc2_params
     raise ValueError(f'Unknown image kind: {kind}')
 
 
@@ -708,10 +804,12 @@ def calc_sky(
     """
     Run DOLPHOT ``calcsky`` on each science frame.
 
-    Defaults follow the instrument manuals:
+    Defaults follow the instrument manuals / hst123 detector defaults:
 
     - NIRCam: rin=15, rout=25, step=-64, σ=2.25/2.00
     - MIRI: rin=10, rout=25, step=-64, σ=2.25/2.00 (``dolphotMIRI.pdf`` §3.4)
+    - ACS / WFC3 UVIS: rin=15, rout=35, step=4
+    - WFPC2: rin=10, rout=25, step=2
 
     When all frames share a directory, ``calcsky`` is invoked with basenames
     and ``cwd`` set to that directory to avoid C path-buffer overflows.
@@ -721,7 +819,7 @@ def calc_sky(
     files : sequence of str or os.PathLike
         FITS paths for which to compute sky maps.
     instrument : str, optional
-        ``'nircam'`` or ``'miri'``; selects default calcsky radii and sigmas.
+        ``'nircam'``, ``'miri'``, ``'acs'``, ``'wfc3'``, or ``'wfpc2'``.
     dolphot_bin : str or os.PathLike or None, optional
         Override path to the DOLPHOT ``bin`` directory.
     rin : float or None, optional
@@ -742,7 +840,16 @@ def calc_sky(
     None
     """
     inst = instrument.lower()
-    defaults = miri_calcsky_params if inst == 'miri' else nircam_calcsky_params
+    if inst == 'miri':
+        defaults = miri_calcsky_params
+    elif inst == 'acs':
+        defaults = acs_calcsky_params
+    elif inst == 'wfc3':
+        defaults = wfc3_calcsky_params
+    elif inst == 'wfpc2':
+        defaults = wfpc2_calcsky_params
+    else:
+        defaults = nircam_calcsky_params
     rin = defaults['rin'] if rin is None else rin
     rout = defaults['rout'] if rout is None else rout
     step = defaults['step'] if step is None else step
@@ -775,6 +882,231 @@ def calc_sky(
         )
 
 
+def _wfpc2_dq_companion(science: Path) -> Optional[Path]:
+    """Locate ``*_c1m.fits`` next to a WFPC2 ``*_c0m`` / ``*_jhat`` MEF."""
+    name = science.name
+    candidates: list[Path] = []
+    if name.endswith('_c0m.fits'):
+        candidates.append(science.with_name(name.replace('_c0m.fits', '_c1m.fits')))
+    elif name.endswith('_jhat.fits'):
+        stem = name[: -len('_jhat.fits')]
+        candidates.append(science.with_name(f'{stem}_c1m.fits'))
+        # Also look beside the original raw name if JHAT kept the root.
+        candidates.append(science.with_name(f'{stem}_c0m'.replace('_c0m', '') + '_c1m.fits'))
+        raw_sib = science.parent.parent / 'raw' / f'{stem}_c1m.fits'
+        candidates.append(raw_sib)
+        candidates.append(science.parent / f'{stem}_c1m.fits')
+    else:
+        stem = name[:-5] if name.endswith('.fits') else name
+        candidates.append(science.with_name(f'{stem}_c1m.fits'))
+        if '_c0m' in stem:
+            candidates.append(
+                science.with_name(stem.replace('_c0m', '_c1m') + '.fits')
+            )
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def apply_hst_mask(
+    files: Sequence[PathLike],
+    instrument: str,
+    *,
+    dolphot_bin: Optional[PathLike] = None,
+    check: bool = True,
+) -> None:
+    """
+    Run ``acsmask`` / ``wfc3mask`` / ``wfpc2mask`` on science frames (in-place).
+
+    For WFPC2 MEFs, ``wfpc2mask`` is invoked as ``science c1m`` pairs when a
+    sibling ``*_c1m.fits`` DQ file is present (required for native stacks).
+
+    Parameters
+    ----------
+    files : sequence of path-like
+        FITS paths to mask (MEFs or per-chip ``*.chipN.fits``).
+    instrument : str
+        ``'acs'``, ``'wfc3'``, or ``'wfpc2'``.
+    dolphot_bin : path-like or None, optional
+        DOLPHOT ``bin`` directory override.
+    check : bool, optional
+        Raise on non-zero exit when True.
+    """
+    inst = instrument.lower()
+    if inst not in _HST_INSTRUMENTS:
+        raise ValueError(f'Unsupported HST mask instrument: {instrument}')
+    bin_dir = dolphot_bin_dir(dolphot_bin)
+    exe_name = f'{inst}mask'
+    exe = bin_dir / exe_name
+    if not exe.is_file():
+        which = shutil.which(exe_name)
+        if which:
+            exe = Path(which)
+        else:
+            raise FileNotFoundError(
+                f'{exe_name} not found under {bin_dir} or on PATH'
+            )
+
+    paths = [Path(p).resolve() for p in files]
+    if inst == 'wfpc2':
+        # Pair each MEF with its c1m; chip products have no separate DQ file.
+        cmd: list[str] = [str(exe)]
+        for sci in paths:
+            cmd.append(sci.name)
+            if '.chip' in sci.name.lower():
+                continue
+            dq = _wfpc2_dq_companion(sci)
+            if dq is None:
+                logger.warning(
+                    'WFPC2 c1m missing for %s; wfpc2mask may fail on native MEF',
+                    sci.name,
+                )
+                continue
+            # Ensure DQ sits next to science for cwd-relative argv.
+            dq_local = sci.parent / dq.name
+            if dq.resolve() != dq_local.resolve():
+                shutil.copy2(dq, dq_local)
+            cmd.append(dq_local.name)
+        cwd = str(paths[0].parent) if paths else None
+        run_logged_subprocess(
+            cmd,
+            check=check,
+            env=_prepend_bin_env(None, bin_dir),
+            cwd=cwd,
+            logger=logger,
+            label=f'{exe_name} ({len(paths)} file(s), c1m-paired)',
+        )
+        return
+
+    cwd, names = _run_cwd_for_files(files)
+    cmd = [str(exe), *names]
+    run_logged_subprocess(
+        cmd,
+        check=check,
+        env=_prepend_bin_env(None, bin_dir),
+        cwd=cwd,
+        logger=logger,
+        label=f'{exe_name} ({len(names)} file(s))',
+    )
+
+
+def apply_splitgroups(
+    files: Sequence[PathLike],
+    *,
+    dolphot_bin: Optional[PathLike] = None,
+    check: bool = True,
+) -> list[Path]:
+    """
+    Run DOLPHOT ``splitgroups`` on multi-extension FITS frames.
+
+    Parameters
+    ----------
+    files : sequence of path-like
+        MEF science FITS paths.
+    dolphot_bin : path-like or None, optional
+        DOLPHOT ``bin`` directory override.
+    check : bool, optional
+        Raise on non-zero exit when True.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Per-chip ``*.chipN.fits`` products next to each input (SCI chips only
+        when identifiable). If ``splitgroups`` is unavailable or produces no
+        chips, returns the original paths.
+    """
+    bin_dir = resolve_dolphot_bin(dolphot_bin, required=False)
+    exe = None
+    if bin_dir is not None:
+        candidate = bin_dir / 'splitgroups'
+        if candidate.is_file():
+            exe = candidate
+    if exe is None:
+        which = shutil.which('splitgroups')
+        if which:
+            exe = Path(which)
+    if exe is None:
+        logger.warning('splitgroups not found; keeping multi-extension FITS')
+        return [Path(p) for p in files]
+
+    env = _prepend_bin_env(None, exe.parent)
+    chip_files: list[Path] = []
+    for path in files:
+        src = Path(path).resolve()
+        # Remove stale chip products so we do not mix generations.
+        for old in src.parent.glob(f'{src.name.replace(".fits", "")}.chip*.fits'):
+            # stem.chipN.fits — also handle name.fits → name.chipN.fits
+            pass
+        stem = src.name[:-5] if src.name.endswith('.fits') else src.name
+        for old in src.parent.glob(f'{stem}.chip*.fits'):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        run_logged_subprocess(
+            [str(exe), str(src.name)],
+            check=check,
+            env=env,
+            cwd=src.parent,
+            logger=logger,
+            label=f'splitgroups {src.name}',
+        )
+        chips = sorted(src.parent.glob(f'{stem}.chip*.fits'))
+        if not chips:
+            logger.warning('splitgroups produced no chips for %s', src.name)
+            chip_files.append(src)
+            continue
+        # Propagate INSTRUME/FILTER from the parent MEF (JHAT often strips them).
+        parent_inst = None
+        parent_filt = None
+        try:
+            from st123.utils.helpers import get_filter, get_instrument
+
+            parent_inst = get_instrument(src).split('_')[0].upper()
+            parent_filt = get_filter(src).upper()
+        except Exception:
+            pass
+        for chip in chips:
+            keep = False
+            try:
+                with fits.open(chip, mode='update') as hdul:
+                    hdr = hdul[0].header
+                    extname = str(hdr.get('EXTNAME') or '').upper()
+                    data = hdul[0].data
+                    shape = () if data is None else tuple(data.shape)
+                    # Real science chips are 2-D with a substantial footprint.
+                    is_sci = (not extname or extname == 'SCI') and len(shape) == 2
+                    is_sci = is_sci and min(shape) >= 64 and max(shape) >= 256
+                    if not is_sci:
+                        logger.info(
+                            'Removing non-SCI split %s (%s shape=%s)',
+                            chip.name,
+                            extname or 'no-EXTNAME',
+                            shape,
+                        )
+                    else:
+                        if parent_inst and not str(hdr.get('INSTRUME') or '').strip():
+                            hdr['INSTRUME'] = parent_inst
+                        if parent_filt and not str(hdr.get('FILTER') or '').strip():
+                            hdr['FILTER'] = parent_filt
+                        if parent_filt and parent_inst == 'WFPC2' and 'FILTNAM1' not in hdr:
+                            hdr['FILTNAM1'] = parent_filt
+                        hdul.flush()
+                        keep = True
+            except Exception as exc:
+                logger.warning('Could not inspect chip %s: %s', chip.name, exc)
+                keep = False
+            if keep:
+                chip_files.append(chip)
+            else:
+                try:
+                    chip.unlink()
+                except OSError:
+                    pass
+    return chip_files
+
+
 def prepare_frames(
     files: Sequence[PathLike],
     *,
@@ -791,11 +1123,11 @@ def prepare_frames(
     files : sequence of str or os.PathLike
         FITS paths to prepare.
     instrument : str
-        ``'nircam'`` or ``'miri'``; selects the mask utility and calcsky defaults.
+        ``'nircam'``, ``'miri'``, ``'acs'``, ``'wfc3'``, or ``'wfpc2'``.
     dolphot_bin : str or os.PathLike or None, optional
         Override path to the DOLPHOT ``bin`` directory.
     skip_mask : bool, optional
-        If True, skip ``nircammask`` / ``mirimask``.
+        If True, skip the instrument mask utility.
     skip_sky : bool, optional
         If True, skip ``calcsky``.
 
@@ -806,7 +1138,7 @@ def prepare_frames(
     Raises
     ------
     ValueError
-        If *instrument* is not ``'nircam'`` or ``'miri'``.
+        If *instrument* is not supported.
     """
     inst = instrument.lower()
     if not skip_mask:
@@ -814,10 +1146,208 @@ def prepare_frames(
             apply_mirimask(files, dolphot_bin=dolphot_bin)
         elif inst == 'nircam':
             apply_nircammask(files, dolphot_bin=dolphot_bin)
+        elif inst in _HST_INSTRUMENTS:
+            apply_hst_mask(files, inst, dolphot_bin=dolphot_bin)
         else:
             raise ValueError(f'Unsupported instrument for prepare_frames: {instrument}')
     if not skip_sky:
         calc_sky(files, instrument=inst, dolphot_bin=dolphot_bin)
+
+
+def prepare_hst_frames(
+    files: Sequence[PathLike],
+    outdir: PathLike,
+    instrument: str,
+    *,
+    refimage: Optional[PathLike] = None,
+    dolphot_bin: Optional[PathLike] = None,
+    skip_mask: bool = False,
+    skip_sky: bool = False,
+    skip_split: bool = False,
+    copy_files: bool = True,
+) -> Path:
+    """
+    Stage HST frames for DOLPHOT: splitgroups → mask → calcsky → paramfile.
+
+    Parameters
+    ----------
+    files : sequence of path-like
+        Science FITS (prefer ``*_jhat.fits``).
+    outdir : path-like
+        Staging directory (e.g. ``dolphot/wfc3_0_0`` or ``dolphot/hst_0_0``).
+    instrument : str
+        ``'acs'``, ``'wfc3'``, ``'wfpc2'``, or ``'hst'`` for a mixed run of
+        all HST instruments against one reference coadd (per-frame mask/sky).
+    refimage : path-like or None, optional
+        Reference / coadd FITS. Defaults to the first science frame.
+    dolphot_bin : path-like or None, optional
+        DOLPHOT ``bin`` override.
+    skip_mask, skip_sky, skip_split : bool, optional
+        Skip individual prep steps.
+    copy_files : bool, optional
+        Copy inputs into *outdir* before prep (default True).
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written ``dolphot.param``.
+    """
+    inst = instrument.lower()
+    if inst not in _HST_INSTRUMENTS and inst != _HST_MIXED_INSTRUMENT:
+        raise ValueError(
+            f'prepare_hst_frames requires acs|wfc3|wfpc2|hst, got {instrument}'
+        )
+    mixed = inst == _HST_MIXED_INSTRUMENT
+
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    src_files = [Path(p) for p in files]
+    if not src_files:
+        raise ValueError('prepare_hst_frames requires at least one science frame')
+    ref_src = Path(refimage) if refimage is not None else src_files[0]
+
+    # Classify science inputs up front (mixed mode needs per-file instrument).
+    src_kinds: dict[Path, str] = {}
+    for src in src_files:
+        if mixed:
+            src_kinds[src.resolve()] = _classify_hst_science(src)
+        else:
+            src_kinds[src.resolve()] = (
+                'wfc3_ir' if inst == 'wfc3' and 'ir' in src.name.lower() else inst
+            )
+
+    if copy_files:
+        staged_ref = out / ref_src.name
+        if not staged_ref.exists() or staged_ref.resolve() != ref_src.resolve():
+            shutil.copy2(ref_src, staged_ref)
+        staged = []
+        for src in src_files:
+            dst = out / src.name
+            if src.resolve() == ref_src.resolve():
+                staged.append(staged_ref)
+                continue
+            if not dst.exists():
+                shutil.copy2(src, dst)
+            staged.append(dst)
+            kind = src_kinds.get(src.resolve(), inst if not mixed else 'wfc3')
+            # Stage WFPC2 c1m DQ beside science for wfpc2mask / drizzle parity.
+            if _hst_mask_instrument(kind) == 'wfpc2' or (
+                not mixed and inst == 'wfpc2'
+            ):
+                dq_src = _wfpc2_dq_companion(Path(src))
+                if dq_src is not None:
+                    dq_dst = out / dq_src.name
+                    if not dq_dst.exists():
+                        shutil.copy2(dq_src, dq_dst)
+    else:
+        staged_ref = ref_src
+        staged = list(src_files)
+
+    ref_is_coadd = any(
+        tok in staged_ref.name.lower()
+        for tok in ('_drc', '_drz', 'coadd_')
+    )
+    # Split / mask / sky science MEFs only (not the drizzle reference).
+    if ref_is_coadd:
+        science_mefs = [
+            p for p in staged if Path(p).resolve() != staged_ref.resolve()
+        ]
+    else:
+        science_mefs = list(staged)
+    if not science_mefs:
+        science_mefs = list(staged)
+
+    # Map staged MEF → mask instrument.
+    mef_mask_inst: dict[Path, str] = {}
+    for mef in science_mefs:
+        mp = Path(mef)
+        kind = None
+        # Prefer classification from original src when names match.
+        for src, k in src_kinds.items():
+            if src.name == mp.name or src.stem in mp.name:
+                kind = k
+                break
+        if kind is None:
+            kind = _classify_hst_science(mp) if mixed else inst
+        mef_mask_inst[mp.resolve()] = _hst_mask_instrument(kind)
+
+    # WFPC2: mask native MEFs with c1m *before* splitgroups (C wfpc2mask needs DQ).
+    if not skip_mask:
+        wfpc2_mefs = [
+            p
+            for p in science_mefs
+            if mef_mask_inst.get(Path(p).resolve()) == 'wfpc2'
+            and '.chip' not in Path(p).name.lower()
+        ]
+        if wfpc2_mefs:
+            apply_hst_mask(wfpc2_mefs, 'wfpc2', dolphot_bin=dolphot_bin)
+
+    if skip_split:
+        work = list(science_mefs)
+    else:
+        work = apply_splitgroups(science_mefs, dolphot_bin=dolphot_bin)
+
+    # Group chip (or MEF) products by mask instrument for mask + calcsky.
+    by_mask: dict[str, list[Path]] = {'acs': [], 'wfc3': [], 'wfpc2': []}
+    for path in work:
+        p = Path(path)
+        mask_inst = None
+        # Chip products: match parent MEF stem before ".chip".
+        stem = p.name.split('.chip')[0] if '.chip' in p.name.lower() else p.stem
+        for mef_res, mi in mef_mask_inst.items():
+            if Path(mef_res).stem == stem:
+                mask_inst = mi
+                break
+        if mask_inst is None:
+            try:
+                mask_inst = _hst_mask_instrument(_classify_hst_science(p))
+            except ValueError:
+                mask_inst = 'wfc3' if mixed else inst
+        by_mask.setdefault(mask_inst, []).append(p)
+
+    for mask_inst, group in by_mask.items():
+        if not group:
+            continue
+        prepare_frames(
+            group,
+            instrument=mask_inst,
+            dolphot_bin=dolphot_bin,
+            # MEFs already masked for WFPC2; chips inherit BADPIX from splitgroups.
+            skip_mask=skip_mask or mask_inst == 'wfpc2',
+            skip_sky=skip_sky,
+        )
+
+    # Optional: calcsky on the coadd reference (DOLPHOT img0 often wants .sky).
+    if not skip_sky and ref_is_coadd and staged_ref.is_file():
+        ref_calc_inst = inst if not mixed else 'wfc3'
+        if mixed:
+            name = staged_ref.name.lower()
+            if 'wfpc2' in name:
+                ref_calc_inst = 'wfpc2'
+            elif 'acs' in name:
+                ref_calc_inst = 'acs'
+            else:
+                ref_calc_inst = 'wfc3'
+        try:
+            calc_sky([staged_ref], instrument=ref_calc_inst, dolphot_bin=dolphot_bin)
+        except Exception as exc:
+            logger.warning('calcsky on reference %s failed: %s', staged_ref.name, exc)
+
+    sci_for_param = [
+        p for p in work
+        if Path(p).resolve() != staged_ref.resolve()
+    ]
+    if not sci_for_param:
+        sci_for_param = list(work)
+
+    return setup_paramfile(
+        out,
+        staged_ref,
+        sci_for_param,
+        copy_files=False,
+        global_params=hst_base_params,
+        phot_out=f'{out.name}.phot',
+    )
 
 
 def write_paramfile(
@@ -875,7 +1405,7 @@ def write_paramfile(
     if len(kinds) != len(img_bases):
         raise ValueError('image_kinds length must match images')
 
-    # Include MIRI global knobs whenever any MIRI frame is present.
+    # Include MIRI / HST global knobs when those frames are present.
     gparams = dict(global_params) if global_params is not None else dict(base_params)
     if any(k == 'miri' for k in kinds):
         merged = dict(miri_base_params)
@@ -885,6 +1415,12 @@ def write_paramfile(
             merged['MIRIvega'] = miri_base_params['MIRIvega']
         if 'UseWCS' not in merged:
             merged['UseWCS'] = '2'
+        gparams = merged
+    if any(k in _HST_IMAGE_KINDS for k in kinds):
+        merged = dict(hst_base_params)
+        merged.update(gparams)
+        if 'UseWCS' not in merged:
+            merged['UseWCS'] = '1'
         gparams = merged
 
     with out.open('w') as f:
@@ -909,11 +1445,18 @@ def setup_paramfile(
     copy_files: bool = True,
     global_params: Optional[Mapping[str, str]] = None,
     xytfile: Optional[PathLike] = None,
-) -> Path:
+    phot_out: Optional[str] = None,
+    max_nimg: Optional[int] = None,
+    return_plan: bool = False,
+):
     """
     Stage images into a photometry directory and write ``dolphot.param``.
 
     Supports NIRCam and MIRI frames and an optional warm-start ``xytfile``.
+    When the science-image count exceeds the soft limit
+    (:data:`st123.photometry.dolphot_split.DOLPHOT_MAX_NIMG`, default 400),
+    the run is split into roughly equal parts that share the same reference
+    (see :func:`st123.photometry.dolphot_split.write_split_paramfiles`).
 
     Parameters
     ----------
@@ -931,12 +1474,25 @@ def setup_paramfile(
     xytfile : str or os.PathLike or None, optional
         Warm-start star list copied into *phot_outdir* when ``copy_files`` is
         True.
+    phot_out : str or None, optional
+        Final catalog basename (used for split part names / merge target).
+    max_nimg : int or None, optional
+        Soft per-run image cap. Defaults to ``DOLPHOT_MAX_NIMG`` (400).
+    return_plan : bool, optional
+        If True, return a :class:`~st123.photometry.dolphot_split.DolphotRunPlan`
+        instead of the primary parameter-file path.
 
     Returns
     -------
-    pathlib.Path
-        Path to the written ``dolphot.param`` file.
+    pathlib.Path or DolphotRunPlan
+        Primary ``dolphot.param`` path, or the full run plan when
+        ``return_plan`` is True.
     """
+    from st123.photometry.dolphot_split import (
+        DOLPHOT_MAX_NIMG,
+        write_split_paramfiles,
+    )
+
     outdir = Path(phot_outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -945,8 +1501,12 @@ def setup_paramfile(
         for src in files:
             shutil.copy(src, outdir)
 
-    staged_ref = outdir / Path(refimage).name
-    staged = [outdir / Path(p).name for p in files]
+    staged_ref = outdir / Path(refimage).name if copy_files else Path(refimage)
+    staged = (
+        [outdir / Path(p).name for p in files]
+        if copy_files
+        else [Path(p) for p in files]
+    )
     xyt_name = None
     if xytfile is not None:
         xyt_src = Path(xytfile)
@@ -955,13 +1515,19 @@ def setup_paramfile(
             shutil.copy(xyt_src, xyt_dst)
         xyt_name = xyt_dst
 
-    return write_paramfile(
-        outdir / 'dolphot.param',
-        refimage=staged_ref if copy_files else refimage,
-        images=staged if copy_files else files,
+    if phot_out is None:
+        phot_out = f'{outdir.name}.phot'
+    cap = DOLPHOT_MAX_NIMG if max_nimg is None else int(max_nimg)
+    plan = write_split_paramfiles(
+        outdir,
+        refimage=staged_ref,
+        images=staged,
+        phot_out=phot_out,
         global_params=global_params,
         xytfile=xyt_name,
+        max_nimg=cap,
     )
+    return plan if return_plan else plan.param_file
 
 
 def phot_to_xyt(
@@ -975,6 +1541,8 @@ def phot_to_xyt(
     min_sep_pix: Optional[float] = None,
     force_xy: Optional[Sequence[tuple[float, float]]] = None,
     force_tol_pix: float = 0.05,
+    center_xy: Optional[tuple[float, float]] = None,
+    max_radius_pix: Optional[float] = None,
 ) -> Path:
     """
     Build a warm-start star list from a DOLPHOT ``.phot`` catalog.
@@ -1008,6 +1576,12 @@ def phot_to_xyt(
         Positions that must be retained when present in the catalog.
     force_tol_pix : float, optional
         Match tolerance for ``force_xy`` (pixels).
+    center_xy : (x, y) or None, optional
+        Reference-pixel center for the optional radius cut. Defaults to the
+        first ``force_xy`` coordinate when that is provided.
+    max_radius_pix : float or None, optional
+        Keep only seeds within this radius of *center_xy* (plus any
+        ``force_xy`` matches). Useful for single-target warmstarts.
 
     Returns
     -------
@@ -1024,6 +1598,18 @@ def phot_to_xyt(
     out.parent.mkdir(parents=True, exist_ok=True)
     type_set = set(int(t) for t in types) if types is not None else None
     force_list = list(force_xy) if force_xy else []
+    radius_center = center_xy
+    if radius_center is None and force_list:
+        radius_center = (float(force_list[0][0]), float(force_list[0][1]))
+    use_radius = (
+        max_radius_pix is not None
+        and max_radius_pix > 0
+        and radius_center is not None
+    )
+    if max_radius_pix is not None and max_radius_pix > 0 and radius_center is None:
+        raise ValueError(
+            'max_radius_pix requires center_xy or force_xy to define the center'
+        )
 
     # Collect rows that pass quality cuts (or are force-matched).
     # Each item: (snr, ext, z, x, y, obj_type, snr_str, forced)
@@ -1056,6 +1642,10 @@ def phot_to_xyt(
                 )
                 continue
 
+            if use_radius:
+                cx, cy = radius_center
+                if (x - cx) ** 2 + (y - cy) ** 2 > float(max_radius_pix) ** 2:
+                    continue
             if type_set is not None and obj_type not in type_set:
                 continue
             if snr_min is not None and snr < snr_min:
@@ -1102,11 +1692,16 @@ def phot_to_xyt(
     if not kept:
         raise ValueError(f'No stars written to warm-start list from {phot_path}')
     logger.info(
-        'Wrote %s (%d stars; forced=%d, quality=%d)',
+        'Wrote %s (%d stars; forced=%d, quality=%d%s)',
         out,
         len(kept),
         sum(1 for r in kept if r[7]),
         sum(1 for r in kept if not r[7]),
+        (
+            f', max_radius_pix={max_radius_pix:g}'
+            if use_radius
+            else ''
+        ),
     )
     return out
 

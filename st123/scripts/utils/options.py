@@ -103,9 +103,9 @@ def looks_like_reduction_dir(path: Path) -> bool:
 
 def resolve_reduction_dir(base_dir: Path) -> Path:
     """
-    Map ``--base-dir`` to the NIRCam reduction workdir.
+    Map ``--base-dir`` to the reduction workdir.
 
-    * If ``base_dir`` looks like a project root (``JWST/`` and/or
+    * If ``base_dir`` looks like a project root (``JWST/``, ``HST/``, and/or
       ``reduction/`` present), return ``base_dir / 'reduction'``. This is
       checked before workdir markers so a project-level ``reference/``
       symlink (from :func:`ensure_dataset_reference_link`) does not make
@@ -125,7 +125,11 @@ def resolve_reduction_dir(base_dir: Path) -> Path:
         Absolute reduction workdir path.
     """
     base = Path(base_dir).expanduser().resolve()
-    if (base / 'JWST').is_dir() or (base / 'reduction').is_dir():
+    if (
+        (base / 'JWST').is_dir()
+        or (base / 'HST').is_dir()
+        or (base / 'reduction').is_dir()
+    ):
         return (base / 'reduction').resolve()
     if looks_like_reduction_dir(base):
         return base
@@ -134,7 +138,7 @@ def resolve_reduction_dir(base_dir: Path) -> Path:
 
 def resolve_project_root(base_dir: Path) -> Path:
     """
-    Map ``--base-dir`` to the dataset / project root (parent of ``JWST/``).
+    Map ``--base-dir`` to the dataset / project root (parent of ``JWST/``/``HST/``).
 
     If ``base_dir`` is a reduction workdir named ``reduction``, return its
     parent; otherwise return ``base_dir`` itself.
@@ -151,39 +155,62 @@ def resolve_project_root(base_dir: Path) -> Path:
     """
     base = Path(base_dir).expanduser().resolve()
     if base.name == 'reduction' and (
-        looks_like_reduction_dir(base) or not (base / 'JWST').is_dir()
+        looks_like_reduction_dir(base)
+        or not ((base / 'JWST').is_dir() or (base / 'HST').is_dir())
     ):
         return base.parent
     return base
 
 
-def instrument_raw_dir(base_dir: Path, instrument: str) -> Path:
+def instrument_raw_dir(
+    base_dir: Path,
+    instrument: str,
+    *,
+    telescope: str | None = None,
+) -> Path:
     """
-    Return ``{project}/JWST/{Instrument}`` for symlink sources.
+    Return ``{project}/{Telescope}/{Instrument}`` for symlink sources.
 
     Parameters
     ----------
     base_dir : pathlib.Path
         Project root or reduction workdir from ``--base-dir``.
     instrument : str
-        Instrument name (e.g. ``NIRCAM``, ``MIRI``).
+        Instrument name (e.g. ``NIRCAM``, ``MIRI``, ``WFC3``, ``ACS``).
+    telescope : str or None, optional
+        ``JWST`` or ``HST``. When ``None``, inferred from *instrument*
+        (HST for ACS/WFC3/WFPC2; JWST otherwise).
 
     Returns
     -------
     pathlib.Path
-        Absolute ``JWST/<Instrument>`` directory under the project root.
+        Absolute ``<Telescope>/<Instrument>`` directory under the project root.
     """
     root = resolve_project_root(base_dir)
     key = str(instrument).strip().upper()
+    tel = (telescope or '').strip().upper() or None
     if key in ('NIRCAM', 'NRC'):
         name = 'NIRCam'
+        tel = tel or 'JWST'
     elif key == 'MIRI':
         name = 'MIRI'
+        tel = tel or 'JWST'
     elif key == 'NIRISS':
         name = 'NIRISS'
+        tel = tel or 'JWST'
+    elif key in ('ACS',):
+        name = 'ACS'
+        tel = tel or 'HST'
+    elif key in ('WFC3',):
+        name = 'WFC3'
+        tel = tel or 'HST'
+    elif key in ('WFPC2',):
+        name = 'WFPC2'
+        tel = tel or 'HST'
     else:
         name = instrument
-    return root / 'JWST' / name
+        tel = tel or 'JWST'
+    return root / tel / name
 
 
 def dataset_label(base_dir: Path | str) -> str:

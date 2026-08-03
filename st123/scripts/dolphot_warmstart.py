@@ -156,6 +156,24 @@ def create_parser():
             '(e.g. 1584.25,2793.24 for SN 2026sqf).'
         ),
     )
+    parser.add_argument(
+        '--xyt-max-radius-arcsec',
+        type=float,
+        default=None,
+        help=(
+            'Keep only warmstart.xyt seeds within this radius of '
+            '--xyt-force-xy / --xyt-center-xy (e.g. 5 for SN 2026sqf).'
+        ),
+    )
+    parser.add_argument(
+        '--xyt-center-xy',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated reference X,Y center for --xyt-max-radius-arcsec '
+            '(defaults to --xyt-force-xy when set).'
+        ),
+    )
     add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
@@ -211,6 +229,13 @@ def main(argv=None) -> int:
                 logger.error('--xyt-force-xy must be X,Y')
                 return 1
             force_xy = [(parts[0], parts[1])]
+        center_xy = None
+        if args.xyt_center_xy:
+            parts = [float(x) for x in str(args.xyt_center_xy).split(',')]
+            if len(parts) != 2:
+                logger.error('--xyt-center-xy must be X,Y')
+                return 1
+            center_xy = (parts[0], parts[1])
 
         try:
             result = setup_miri_warmstart(
@@ -231,6 +256,8 @@ def main(argv=None) -> int:
                 xyt_sharp2_max=args.xyt_sharp2_max,
                 xyt_min_sep_arcsec=args.xyt_min_sep_arcsec,
                 xyt_force_xy=force_xy,
+                xyt_max_radius_arcsec=args.xyt_max_radius_arcsec,
+                xyt_center_xy=center_xy,
                 prune_xyt_for_miri=args.prune_xyt_for_miri,
                 ncores=args.ncores,
             )
@@ -243,8 +270,11 @@ def main(argv=None) -> int:
         logger.info('  Param file:    %s', result.param_file)
         logger.info('  xyt file:      %s', result.xyt_file)
         logger.info('  Phot output:   %s', result.phot_out)
+        if result.plan is not None:
+            logger.info('  Split parts:   %d', len(result.plan.parts))
         logger.info('Run DOLPHOT with:')
-        logger.info('  %s', result.command)
+        for cmd in result.commands or ([result.command] if result.command else []):
+            logger.info('  %s', cmd)
         return 0
     finally:
         shutdown_logging()

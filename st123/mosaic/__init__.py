@@ -9,12 +9,20 @@ Submodules
 
 Heavy symbols from :mod:`st123.mosaic.mosaic` are resolved lazily so importing
 footprint helpers does not require optional stack packages (``ccdproc``, etc.).
+HST AstroDrizzle helpers live in :mod:`st123.mosaic.hst_drizzle`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from st123.mosaic.hst_drizzle import (
+    drizzle_filter_group,
+    drizzle_project,
+    subtract_per_chip_sky,
+    group_hst_frames,
+    unify_hst_astrometric_frame,
+)
 from st123.mosaic.image_overlap import (
     AreaMetrics,
     BestOverlap,
@@ -94,13 +102,18 @@ __all__ = [
     'create_gwcs',
     'create_psf_kernel',
     'default_adjacency_pixels',
+    'drizzle_filter_group',
+    'drizzle_project',
     'edit_spec_groups',
+    'subtract_per_chip_sky',
+    'unify_hst_astrometric_frame',
     'expand_illuminated_region',
     'find_best_refs',
     'find_dq_hdu',
     'find_image_hdu',
     'find_optimal_wcs',
     'get_pgons',
+    'group_hst_frames',
     'illuminated_mask',
     'illuminated_mask_from_dq',
     'illuminated_s_region_from_fits',

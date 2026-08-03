@@ -658,6 +658,60 @@ def observation_download_subdir(
     )
 
 
+def prune_non_full_frame_miri(
+    root: str | os.PathLike,
+    *,
+    remove: bool = True,
+) -> list[str]:
+    """
+    Remove (or list) non-full-frame MIRI ``*mirimage*`` FITS under *root*.
+
+    Subarrays and cutouts are unsupported by alignment / ``mirimask``. Called
+    after MAST download so they never remain in the science tree.
+
+    Parameters
+    ----------
+    root : str or path-like
+        Directory to scan recursively.
+    remove : bool, optional
+        If True (default), delete matching files; otherwise only return paths.
+
+    Returns
+    -------
+    list of str
+        Paths that were non-full-frame (deleted when ``remove`` is True).
+    """
+    from pathlib import Path
+
+    from st123.utils.helpers import is_full_frame_miri
+
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return []
+    rejected: list[str] = []
+    for path in root_path.rglob('*mirimage*.fits'):
+        name = path.name.lower()
+        if name.endswith('.sky.fits'):
+            continue
+        if not any(name.endswith(suf) for suf in ('_cal.fits', '_rate.fits', '_jhat.fits')):
+            # Still check other mirimage products (e.g. calints) by shape.
+            if '_cal' not in name and '_rate' not in name and '_jhat' not in name:
+                continue
+        if is_full_frame_miri(path):
+            continue
+        rejected.append(str(path))
+        logger.warning(
+            'Rejecting non-full-frame MIRI product (unsupported subarray/cutout): %s',
+            path,
+        )
+        if remove:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning('could not remove %s: %s', path, exc)
+    return rejected
+
+
 def download_jwst_observations(
     obs_table: Table,
     outdir: str,
@@ -784,12 +838,157 @@ def download_jwst_observations(
                 Observations.download_products(
                     product_list, download_dir=download_dir, extension=extension
                 )
+            # Drop MIRI subarrays/cutouts immediately so they never enter
+            # alignment or DOLPHOT staging.
+            pruned = prune_non_full_frame_miri(download_dir, remove=True)
+            if pruned:
+                logger.info(
+                    '[%d/%d] %s: removed %d non-full-frame MIRI product(s)',
+                    i,
+                    n_obs,
+                    subdir,
+                    len(pruned),
+                )
             n_downloaded += 1
         except Exception as exc:
             logger.warning('download failed for obsid=%s: %s', obsid, exc)
 
     logger.info(
         'Finished: downloaded products for %d/%d observation(s).',
+        n_downloaded,
+        n_obs,
+    )
+    return n_downloaded
+
+
+def filter_hst_products(
+    product_list: Table,
+    instrument_name: object,
+) -> Table:
+    """Keep HST flt/flc/c0m/c1m SCIENCE products for *instrument*.
+
+    WFPC2 ``c1m`` DQ companions are always retained — they are required for
+    AstroDrizzle and ``wfpc2mask``.
+
+    Parameters
+    ----------
+    product_list : Table
+        Raw MAST product list.
+    instrument_name : object
+        MAST ``instrument_name`` for the parent observation.
+
+    Returns
+    -------
+    Table
+        Filtered product table.
+    """
+    inst = str(instrument_name)
+    mask = [
+        is_hst_science_product(str(row['productFilename']), inst)
+        for row in product_list
+    ]
+    return product_list[np.asarray(mask, dtype=bool)]
+
+
+def download_hst_observations(
+    obs_table: Table,
+    outdir: str,
+    token: Optional[str] = None,
+    *,
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
+    dry_run: bool = False,
+    extension: str = 'fits',
+) -> int:
+    """Download filtered HST science products for each observation into ``outdir``.
+
+    Parameters
+    ----------
+    obs_table : Table
+        HST observation table from :func:`query_hst`.
+    outdir : str
+        Root download directory (typically ``--base-dir``).
+    token : str or None, optional
+        MAST API token.
+    layout : str, optional
+        Per-observation subdirectory layout.
+    dry_run : bool, optional
+        List products without downloading.
+    extension : str, optional
+        File extension for ``download_products``.
+
+    Returns
+    -------
+    int
+        Number of observation product sets downloaded (or listed).
+    """
+    resolved = resolve_mast_token(token)
+    if resolved:
+        mast_login(resolved, required=True)
+
+    if obs_table is None or len(obs_table) == 0:
+        logger.error('observation table is empty. Cannot download files.')
+        return 0
+
+    os.makedirs(outdir, exist_ok=True)
+    n_obs = len(obs_table)
+    n_downloaded = 0
+    logger.info('Downloading HST products for %d observation(s) into %s', n_obs, outdir)
+    if dry_run:
+        logger.info('Dry run: no files will be downloaded')
+
+    has_collection = 'obs_collection' in obs_table.colnames
+    has_instrument = 'instrument_name' in obs_table.colnames
+    for i, obs in enumerate(obs_table, start=1):
+        filt = obs['filters']
+        obsid = obs['obsid']
+        telescope = obs['obs_collection'] if has_collection else 'HST'
+        instrument = obs['instrument_name'] if has_instrument else None
+        subdir = observation_download_subdir(
+            filt,
+            obsid,
+            layout=layout,
+            telescope=telescope,
+            instrument=instrument,
+        )
+        try:
+            with capture_output():
+                raw_products = Observations.get_product_list(obs)
+            # Prefer type=='S' when present
+            if 'type' in raw_products.colnames:
+                raw_products = raw_products[raw_products['type'] == 'S']
+            product_list = filter_hst_products(raw_products, instrument)
+        except Exception as exc:
+            logger.warning('could not get products for obsid=%s: %s', obsid, exc)
+            continue
+        if len(product_list) == 0:
+            logger.info('[%d/%d] %s: no HST science products', i, n_obs, subdir)
+            continue
+        download_dir = os.path.join(outdir, subdir)
+        os.makedirs(download_dir, exist_ok=True)
+        logger.info(
+            '[%d/%d] %s: %s %d product(s)...',
+            i,
+            n_obs,
+            subdir,
+            'listing' if dry_run else 'downloading',
+            len(product_list),
+        )
+        for row in product_list:
+            logger.info('    %s', row['productFilename'])
+        if dry_run:
+            n_downloaded += 1
+            continue
+        try:
+            with capture_output():
+                Observations.download_products(
+                    product_list, download_dir=download_dir, extension=extension
+                )
+            n_downloaded += 1
+        except Exception as exc:
+            logger.warning('download failed for obsid=%s: %s', obsid, exc)
+
+    logger.info(
+        'Finished: downloaded HST products for %d/%d observation(s).',
         n_downloaded,
         n_obs,
     )

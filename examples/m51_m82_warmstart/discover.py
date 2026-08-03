@@ -128,6 +128,14 @@ def jhats_for_ref(
         key = str(path.resolve())
         if key in seen:
             continue
+        # Drop cutouts / non-full-frame MIRI products (rejected upstream too).
+        try:
+            from st123.utils.helpers import is_full_frame_miri
+
+            if not is_full_frame_miri(path):
+                continue
+        except Exception:
+            pass
         seen.add(key)
         out.append(path)
     return sorted(out)

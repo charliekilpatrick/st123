@@ -6,9 +6,11 @@ from __future__ import annotations
 import glob
 import logging
 import os
+from pathlib import Path
 
 import numpy as np
 
+from st123.mosaic.hst_drizzle import drizzle_project
 from st123.mosaic.mosaic import (
     apply_wcs_to_coadd,
     coadd,
@@ -43,8 +45,18 @@ logger = logging.getLogger(__name__)
 def create_parser():
     parser = build_parser(
         description=(
-            'Mosaic / coadd JWST JHAT frames. DOLPHOT staging (nircammask, '
-            'calcsky, dolphot.param) is a separate step: dolphot-prep.'
+            'Mosaic / coadd JHAT frames (JWST resample or HST AstroDrizzle). '
+            'DOLPHOT staging is a separate step: dolphot-prep.'
+        ),
+    )
+    parser.add_argument(
+        '--telescope',
+        choices=('jwst', 'hst'),
+        default='jwst',
+        help=(
+            'Telescope mosaic backend. jwst (default): overlap boxes + '
+            'JWST resample coadds. hst: AstroDrizzle per instrument/filter '
+            'from reduction/jhat → reduction/reference.'
         ),
     )
     add_base_dir(
@@ -61,13 +73,13 @@ def create_parser():
         '--nmax',
         type=int,
         default=150,
-        help='Maximum number of images per mosaic box',
+        help='Maximum number of images per mosaic box (JWST only)',
     )
     parser.add_argument(
         '--spec_groups',
         type=str,
         default=None,
-        help='List of images to be grouped',
+        help='List of images to be grouped (JWST only)',
     )
     add_filters(
         parser,
@@ -76,11 +88,51 @@ def create_parser():
             'When omitted, short-wave NIRCam filters are selected automatically '
             'and PSF-matched into one coadd. When set, each filter is mosaicked '
             'separately onto the same sky footprint with the JWST-recommended '
-            'pixel scale for that channel (NIRCam SW/LW or MIRI).'
+            'pixel scale for that channel (NIRCam SW/LW or MIRI). JWST only.'
         ),
     )
-    add_common_runtime(parser, plot=False, verbose=True)
+    add_common_runtime(parser, ncores=True, ncores_default=4, plot=False, verbose=True)
     return parser
+
+
+def _run_hst_mosaic(args) -> int:
+    """AstroDrizzle each (instrument, filter) group from reduction/jhat."""
+    base_dir = Path(resolve_reduction_dir(args.base_dir))
+    jhat_dir = base_dir / 'jhat'
+    outdir = base_dir / 'reference'
+    if args.verbose:
+        logger.info('Dataset: %s', dataset_label(args.base_dir))
+        logger.info('HST drizzle: %s → %s', jhat_dir, outdir)
+    if not jhat_dir.is_dir():
+        logger.error('missing jhat/ under %s', base_dir)
+        return 1
+    results = drizzle_project(
+        jhat_dir,
+        outdir,
+        num_cores=int(args.ncores),
+    )
+    if not results:
+        return 1
+    n_ok = sum(1 for r in results if r['status'] == 'ok')
+    n_fail = sum(1 for r in results if r['status'] != 'ok')
+    for r in results:
+        if r['status'] == 'ok':
+            logger.info(
+                'OK %s/%s → %s (%d frames)',
+                r['instrument'],
+                r['filter'],
+                r['output'],
+                len(r['frames']),
+            )
+        else:
+            logger.error(
+                'FAIL %s/%s: %s',
+                r['instrument'],
+                r['filter'],
+                r.get('error'),
+            )
+    logger.info('HST drizzle done: %d ok, %d failed', n_ok, n_fail)
+    return 0 if n_ok and n_fail == 0 else (0 if n_ok else 1)
 
 
 def _box_wcs_header(mosaic_wcs, bbox):
@@ -246,6 +298,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     configure_logging_from_args(args, 'mosaic')
     try:
+        if str(getattr(args, 'telescope', 'jwst')).lower() == 'hst':
+            return _run_hst_mosaic(args)
+
         base_dir = str(resolve_reduction_dir(args.base_dir))
         nmax = args.nmax
         spec_group_file = args.spec_groups

@@ -24,6 +24,14 @@ at `dolphot/nircam_{g}_{b}`.
 
 Sparse MIRI footprints (`n_miri < 10`) are ignored.
 
+## Image-count limits
+
+The DOLPHOT binary is compiled with `MAXNIMG=501` (up to **500** science
+frames). Staging still caps each invocation at **`DOLPHOT_MAX_NIMG = 400`**.
+If a warm-start would exceed that, setup writes `dolphot_partXX.param` plus
+`dolphot_split.json`; `launch_dolphot.py` runs each part and merges catalogs
+into the usual `*_nircam_miri.phot`.
+
 ## Commands
 
 ```bash
@@ -41,3 +49,29 @@ python launch_dolphot.py
 ```
 
 Legacy wrappers in `examples/outdir_m51_m82_warmstart/*.sh` call these tools.
+
+## Recovering MIRI warm-start photometry (M51 / M82)
+
+After the DOLPHOT rebuild and this split-aware staging code:
+
+1. **Re-stage incomplete refs** (skips boxes that already have a non-empty
+   `*_nircam_miri.phot`):
+   ```bash
+   python setup_warmstarts.py -v
+   ```
+   For a broken partial dir (e.g. M82 `nircam_miri_0_5` missing param/sky),
+   remove that directory first, then re-run setup.
+
+2. **Dry-run the launcher** (sanity-check commands; do not start jobs yet):
+   ```bash
+   python launch_dolphot.py
+   ```
+
+3. **Launch** when ready:
+   ```bash
+   python launch_dolphot.py --go
+   ```
+
+Finished M51 boxes (`1_4`, `1_6`, `1_8`, `1_10`, `1_11`) are left alone.
+Previously failed M51 `1_0` / `1_9` (`Nimg` ~208–211) now fit in a single
+run under the new binary. All eligible M82 refs need staging + launch.

@@ -50,6 +50,37 @@ def _write_jwst_cal(
     return path
 
 
+def test_is_full_frame_miri(tmp_path: Path):
+    good = tmp_path / 'full_mirimage_cal.fits'
+    data = np.ones((1024, 1032), dtype=np.float32)
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'MIRI'
+    primary.header['DETECTOR'] = 'MIRIMAGE'
+    primary.header['SUBARRAY'] = 'FULL'
+    primary.header['FILTER'] = 'F770W'
+    fits.HDUList(
+        [primary, fits.ImageHDU(data=data, name='SCI')]
+    ).writeto(good)
+
+    bad = tmp_path / 'cutout_mirimage_cal.fits'
+    primary2 = fits.PrimaryHDU()
+    primary2.header['INSTRUME'] = 'MIRI'
+    primary2.header['DETECTOR'] = 'MIRIMAGE'
+    primary2.header['SUBARRAY'] = 'SUB64'
+    primary2.header['FILTER'] = 'F770W'
+    fits.HDUList(
+        [
+            primary2,
+            fits.ImageHDU(data=np.ones((128, 136), dtype=np.float32), name='SCI'),
+        ]
+    ).writeto(bad)
+
+    assert helpers.is_full_frame_miri(good)
+    assert helpers.is_mirimask_compatible(good)
+    assert not helpers.is_full_frame_miri(bad)
+    assert not helpers.is_full_frame_miri(tmp_path / 'missing.fits')
+
+
 # --- settings -----------------------------------------------------------------
 
 

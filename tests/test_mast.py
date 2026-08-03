@@ -9,6 +9,9 @@ from unittest.mock import patch
 import pytest
 from astropy.table import Table
 
+import numpy as np
+from astropy.io import fits
+
 from st123.mast import (
     filter_jwst_observations_by_stage,
     filter_jwst_products,
@@ -16,9 +19,34 @@ from st123.mast import (
     mast_login,
     observation_matches_calib_stage,
     parse_s_region,
+    prune_non_full_frame_miri,
     resolve_mast_token,
 )
 from st123.mast.mast import download_jwst_observations
+
+
+def test_prune_non_full_frame_miri(tmp_path: Path):
+    good = tmp_path / 'jw_full_mirimage_cal.fits'
+    bad = tmp_path / 'jw_cut_mirimage_cal.fits'
+    for path, shape, sub in (
+        (good, (1024, 1032), 'FULL'),
+        (bad, (128, 136), 'SUB64'),
+    ):
+        primary = fits.PrimaryHDU()
+        primary.header['INSTRUME'] = 'MIRI'
+        primary.header['DETECTOR'] = 'MIRIMAGE'
+        primary.header['SUBARRAY'] = sub
+        fits.HDUList(
+            [
+                primary,
+                fits.ImageHDU(data=np.ones(shape, dtype=np.float32), name='SCI'),
+            ]
+        ).writeto(path)
+
+    rejected = prune_non_full_frame_miri(tmp_path, remove=True)
+    assert any(Path(p).name == bad.name for p in rejected)
+    assert good.is_file()
+    assert not bad.is_file()
 
 
 def test_filter_jwst_products_stage2_and_3():

@@ -104,16 +104,23 @@ def main(argv: list[str] | None = None) -> int:
                 staged += 1
                 continue
             summary = default_alignment_summary(spec.base_dir)
-            setup_miri_warmstart(
-                nircam_dir(spec, plan.group, plan.box),
-                out,
-                miri_jhat=jhats,
-                data_root=spec.base_dir,
-                alignment_summary=summary if Path(summary).is_file() else None,
-                phot_out=phot_out,
-                prune_xyt_for_miri=True,
-                ncores=ncores,
-            )
+            try:
+                setup_miri_warmstart(
+                    nircam_dir(spec, plan.group, plan.box),
+                    out,
+                    miri_jhat=jhats,
+                    data_root=spec.base_dir,
+                    alignment_summary=summary if Path(summary).is_file() else None,
+                    phot_out=phot_out,
+                    prune_xyt_for_miri=True,
+                    ncores=ncores,
+                )
+            except Exception as exc:
+                logger.exception(
+                    'FAILED %s_%s (%s): %s', name, plan.ref_key, out, exc
+                )
+                skipped += 1
+                continue
             # Ensure list file matches what was staged.
             jhat_list_path(spec, plan.group, plan.box).write_text(
                 '\n'.join(str(p) for p in jhats) + '\n'

@@ -31,12 +31,21 @@ from st123.mosaic.image_overlap import (
 from st123.scripts import align as align_script
 
 
-def _write_miri_cal(path: Path, *, filter_name: str = 'F560W', crval=(150.0, 2.0)) -> Path:
+def _write_miri_cal(
+    path: Path,
+    *,
+    filter_name: str = 'F560W',
+    crval=(150.0, 2.0),
+    shape: tuple[int, int] = (1024, 1032),
+    subarray: str = 'FULL',
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_illuminated_fits(path, crval=crval, include_s_region=True)
+    write_illuminated_fits(path, shape=shape, crval=crval, include_s_region=True)
     with fits.open(path, mode='update') as hdul:
         hdul[0].header['FILTER'] = filter_name
         hdul[0].header['INSTRUME'] = 'MIRI'
+        hdul[0].header['DETECTOR'] = 'MIRIMAGE'
+        hdul[0].header['SUBARRAY'] = subarray
     return path
 
 
@@ -153,6 +162,14 @@ def test_discover_and_filter_miri_images(tmp_path: Path):
     _write_miri_cal(cal, filter_name='F560W')
     other = cal.parent / 'jw_x_mirimage_rate.fits'
     other.write_bytes(b'')
+    # Unsupported cutout / subarray must not enter alignment.
+    bad = cal.parent / 'jw_cutout_mirimage_cal.fits'
+    _write_miri_cal(
+        bad,
+        filter_name='F560W',
+        shape=(128, 136),
+        subarray='SUB64',
+    )
 
     found = align_lib.discover_miri_images(data_dir)
     assert [Path(p).name for p in found] == ['jw_x_mirimage_cal.fits']
@@ -324,8 +341,7 @@ def test_align_from_frames_continues_on_failure(tmp_path: Path):
         / 'jw_x_mirimage'
         / 'jw_x_mirimage_cal.fits'
     )
-    miri.parent.mkdir(parents=True)
-    miri.write_bytes(b'')
+    _write_miri_cal(miri, filter_name='F560W')
     ref = '/fake/ref.fits'
     frames = [
         {

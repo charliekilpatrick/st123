@@ -134,6 +134,28 @@ def test_phot_to_xyt_miri_prune_and_force(tmp_path: Path):
     assert not any(r.startswith('1 1 200.0 300.0') for r in rows)  # crowded
 
 
+def test_phot_to_xyt_max_radius(tmp_path: Path):
+    phot = tmp_path / 'run.phot'
+    phot.write_text(
+        '1 1 100.0 200.0 1.0 100.0 0.01 0.0 0.0 0.2 1 1\n'
+        '1 1 110.0 200.0 1.0 50.0 0.01 0.0 0.0 0.2 1 1\n'
+        '1 1 300.0 200.0 1.0 80.0 0.01 0.0 0.0 0.2 1 1\n'
+    )
+    xyt = tmp_path / 'warmstart.xyt'
+    phot_to_xyt(
+        phot,
+        xyt,
+        types=[1],
+        snr_min=10.0,
+        force_xy=[(100.0, 200.0)],
+        max_radius_pix=20.0,
+    )
+    rows = xyt.read_text().splitlines()
+    assert any(r.startswith('1 1 100.0 200.0') for r in rows)
+    assert any(r.startswith('1 1 110.0 200.0') for r in rows)
+    assert not any(r.startswith('1 1 300.0 200.0') for r in rows)
+
+
 def test_write_paramfile_includes_miri_and_xyt(tmp_path: Path):
     ref = tmp_path / 'coadd.fits'
     nircam = tmp_path / 'a_nrcb1_jhat.fits'
@@ -506,3 +528,157 @@ def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
     assert job.refimage.resolve() == ref.resolve()
     assert list(job.frames) == [miri]
     assert prep.call_args.kwargs['instrument'] == 'miri'
+
+
+def test_chunk_images_equal_and_grouped():
+    from st123.photometry.dolphot_split import chunk_images
+
+    imgs = [Path(f'f{i}.fits') for i in range(10)]
+    chunks = chunk_images(imgs, max_nimg=4)
+    assert len(chunks) == 3
+    assert sorted(len(c) for c in chunks) == [3, 3, 4]
+    assert sum(len(c) for c in chunks) == 10
+
+    keys = ['A'] * 3 + ['B'] * 3 + ['C'] * 4
+    chunks = chunk_images(imgs, max_nimg=5, group_keys=keys)
+    # A+B=6 would exceed 5, so A alone or with nothing oversized
+    assert all(len(c) <= 5 for c in chunks)
+    assert sum(len(c) for c in chunks) == 10
+    # Images sharing a key stay together when the group fits.
+    for c in chunks:
+        names = {p.name for p in c}
+        if 'f0.fits' in names:
+            assert {'f0.fits', 'f1.fits', 'f2.fits'} <= names
+
+
+def test_write_split_paramfiles_and_merge(tmp_path: Path):
+    from st123.photometry.dolphot_split import (
+        SPLIT_MANIFEST_NAME,
+        finalize_split_outdir,
+        merge_dolphot_phot_catalogs,
+        write_split_paramfiles,
+    )
+
+    ref = tmp_path / 'coadd.fits'
+    ref.write_text('')
+    images = []
+    for i in range(6):
+        p = tmp_path / f'img{i}_nrcb1_jhat.fits'
+        p.write_text('')
+        images.append(p)
+    xyt = tmp_path / 'warmstart.xyt'
+    xyt.write_text('1 1 10.0 20.0 1 50.0\n1 1 11.0 21.0 1 40.0\n')
+
+    plan = write_split_paramfiles(
+        tmp_path,
+        refimage=ref,
+        images=images,
+        phot_out='run_nircam_miri.phot',
+        xytfile=xyt,
+        max_nimg=4,
+        read_filters=False,
+    )
+    assert plan.needs_merge
+    assert len(plan.parts) == 2
+    assert (tmp_path / SPLIT_MANIFEST_NAME).is_file()
+    assert (tmp_path / 'dolphot_part00.param').is_file()
+    assert (tmp_path / 'dolphot_full.param').is_file()
+    assert not (tmp_path / 'dolphot.param').is_file()
+
+    # Synthetic part catalogs: 12 object cols + one 13-col combined block each.
+    def _write_part(name: str, filt: str, mags: list[str]) -> Path:
+        phot = tmp_path / name
+        cols = tmp_path / f'{name}.columns'
+        obj = [
+            'Extension',
+            'Chip',
+            'Object X position',
+            'Object Y position',
+            'Chi for fit',
+            'Signal-to-noise',
+            'Object sharpness',
+            'Object roundness',
+            'Direction of major axis',
+            'Crowding',
+            'Object type',
+            'Pass Detected',
+        ]
+        block = [
+            f'Total counts, {filt}',
+            f'Total sky level, {filt}',
+            f'Normalized count rate, {filt}',
+            f'Normalized count rate uncertainty, {filt}',
+            f'Instrumental ABMAG magnitude, {filt}',
+            f'Transformed UBVRI magnitude, {filt}',
+            f'Magnitude uncertainty, {filt}',
+            f'Chi, {filt}',
+            f'Signal-to-noise, {filt}',
+            f'Sharpness, {filt}',
+            f'Roundness, {filt}',
+            f'Crowding, {filt}',
+            f'Photometry quality flag, {filt}',
+        ]
+        with cols.open('w') as fh:
+            for i, n in enumerate(obj + block, start=1):
+                fh.write(f'{i}. {n}\n')
+        rows = []
+        for i, mag in enumerate(mags):
+            obj_vals = [
+                '1',
+                '1',
+                f'{10.0 + i:.1f}',
+                f'{20.0 + i:.1f}',
+                '1.0',
+                '50.0',
+                '0.0',
+                '0.0',
+                '0.0',
+                '0.1',
+                '1',
+                '1',
+            ]
+            phot_vals = ['100', '1', '1', '0.1', mag, mag, '0.01', '1', '50', '0', '0', '0.1', '0']
+            rows.append(' '.join(obj_vals + phot_vals))
+        phot.write_text('\n'.join(rows) + '\n')
+        return phot
+
+    p0 = _write_part(plan.parts[0].phot_out, 'NIRCAM_F115W', ['20.0', '21.0'])
+    p1 = _write_part(plan.parts[1].phot_out, 'MIRI_F770W', ['18.0', '19.0'])
+    merged = merge_dolphot_phot_catalogs([p0, p1], tmp_path / 'run_nircam_miri.phot')
+    text = merged.read_text().splitlines()
+    assert len(text) == 2
+    # object(12) + F115W(13) + F770W(13) = 38 fields
+    assert len(text[0].split()) == 38
+    cols = (tmp_path / 'run_nircam_miri.phot.columns').read_text()
+    assert 'NIRCAM_F115W' in cols and 'MIRI_F770W' in cols
+
+    # finalize_split_outdir should no-op once merged exists with size>0… rewrite empty
+    (tmp_path / 'run_nircam_miri.phot').unlink()
+    out = finalize_split_outdir(tmp_path)
+    assert out is not None
+    assert out.name == 'run_nircam_miri.phot'
+
+
+def test_setup_paramfile_respects_max_nimg(tmp_path: Path):
+    from st123.photometry.dolphot import setup_paramfile
+    from st123.photometry.dolphot_split import SPLIT_MANIFEST_NAME
+
+    ref = tmp_path / 'coadd.fits'
+    ref.write_text('')
+    files = []
+    for i in range(5):
+        p = tmp_path / f'a{i}_nrcb1_jhat.fits'
+        p.write_text('')
+        files.append(p)
+    plan = setup_paramfile(
+        tmp_path / 'phot',
+        ref,
+        files,
+        copy_files=True,
+        phot_out='phot.phot',
+        max_nimg=3,
+        return_plan=True,
+    )
+    assert plan.needs_merge
+    assert (tmp_path / 'phot' / SPLIT_MANIFEST_NAME).is_file()
+    assert all(part.nimg <= 3 for part in plan.parts)

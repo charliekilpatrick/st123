@@ -1,4 +1,4 @@
-"""Helpers for downloading JWST imaging from MAST."""
+"""Helpers for downloading HST and JWST imaging from MAST."""
 
 from __future__ import annotations
 
@@ -12,9 +12,12 @@ from astropy.units import Quantity
 
 from st123.mast.mast import (
     DEFAULT_DOWNLOAD_LAYOUT,
+    DEFAULT_HST_INSTRUMENTS,
+    download_hst_observations,
     download_jwst_observations,
     filter_jwst_observations_by_stage,
     normalize_filter_name,
+    query_hst,
     query_jwst,
     resolve_mast_token,
 )
@@ -168,6 +171,81 @@ def query_mast_jwst(
             token=token,
             layout=layout,
             mirimage_only=mirimage_only,
+            dry_run=dry_run,
+        )
+
+
+def query_mast_hst(
+    coord: SkyCoord,
+    outdir: str | Path,
+    radius: Quantity,
+    token: str | None = None,
+    instruments: Sequence[str] | None = None,
+    *,
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
+    dry_run: bool = False,
+    allowed_filters: Optional[Sequence[str]] = None,
+    use_galaxy_size: bool = False,
+) -> int:
+    """
+    Query MAST and download available HST imaging.
+
+    WFPC2 ``c1m`` DQ companions are always downloaded (required for drizzle /
+    ``wfpc2mask``).
+
+    Parameters
+    ----------
+    coord : SkyCoord
+        Target coordinates.
+    outdir : str or pathlib.Path
+        Output directory (typically ``--base-dir``).
+    radius : Quantity
+        Search radius.
+    token : str or None, optional
+        Optional MAST API token.
+    instruments : sequence of str or None, optional
+        Instrument substrings (default ACS, WFC3, WFPC2).
+    layout : str, optional
+        Per-observation directory layout.
+    dry_run : bool, optional
+        List matching products without downloading.
+    allowed_filters : sequence of str or None, optional
+        Optional filter whitelist. ``None`` keeps all imaging filters.
+    use_galaxy_size : bool, optional
+        Derive radius from PGC size when ``True`` and radius handling allows.
+
+    Returns
+    -------
+    int
+        Number of observation product sets downloaded (or listed).
+    """
+    outdir_s = str(outdir)
+    os.makedirs(outdir_s, exist_ok=True)
+    token = resolve_mast_token(token)
+    inst = list(instruments) if instruments is not None else list(DEFAULT_HST_INSTRUMENTS)
+    filters = None
+    if allowed_filters:
+        filters = [normalize_filter_name(f) for f in allowed_filters]
+
+    with capture_output():
+        obs_table = query_hst(
+            coord,
+            radius=radius,
+            filters=filters,
+            instruments=inst,
+            use_galaxy_size=use_galaxy_size,
+            token=token,
+        )
+    logger.info('Found %d HST imaging observation(s)', len(obs_table))
+    if len(obs_table) == 0:
+        return 0
+
+    with capture_output():
+        return download_hst_observations(
+            obs_table,
+            outdir=outdir_s,
+            token=token,
+            layout=layout,
             dry_run=dry_run,
         )
 

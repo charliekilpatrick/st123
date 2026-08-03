@@ -7,6 +7,7 @@ section) and MIRI prep steps from ``dolphotMIRI.pdf``.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -14,6 +15,13 @@ from pathlib import Path
 from typing import Optional, Sequence, Union
 
 from astropy.io import fits
+
+from st123.utils.helpers import is_full_frame_miri
+
+# Backward-compatible alias for callers that import from warmstart.
+is_mirimask_compatible = is_full_frame_miri
+
+logger = logging.getLogger(__name__)
 
 from st123.photometry.dolphot import (
     MIRI_WARMSTART_CROWD_MAX,
@@ -26,7 +34,11 @@ from st123.photometry.dolphot import (
     parse_param_image_list,
     phot_to_xyt,
     prepare_frames,
-    write_paramfile,
+)
+from st123.photometry.dolphot_split import (
+    DOLPHOT_MAX_NIMG,
+    DolphotRunPlan,
+    write_split_paramfiles,
 )
 from st123.utils.settings import miri_base_params
 
@@ -42,17 +54,21 @@ class WarmStartResult:
     outdir : pathlib.Path
         Staging directory containing staged frames, sky maps, and parameter file.
     param_file : pathlib.Path
-        Combined NIRCam+MIRI ``dolphot.param`` path.
+        Primary ``dolphot.param`` (or part-0 param when split).
     xyt_file : pathlib.Path
         Warm-start star list (``warmstart.xyt``).
     phot_out : str
-        DOLPHOT output catalog basename for the combined run.
+        Final DOLPHOT catalog basename (merged name when the run is split).
     nircam_images : list of str
         Basenames of staged NIRCam science frames.
     miri_images : list of str
         Basenames of staged MIRI ``*_jhat.fits`` frames.
     command : str
-        Shell command to launch DOLPHOT (not executed by setup).
+        Shell command for a single-part run (empty when split; see *commands*).
+    plan : DolphotRunPlan or None
+        Full run plan (includes split parts when ``Nimg`` exceeds the soft cap).
+    commands : list of str
+        One launch command per part (length 1 for unsplit runs).
     """
 
     outdir: Path
@@ -62,6 +78,8 @@ class WarmStartResult:
     nircam_images: list[str] = field(default_factory=list)
     miri_images: list[str] = field(default_factory=list)
     command: str = ''
+    plan: Optional[DolphotRunPlan] = None
+    commands: list[str] = field(default_factory=list)
 
 
 def discover_miri_jhat(
@@ -197,7 +215,21 @@ def _stage_miri_jhat(
 ) -> list[Path]:
     """Copy MIRI JHAT frames into *outdir* (writable copies for mirimask)."""
     staged: list[Path] = []
+    unusable = outdir / 'unusable'
     for src in miri_sources:
+        if not is_full_frame_miri(src):
+            unusable.mkdir(parents=True, exist_ok=True)
+            dst_bad = unusable / src.name
+            if not dst_bad.exists():
+                try:
+                    shutil.copy2(src, dst_bad)
+                except OSError:
+                    pass
+            logger.warning(
+                'Skipping non-full-frame MIRI JHAT (unsupported subarray/cutout): %s',
+                src,
+            )
+            continue
         dst = outdir / src.name
         if overwrite or not dst.exists():
             shutil.copy2(src, dst)
@@ -278,8 +310,11 @@ def setup_miri_warmstart(
     xyt_sharp2_max: Optional[float] = None,
     xyt_min_sep_arcsec: Optional[float] = None,
     xyt_force_xy: Optional[Sequence[tuple[float, float]]] = None,
+    xyt_max_radius_arcsec: Optional[float] = None,
+    xyt_center_xy: Optional[tuple[float, float]] = None,
     prune_xyt_for_miri: bool = False,
     ncores: int = 1,
+    max_nimg: int = DOLPHOT_MAX_NIMG,
 ) -> WarmStartResult:
     """
     Create a warm-start DOLPHOT directory with NIRCam + overlapping MIRI frames.
@@ -335,16 +370,25 @@ def setup_miri_warmstart(
         Minimum seed separation on the NIRCam reference (arcsec).
     xyt_force_xy : sequence of (x, y) or None, optional
         Reference-pixel coordinates that must be retained (e.g. the SN).
+    xyt_max_radius_arcsec : float or None, optional
+        Keep only seeds within this radius of *xyt_center_xy* (or the first
+        ``xyt_force_xy`` point). Use ~5″ for single-target NGC3310 runs.
+    xyt_center_xy : (x, y) or None, optional
+        Center for the radius cut when not using ``xyt_force_xy``.
     prune_xyt_for_miri : bool, optional
         If True, apply the recommended MIRI seed cuts (type=1, SNR≥10,
         crowd≤0.5, sharp²≤0.01, minsep=0.30″) unless overridden above.
     ncores : int, optional
         ``MaxThreads`` for the generated DOLPHOT launch command.
+    max_nimg : int, optional
+        Soft science-image cap per DOLPHOT invocation (default 400). Larger
+        lists are split into roughly equal parts that share the same reference
+        and ``warmstart.xyt``; catalogs are merged after all parts finish.
 
     Returns
     -------
     WarmStartResult
-        Staged paths, frame lists, and shell command for the combined run.
+        Staged paths, frame lists, and shell command(s) for the combined run.
 
     Raises
     ------
@@ -401,6 +445,10 @@ def setup_miri_warmstart(
         out,
         overwrite=bool(prepare_miri and need_prep_names),
     )
+    if not miri_staged:
+        raise FileNotFoundError(
+            f'No mirimask-compatible full-frame MIRI JHAT frames for {out}'
+        )
 
     if prepare_miri:
         need_prep = [p for p in miri_staged if p.name in need_prep_names]
@@ -420,7 +468,13 @@ def setup_miri_warmstart(
             xyt_min_sep_arcsec = MIRI_WARMSTART_MIN_SEP_ARCSEC
 
     min_sep_pix = None
-    if xyt_min_sep_arcsec is not None and xyt_min_sep_arcsec > 0:
+    max_radius_pix = None
+    pixscale = None
+    need_pixscale = (
+        (xyt_min_sep_arcsec is not None and xyt_min_sep_arcsec > 0)
+        or (xyt_max_radius_arcsec is not None and xyt_max_radius_arcsec > 0)
+    )
+    if need_pixscale:
         from astropy.wcs import WCS
         import astropy.units as u
 
@@ -429,7 +483,10 @@ def setup_miri_warmstart(
             pixscale = float(
                 abs(WCS(sci.header).proj_plane_pixel_scales()[0].to(u.arcsec).value)
             )
-        min_sep_pix = float(xyt_min_sep_arcsec) / pixscale
+        if xyt_min_sep_arcsec is not None and xyt_min_sep_arcsec > 0:
+            min_sep_pix = float(xyt_min_sep_arcsec) / pixscale
+        if xyt_max_radius_arcsec is not None and xyt_max_radius_arcsec > 0:
+            max_radius_pix = float(xyt_max_radius_arcsec) / pixscale
 
     xyt_path = out / 'warmstart.xyt'
     phot_to_xyt(
@@ -441,33 +498,51 @@ def setup_miri_warmstart(
         sharp2_max=xyt_sharp2_max,
         min_sep_pix=min_sep_pix,
         force_xy=xyt_force_xy,
+        center_xy=xyt_center_xy,
+        max_radius_pix=max_radius_pix,
     )
 
     all_images = list(nircam_staged) + list(miri_staged)
     kinds = [classify_image_kind(p) for p in all_images]
-    param_path = write_paramfile(
-        out / 'dolphot.param',
-        refimage=ref_dst,
-        images=all_images,
-        global_params=miri_base_params,
-        xytfile=xyt_path,
-        image_kinds=kinds,
-    )
 
     if phot_out is None:
         stem = phot_src.name.replace('.phot', '')
         phot_out = f'{stem}_nircam_miri.phot'
 
-    cmd = dolphot_command(
+    plan = write_split_paramfiles(
         out,
+        refimage=ref_dst,
+        images=all_images,
         phot_out=phot_out,
-        param_file=param_path.name,
-        dolphot_bin=dolphot_bin,
-        ncores=ncores,
+        global_params=miri_base_params,
+        xytfile=xyt_path,
+        image_kinds=kinds,
+        max_nimg=max_nimg,
+        read_filters=True,
     )
+    param_path = plan.param_file
 
-    # Record a small README with the launch command.
+    commands = [
+        dolphot_command(
+            out,
+            phot_out=part.phot_out,
+            param_file=part.param_file,
+            dolphot_bin=dolphot_bin,
+            ncores=ncores,
+        )
+        for part in plan.parts
+    ]
+    cmd = commands[0] if len(commands) == 1 else ''
+
+    # Record a small README with the launch command(s).
     n_xyt = sum(1 for _ in xyt_path.open())
+    launch_lines = '\n'.join(f'  {c}' for c in commands)
+    if plan.needs_merge:
+        launch_lines += (
+            '\n\nAfter all parts finish, merge with:\n'
+            '  python -c "from st123.photometry.dolphot_split import '
+            f'finalize_split_outdir; finalize_split_outdir(r\'{out}\')"\n'
+        )
     readme = out / 'WARMSTART_README.txt'
     readme.write_text(
         'DOLPHOT NIRCam+MIRI warm-start run\n'
@@ -480,13 +555,19 @@ def setup_miri_warmstart(
         f'xyt crowd_max: {xyt_crowd_max}\n'
         f'xyt sharp2_max: {xyt_sharp2_max}\n'
         f'xyt min_sep_arcsec: {xyt_min_sep_arcsec}\n'
+        f'xyt max_radius_arcsec: {xyt_max_radius_arcsec}\n'
+        f'xyt center_xy: {list(xyt_center_xy) if xyt_center_xy else None}\n'
         f'xyt force_xy: {list(xyt_force_xy) if xyt_force_xy else None}\n'
         f'NIRCam frames: {len(nircam_staged)}\n'
         f'MIRI frames: {len(miri_staged)}\n'
+        f'Total science frames: {len(all_images)}\n'
+        f'max_nimg (soft): {max_nimg}\n'
+        f'split_parts: {len(plan.parts)}\n'
         f'Parameter file: {param_path.name}\n'
+        f'Final phot_out: {phot_out}\n'
         '\n'
         'Launch (not run by setup):\n'
-        f'  {cmd}\n'
+        f'{launch_lines}\n'
     )
 
     return WarmStartResult(
@@ -497,4 +578,6 @@ def setup_miri_warmstart(
         nircam_images=[p.name for p in nircam_staged],
         miri_images=[p.name for p in miri_staged],
         command=cmd,
+        plan=plan,
+        commands=commands,
     )

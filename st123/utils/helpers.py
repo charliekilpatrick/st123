@@ -82,6 +82,27 @@ def parse_coord(ra: str | float, dec: str | float) -> SkyCoord | None:
         return None
 
 
+def _looks_like_filter_name(value: object) -> bool:
+    """Return True for bandpass-like strings (reject numeric wheel positions)."""
+    text = str(value).strip()
+    if not text or text.lower() in {'none', 'n/a', 'clear', 'clear1', 'clear2'}:
+        return False
+    try:
+        float(text)
+        return False
+    except ValueError:
+        return True
+
+
+def _filter_from_photmode(photmode: object) -> str | None:
+    """Extract ``F###…`` from ACS/WFC3/WFPC2 ``PHOTMODE`` strings."""
+    import re
+
+    text = str(photmode or '')
+    match = re.search(r'\b(F\d{3,}[A-Z0-9]*)\b', text, flags=re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
 def get_filter(image: str | Path) -> str:
     """
     Read the filter name from a FITS header.
@@ -94,15 +115,44 @@ def get_filter(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase filter name (``FILTER``, or ``FILTER1``/``FILTER2``).
+        Lowercase filter name (``FILTNAM1``, ``FILTER``, or ``FILTER1``/``FILTER2``;
+        ``PHOTMODE`` as a last resort for stripped JHAT products).
     """
+    # WFPC2 uses FILTNAM1; FILTER1 is often a numeric wheel position.
     try:
-        f = str(fits.getval(image, 'FILTER'))
+        f = fits.getval(image, 'FILTNAM1')
+        if _looks_like_filter_name(f):
+            return str(f).strip().lower()
     except Exception:
+        pass
+
+    try:
+        f = fits.getval(image, 'FILTER')
+        if _looks_like_filter_name(f):
+            return str(f).strip().lower()
+    except Exception:
+        pass
+
+    try:
         f = str(fits.getval(image, 'FILTER1'))
         if 'clear' in f.lower():
             f = str(fits.getval(image, 'FILTER2'))
-    return f.lower()
+        if _looks_like_filter_name(f):
+            return f.strip().lower()
+    except Exception:
+        pass
+
+    # JHAT can strip FILTER/INSTRUME; SCI PHOTMODE still encodes the band.
+    try:
+        with fits.open(image, memmap=True) as hdul:
+            for hdu in hdul:
+                filt = _filter_from_photmode(hdu.header.get('PHOTMODE'))
+                if filt:
+                    return filt
+    except Exception:
+        pass
+
+    raise KeyError(f'No filter keyword found in {image}')
 
 
 def get_module(image: str | Path) -> str:
@@ -163,7 +213,7 @@ def get_module(image: str | Path) -> str:
 
 def get_instrument(image: str | Path) -> str:
     """
-    Read the instrument name from a FITS primary header.
+    Read the instrument name from a FITS header.
 
     Parameters
     ----------
@@ -173,8 +223,27 @@ def get_instrument(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase ``INSTRUME`` value.
+        Lowercase ``INSTRUME`` value (or ``PHOTMODE`` / ``APERTURE`` fallback).
     """
+    try:
+        with fits.open(image, memmap=True) as hdul:
+            for hdu in hdul:
+                inst = hdu.header.get('INSTRUME')
+                if inst is not None and str(inst).strip():
+                    return str(inst).strip().lower()
+            for hdu in hdul:
+                photmode = str(hdu.header.get('PHOTMODE') or '').strip()
+                if photmode:
+                    token = photmode.replace(',', ' ').split()[0]
+                    if token:
+                        return token.lower()
+            aperture = str(hdul[0].header.get('APERTURE') or '').strip().upper()
+            if aperture.startswith('UVIS') or aperture.startswith('IR'):
+                return 'wfc3'
+            if aperture.startswith('WFC') or aperture.startswith('HRC'):
+                return 'acs'
+    except Exception:
+        pass
     return str(fits.getval(image, 'INSTRUME')).lower()
 
 
@@ -227,6 +296,75 @@ def get_detector_chip(filename: str) -> str | None:
         if 'mirimage' in token.lower():
             return token
     return None
+
+
+# Full-frame MIRI imager SCI size (ny, nx). Subarrays / cutouts are unsupported
+# by ``mirimask`` and by the alignment→DOLPHOT path.
+MIRI_FULL_FRAME_SCI_SHAPE = (1024, 1032)
+
+
+def is_full_frame_miri(path: str | Path) -> bool:
+    """
+    Return whether a FITS file is a full-frame MIRI imager product.
+
+    Accepts SCI arrays of shape ``(1024, 1032)`` or ``(1, 1024, 1032)``.
+    Explicit non-``FULL`` ``SUBARRAY`` header values are rejected even when
+    dimensions are ambiguous. Non-MIRI files return ``False``.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a CAL / JHAT / rate FITS file.
+
+    Returns
+    -------
+    bool
+        ``True`` when the file is usable as a full-frame MIRI imager frame.
+    """
+    try:
+        with fits.open(path, memmap=True) as hdul:
+            subarray = None
+            instrument = None
+            detector = None
+            for hdu in hdul:
+                hdr = hdu.header
+                if instrument is None and 'INSTRUME' in hdr:
+                    instrument = str(hdr['INSTRUME']).strip().upper()
+                if detector is None and 'DETECTOR' in hdr:
+                    detector = str(hdr['DETECTOR']).strip().upper()
+                if subarray is None and 'SUBARRAY' in hdr:
+                    subarray = str(hdr['SUBARRAY']).strip().upper()
+
+            name = os.path.basename(str(path)).lower()
+            is_miri = (
+                (instrument == 'MIRI')
+                or (detector is not None and 'MIR' in detector)
+                or ('mirimage' in name)
+            )
+            if not is_miri:
+                return False
+
+            if subarray is not None and subarray not in ('FULL', 'N/A', 'NONE', ''):
+                return False
+
+            sci = hdul['SCI'] if 'SCI' in hdul else hdul[0]
+            data = sci.data
+            if data is not None:
+                shape = tuple(int(x) for x in data.shape)
+            else:
+                naxis1 = int(sci.header.get('NAXIS1') or 0)
+                naxis2 = int(sci.header.get('NAXIS2') or 0)
+                shape = (naxis2, naxis1) if naxis1 and naxis2 else ()
+            if len(shape) == 3 and shape[0] == 1:
+                shape = shape[1:]
+            return shape == MIRI_FULL_FRAME_SCI_SHAPE
+    except Exception:
+        return False
+
+
+def is_mirimask_compatible(path: str | Path) -> bool:
+    """Alias for :func:`is_full_frame_miri` (DOLPHOT ``mirimask`` requirement)."""
+    return is_full_frame_miri(path)
 
 
 def get_zpt(

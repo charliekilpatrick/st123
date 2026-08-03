@@ -89,7 +89,11 @@ with suppress_output():
     from jwst.pipeline import calwebb_image3  # noqa: E402
 
 from st123.mosaic.region import SRegionPolygon  # noqa: E402
-from st123.utils.helpers import input_list, xmatch_common  # noqa: E402
+from st123.utils.helpers import (  # noqa: E402
+    input_list,
+    is_full_frame_miri,
+    xmatch_common,
+)
 from st123.utils.compatibility import patch_jwst_for_photutils3  # noqa: E402
 from st123.utils.settings import (  # noqa: E402
     DEFAULT_MAX_REFERENCE_DISPERSION_MAS,
@@ -4130,6 +4134,9 @@ def discover_miri_images(data_dir: Path) -> list[str]:
     ``<data-dir>/JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits``;
     older ``<FILTER>/<obsid>/…`` and ``<FILTER>_<obsid>/…`` trees also match.
 
+    Non-full-frame MIRI products (subarrays / cutouts) are skipped — they are
+    unsupported by ``mirimask`` and the alignment→DOLPHOT path.
+
     Parameters
     ----------
     data_dir : pathlib.Path
@@ -4142,8 +4149,21 @@ def discover_miri_images(data_dir: Path) -> list[str]:
     """
     data_dir = Path(data_dir)
     found: set[str] = set()
+    n_skipped = 0
     for path in data_dir.glob('**/mastDownload/JWST/*_mirimage/*_cal.fits'):
+        if not is_full_frame_miri(path):
+            n_skipped += 1
+            logger.info(
+                'Skipping non-full-frame MIRI cal (unsupported): %s',
+                path,
+            )
+            continue
         found.add(str(path.resolve()))
+    if n_skipped:
+        logger.info(
+            'Skipped %d non-full-frame MIRI cal frame(s) during discovery',
+            n_skipped,
+        )
     return sorted(found)
 
 
@@ -4766,6 +4786,48 @@ def frame_has_nircam_overlap(
     if not ref_images or best_ref is None:
         return False
     return _frame_ref_overlap_frac(frame) >= float(min_ref_overlap_frac)
+
+
+def reject_non_full_frame_miri_frames(
+    frames: list[FrameOverlaps] | list[dict],
+) -> tuple[list[FrameOverlaps] | list[dict], int]:
+    """
+    Drop MIRI frames that are not full-frame imager products.
+
+    Subarrays and cutouts are unsupported downstream (``mirimask`` / DOLPHOT).
+    Rejected frames are omitted from ``alignment_summary.txt``.
+
+    Parameters
+    ----------
+    frames : list
+        Overlap records.
+
+    Returns
+    -------
+    tuple
+        ``(kept_frames, n_rejected)``.
+    """
+    kept: list[FrameOverlaps | dict] = []
+    n_rejected = 0
+    for frame in frames:
+        miri_path, _ref_images, _best_ref = _frame_ref_images(frame)
+        if is_full_frame_miri(miri_path):
+            kept.append(frame)
+            continue
+        n_rejected += 1
+        filt = filter_name_from_miri_path(miri_path) or read_miri_filter(miri_path)
+        logger.info(
+            'REJECT %s  %s  non-full-frame MIRI (excluded from alignment)',
+            Path(miri_path).name,
+            filt,
+        )
+    if n_rejected:
+        logger.info(
+            'Rejected %d non-full-frame MIRI frame(s); %d remain for alignment',
+            n_rejected,
+            len(kept),
+        )
+    return kept, n_rejected
 
 
 def reject_zero_nircam_overlap_frames(
@@ -6033,11 +6095,13 @@ def align_from_frames(
     if max_nircam_dispersion_mas is not None and max_nircam_dispersion_mas <= 0:
         max_nircam_dispersion_mas = 0.0  # sentinel: disabled for all filters
 
-    # Drop low-overlap frames before any alignment work. These remain in
-    # overlap_summary* only and are omitted from alignment_summary.txt.
+    # Drop unsupported / low-overlap frames before any alignment work. These
+    # remain in overlap_summary* only and are omitted from alignment_summary.txt.
+    frames, n_bad = reject_non_full_frame_miri_frames(frames)
     frames, n_rejected = reject_zero_nircam_overlap_frames(
         frames, min_ref_overlap_frac=min_ref_overlap_frac
     )
+    del n_bad  # logged inside reject_non_full_frame_miri_frames
     groups = _group_frames_by_filter(frames)
 
     failures = 0

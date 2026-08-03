@@ -172,6 +172,7 @@ acceptable_filters: tuple[str, ...] = tuple(
 # Preferred bands for a DOLPHOT / drizzle reference, in roughly decreasing
 # preference. Stored lowercase to match :func:`~st123.utils.helpers.get_filter`.
 BEST_REFERENCE_FILTERS: tuple[str, ...] = (
+    'f625w',
     'f606w',
     'f555w',
     'f814w',
@@ -202,8 +203,10 @@ HST_PRODUCT_RULES: tuple[tuple[str, str], ...] = (
     ('flt.fits', 'WFC3/IR'),
 )
 
-DEFAULT_HST_FILTERS: tuple[str, ...] = ('F275W', 'F555W', 'F814W')
-DEFAULT_HST_INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC', 'WFPC2')
+# Default HST imaging filters for MAST queries. ``None`` at call sites means
+# no filter restriction (recommended for SN fields with mixed legacy bands).
+DEFAULT_HST_FILTERS: tuple[str, ...] | None = None
+DEFAULT_HST_INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC3', 'WFPC2')
 DEFAULT_JWST_INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI')
 
 # Relative subdirectory pattern under the download root.
@@ -412,3 +415,164 @@ miri_calcsky_params = {
     'sigma_low': 2.25,
     'sigma_high': 2.00,
 }
+
+# -----------------------------------------------------------------------------
+# HST DOLPHOT (ACS / WFC3 / WFPC2) — ported from hst123 detector_defaults
+# -----------------------------------------------------------------------------
+
+# Global DOLPHOT knobs for HST runs. UseWCS=1 trusts the image WCS for
+# frame→reference registration (JHAT / TweakReg already aligned the stack).
+hst_base_params = {
+    **base_params,
+    'UseWCS': '1',
+    'Align': '2',
+    'ACSuseCTE': '0',
+    'WFC3useCTE': '0',
+    'WFPC2useCTE': '1',
+    'FlagMask': '7',
+    'RCentroid': '2',
+    'Force1': '1',
+}
+
+# Per-image geometry (img_*_raper / img_*_rpsf, …). Keys match write_paramfile.
+acs_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '2',
+    'rchi': '1.5',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '3 6',
+    'rpsf': '10',
+    'apsky': '15 25',
+}
+
+wfc3_uvis_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '3',
+    'rchi': '2.0',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '4 10',
+    'rpsf': '13',
+    'apsky': '15 25',
+}
+
+wfc3_ir_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '2',
+    'rchi': '1.5',
+    'rsky0': '8',
+    'rsky1': '20',
+    'rsky2': '3 10',
+    'rpsf': '15',
+    'apsky': '8 20',
+}
+
+# Default WFC3 per-image params (UVIS); IR frames override via classify_image_kind.
+wfc3_params = dict(wfc3_uvis_params)
+
+wfpc2_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '3',
+    'rchi': '2.0',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '4 10',
+    'rpsf': '13',
+    'apsky': '15 25',
+}
+
+# calcsky annulus defaults (hst123 detector_defaults dolphot_sky).
+acs_calcsky_params = {
+    'rin': 15,
+    'rout': 35,
+    'step': 4,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+wfc3_calcsky_params = {
+    'rin': 15,
+    'rout': 35,
+    'step': 4,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+wfpc2_calcsky_params = {
+    'rin': 10,
+    'rout': 25,
+    'step': 2,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+# AstroDrizzle defaults (subset of hst123.drizzle_defaults).
+hst_drizzle_defaults = {
+    'final_pixfrac': 0.8,
+    'driz_sep_pixfrac': 0.8,
+    'combine_maskpt': 0.2,
+    'combine_nsigma': '4 3',
+    'driz_cr_snr': '3.5 3.0',
+    'driz_cr_grow': 1,
+    'driz_cr_scale': '1.2 0.7',
+    'num_cores': 4,
+}
+
+# DQ bits treated as good by AstroDrizzle (driz_sep_bits / final_bits).
+# Matches hst123.detector_defaults.
+hst_driz_bits = {
+    'acs': 96,
+    'wfc3': 96,  # UVIS
+    'wfc3_uvis': 96,
+    'wfc3_ir': 576,
+    'wfpc2': 1032,
+}
+
+# LAcosmic / astroscrappy defaults (hst123.instrument_defaults crpars).
+hst_crpars = {
+    'wfc3': {
+        'rdnoise': 6.5,
+        'gain': 1.0,
+        'saturate': 70000.0,
+        'sig_clip': 4.0,
+        'sig_frac': 0.2,
+        'obj_lim': 6.0,
+    },
+    'acs': {
+        'rdnoise': 6.5,
+        'gain': 1.0,
+        'saturate': 70000.0,
+        'sig_clip': 3.0,
+        'sig_frac': 0.1,
+        'obj_lim': 5.0,
+    },
+    'wfpc2': {
+        'rdnoise': 10.0,
+        'gain': 7.0,
+        'saturate': 27000.0,
+        'sig_clip': 4.0,
+        'sig_frac': 0.3,
+        'obj_lim': 6.0,
+    },
+}
+
+# Bit value written into DQ / WFPC2 c1m for astroscrappy CR pixels.
+HST_CR_DQ_BIT = 4096
+
+# WFPC2 calibrated c0m chips retain a bad left-edge / overscan strip. Mask this
+# many pixels on each side in c1m before AstroDrizzle (bit must NOT be in
+# hst_driz_bits['wfpc2'] = 1032). Left edge is worse (A/D overscan bleed).
+WFPC2_OVERSCAN_EDGE_PIX = 24
+WFPC2_OVERSCAN_LEFT_EXTRA = 16  # total left mask width = EDGE + LEFT_EXTRA
+WFPC2_OVERSCAN_DQ_BIT = 256
+# Blank extreme negative SCI before drizzle (overscan bleed / fill values).
+WFPC2_SCI_FLOOR = -20.0
+# Grow negative / edge mask by this many pixels (binary dilation).
+WFPC2_BAD_GROW_PIX = 3
+# Kill entire columns in the left half when this fraction of pixels are < floor.
+WFPC2_BAD_COL_FRAC = 0.50

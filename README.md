@@ -173,6 +173,54 @@ separate `dolphot-prep` step.
 Interactive notebooks: `st123/notebooks/download.ipynb`, `align.ipynb`,
 `mosaic.ipynb`.
 
+### HST one-target end-to-end (mixed DOLPHOT)
+
+One project directory per target. After mosaic, `--instrument hst` stages
+**all** ACS/WFC3/WFPC2 JHAT frames against the best coadd reference
+(prefer WFC3, then ACS, then WFPC2; then `BEST_REFERENCE_FILTERS`).
+
+```bash
+export PROJ=/path/to/YourTarget
+export RA=177.66
+export DEC=55.36
+export NCORES=8
+# optional: export MAST_API_TOKEN=...
+
+download \
+  --telescope hst \
+  --ra "$RA" --dec "$DEC" \
+  --radius 3 \
+  --base-dir "$PROJ" \
+  --instruments ACS WFC3 WFPC2
+
+link-raw \
+  --base-dir "$PROJ" \
+  --telescope HST \
+  --instrument ALL
+
+align \
+  --telescope hst \
+  --base-dir "$PROJ" \
+  --ncores "$NCORES"
+
+mosaic \
+  --telescope hst \
+  --base-dir "$PROJ" \
+  --ncores "$NCORES"
+
+dolphot-prep \
+  --instrument hst \
+  --base-dir "$PROJ" \
+  --ncores "$NCORES"
+
+# Run the command printed by dolphot-prep, or:
+cd "$PROJ/dolphot/hst_0_0" && \
+  dolphot hst_0_0.phot -pdolphot.param MaxThreads="$NCORES"
+```
+
+Layout: `$PROJ/HST/…`, `$PROJ/reduction/{raw,jhat,reference}/`,
+`$PROJ/dolphot/hst_0_0/`.
+
 ---
 
 
