@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 
-from st123.mosaic.image_overlap import find_best_refs
 from st123.scripts.utils.options import (
     add_common_runtime,
     add_image_arg,
@@ -42,7 +41,7 @@ def create_parser():
         default=None,
         help='Optional text file for summary lines (default: log only).',
     )
-    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
+    add_common_runtime(parser, plot=False, verbose=True)
     return parser
 
 
@@ -50,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'image-overlap')
     try:
+        from st123.mosaic.image_overlap import find_best_refs
+
         science_images = list(args.image)
         refs = list(args.ref)
 

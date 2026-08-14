@@ -166,8 +166,39 @@ def _clear_handlers(logger: logging.Logger) -> None:
         logger.removeHandler(handler)
 
 
+def _reset_premature_astropy_logger() -> None:
+    """
+    Drop a plain ``logging.Logger('astropy')`` created before Astropy loads.
+
+    Astropy's ``_init_log`` requires ``AstropyLogger`` (with ``_set_defaults``).
+    Calling ``logging.getLogger('astropy')`` earlier freezes a standard Logger
+    in the manager cache and breaks the next ``import astropy``.
+    """
+    mgr = logging.Logger.manager
+    existing = mgr.loggerDict.get('astropy')
+    if existing is None or isinstance(existing, logging.PlaceHolder):
+        return
+    if hasattr(existing, '_set_defaults'):
+        return
+    try:
+        for handler in list(getattr(existing, 'handlers', [])):
+            try:
+                existing.removeHandler(handler)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    mgr.loggerDict.pop('astropy', None)
+
+
 def _quiet_third_party_loggers() -> None:
+    """Raise third-party logger levels; never pre-create Astropy's logger."""
+    _reset_premature_astropy_logger()
+    mgr = logging.Logger.manager
     for name in _QUIET_THIRD_PARTY:
+        # Do not instantiate ``astropy`` before AstropyLogger is registered.
+        if name == 'astropy' and 'astropy' not in mgr.loggerDict:
+            continue
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -410,8 +441,9 @@ def setup_script_logging(
     Path
         Absolute path to the new log file.
     """
-    log_dir = _logs_directory(base_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from st123.scripts.utils.options import ensure_writable_dir
+
+    log_dir = ensure_writable_dir(_logs_directory(base_dir), label='logs')
     log_path = _make_log_path(log_dir, script_name).resolve()
 
     package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)

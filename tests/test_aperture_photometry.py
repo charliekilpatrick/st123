@@ -166,14 +166,6 @@ def test_coadd_phot_cli_writes_ecsv(tmp_path: Path, monkeypatch):
         'get_aperture_params',
         lambda *a, **k: params,
     )
-    # CLI imports forced_aperture_photometry from the module; patch there too.
-    monkeypatch.setattr(
-        coadd_phot_script,
-        'forced_aperture_photometry',
-        lambda image, **kwargs: ap.forced_aperture_photometry(
-            image, aperture_params=params, **kwargs
-        ),
-    )
     rc = coadd_phot_script.main(
         ['--image', str(path), '--xy', '32,32', '--outfile', str(out), '-v']
     )

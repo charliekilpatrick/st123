@@ -229,13 +229,13 @@ def align_image_to_gaia_simple(
 
     Returns stats including ``dx_total``, ``dy_total``, ``n_match``.
     """
-    from st123.alignment.align import query_gaia
+    from st123.alignment.gaia_catalog import query_gaia
 
     src = Path(image).expanduser().resolve()
     dst = Path(output).expanduser().resolve()
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    gaia = query_gaia(str(src), telescope=telescope)
+    gaia = query_gaia(str(src), telescope=telescope, backend='vizier')
     if len(gaia) == 0:
         raise RuntimeError(f'gaia_simple: no Gaia sources for {src.name}')
 

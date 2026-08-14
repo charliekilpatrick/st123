@@ -12,12 +12,18 @@ from astropy.io import fits
 from astropy.table import Table
 
 from st123.mosaic.mosaic import (
+    FULL_GROUP_LABEL,
     create_coadd_mosaic,
     create_dirs,
     create_gwcs,
     edit_spec_groups,
     ensure_dataset_reference_link,
+    mosaic_box_dirname,
+    mosaic_coadd_basename,
+    mosaic_hst_coadd_basename,
     mp_init,
+    plan_mosaic_boxes,
+    split_observations,
     update_path,
     write_dolphot_frame_list,
 )
@@ -83,6 +89,72 @@ def test_mosaic_parser():
     )
     assert args.nmax == 10
     assert args.base_dir == '/b'
+    assert args.full_group is False
+    # Default --nmax when omitted (orchestrated multi-instrument runs use this).
+    defaulted = parser.parse_args(
+        ['--base-dir', '/b', '--instruments', 'NIRCAM', 'MIRI', 'ACS', 'WFC3']
+    )
+    assert defaulted.nmax == 150
+
+
+def test_mosaic_parser_full_group():
+    parser = mosaic_script.create_parser()
+    args = parser.parse_args(['--basedir', '/b', '--full-group', '--filters', 'F770W'])
+    assert args.full_group is True
+    assert args.filters == 'F770W'
+
+
+def test_full_group_naming_helpers():
+    assert FULL_GROUP_LABEL == 'full'
+    assert mosaic_box_dirname(FULL_GROUP_LABEL) == 'ref_full'
+    assert mosaic_box_dirname(0) == 'ref_0'
+    assert mosaic_coadd_basename(1, FULL_GROUP_LABEL, 'F770W') == (
+        'coadd_1_full_f770w_i2d.fits'
+    )
+    assert mosaic_hst_coadd_basename(0, 5, 'ACS', 'F660N') == (
+        'coadd_0_5_acs_f660n_drc.fits'
+    )
+    assert mosaic_hst_coadd_basename(
+        0, 5, 'WFC3', 'F814W', visit='iejn62'
+    ) == 'coadd_0_5_wfc3_f814w_iejn62_drc.fits'
+    assert mosaic_hst_coadd_basename(
+        1, 'full', 'WFPC2', 'F814W', suffix='drz'
+    ) == 'coadd_1_full_wfpc2_f814w_drz.fits'
+
+
+def test_split_observations_as_full_group():
+    table = Table(
+        {
+            'image': ['/a.fits', '/b.fits', '/c.fits'],
+            'filter': ['f770w', 'f770w', 'f560w'],
+        }
+    )
+    # Bypass S_REGION / WCS construction with synthetic polygons.
+    import shapely
+
+    pgons = np.array(
+        [
+            shapely.box(0, 0, 10, 10),
+            shapely.box(5, 5, 15, 15),
+            shapely.box(20, 0, 30, 10),
+        ]
+    )
+    from astropy.wcs import WCS
+
+    w = WCS(naxis=2)
+    w.wcs.crpix = [1, 1]
+    w.wcs.cdelt = [1, 1]
+    w.wcs.crval = [0, 0]
+    w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    w._naxis = [40, 40]
+    split = split_observations(
+        table=table, N_max=1, polygons=pgons, wcs_opt=w
+    )
+    split.as_full_group()
+    assert len(split.split_boxes) == 1
+    assert len(split.reftables) == 1
+    assert len(split.reftables[0]) == 3
+    assert list(split.subimages[0]) == ['/a.fits', '/b.fits', '/c.fits']
 
 
 def _sample_wcs_header() -> fits.Header:
@@ -186,6 +258,53 @@ def test_write_dolphot_frame_list(tmp_path: Path):
     assert str(frames[0].resolve()) in text
 
 
+def test_write_dolphot_frame_list_full_group(tmp_path: Path):
+    ref = tmp_path / 'coadd_0_full_f770w_i2d.fits'
+    ref.write_text('x')
+    frame = tmp_path / 'a_jhat.fits'
+    frame.write_text('y')
+    out = write_dolphot_frame_list(
+        str(tmp_path),
+        refimage=str(ref),
+        frames=[str(frame)],
+        group=0,
+        box=FULL_GROUP_LABEL,
+    )
+    text = Path(out).read_text()
+    assert 'box=full' in text
+
+
 def test_apply_gwcs_removed_from_scripts_package():
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module('st123.scripts.apply_gwcs')
+
+
+def test_plan_mosaic_boxes_smoke_with_synthetic_table(tmp_path: Path):
+    """Shared planner creates group_*/ref_* dirs from a prebuilt table."""
+    from st123.mosaic.mosaic import MosaicPlan
+
+    reduction = tmp_path
+    ref = reduction / 'reference' / 'group_0' / 'ref_0'
+    # Bypass input_list/WCS by stubbing plan internals via a tiny wrapper plan.
+    # Construction of MosaicPlan + MosaicBox is the contract consumers use.
+    from st123.mosaic.mosaic import MosaicBox
+
+    box = MosaicBox(
+        group_id=0,
+        box_id=0,
+        outdir=ref,
+        bbox=None,
+        frames=['/fake/acs_jhat.fits', '/fake/nircam_jhat.fits'],
+    )
+    ref.mkdir(parents=True)
+    plan = MosaicPlan(
+        base_dir=reduction,
+        reference_dir=reduction / 'reference',
+        table=Table(),
+        boxes=[box],
+    )
+    assert plan.boxes[0].outdir == ref
+    hst_name = mosaic_hst_coadd_basename(0, 0, 'wfc3', 'f625w')
+    assert (ref / hst_name).as_posix().endswith(
+        'group_0/ref_0/coadd_0_0_wfc3_f625w_drc.fits'
+    )

@@ -121,12 +121,16 @@ def test_forced_filter_tables_skips_missing(caplog):
     assert 'f560w' in caplog.text.lower() or 'F560W' in caplog.text or 'f560w' in caplog.text
 
 
-def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
-    """With --filters, mosaic uses forced-filter coadds (not SW PSF-match)."""
+def _jwst_plan_fixture(tmp_path: Path):
+    """Minimal project + plan for JWST mosaic dispatch tests."""
+    from st123.mosaic.mosaic import MosaicBox, MosaicPlan
+
     project = tmp_path / 'NGC3310'
     reduction = project / 'reduction'
     jhat = reduction / 'jhat'
+    box_outdir = reduction / 'reference' / 'group_0' / 'ref_0'
     jhat.mkdir(parents=True)
+    box_outdir.mkdir(parents=True)
     (project / 'JWST').mkdir()
     fake = jhat / 'jw_test_nrcb1_jhat.fits'
     fake.write_text('x')
@@ -146,21 +150,57 @@ def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
             'group': [0],
         }
     )
+    plan = MosaicPlan(
+        base_dir=reduction,
+        reference_dir=reduction / 'reference',
+        table=table,
+        boxes=[
+            MosaicBox(
+                group_id=0,
+                box_id=0,
+                outdir=box_outdir,
+                bbox=MagicMock(),
+                frames=[str(fake)],
+                wcs=_tan_wcs(),
+            )
+        ],
+    )
+    plan.boxes[0].bbox.exterior.xy = (
+        np.array([0.0, 10.0, 10.0, 0.0]),
+        np.array([0.0, 0.0, 10.0, 10.0]),
+    )
+    return project, fake, table, plan
+
+
+def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
+    """With --filters, mosaic uses forced-filter coadds (not SW PSF-match)."""
+    from st123.mosaic.mosaic import MosaicBox
+
+    project, fake, table, plan = _jwst_plan_fixture(tmp_path)
 
     with (
-        patch('st123.scripts.mosaic.input_list', return_value=table),
-        patch('st123.scripts.mosaic.split_observations') as split_cls,
-        patch('st123.scripts.mosaic.create_dirs', return_value={0: str(tmp_path / 'ref')}),
-        patch('st123.scripts.mosaic._run_default_sw_coadd') as default_path,
-        patch('st123.scripts.mosaic._run_forced_filter_coadds') as forced_path,
+        patch(
+            'st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
+        ),
+        patch(
+            'st123.scripts.mosaic._collect_mission_jhat',
+            return_value=[str(fake)],
+        ),
+        patch(
+            'st123.utils.helpers.input_list', return_value=table
+        ),
+        patch(
+            'st123.scripts.mosaic._run_default_sw_coadd'
+        ) as default_path,
+        patch(
+            'st123.scripts.mosaic._run_forced_filter_coadds'
+        ) as forced_path,
+        patch.object(
+            MosaicBox,
+            'frames_for_mission',
+            return_value=[str(fake)],
+        ),
     ):
-        split = MagicMock()
-        split.wcs = _tan_wcs()
-        split.split_boxes = [MagicMock()]
-        split.split_boxes[0].exterior.xy = (np.array([0.0, 10.0, 10.0, 0.0]), np.array([0.0, 0.0, 10.0, 10.0]))
-        split.subimages = [[str(fake)]]
-        split.reftables = [table]
-        split_cls.return_value = split
         forced_path.return_value = ['coadd.fits']
 
         rc = mosaic_script.main(
@@ -172,6 +212,46 @@ def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
                 '--ncores',
                 '1',
             ]
+        )
+
+    assert rc == 0
+    forced_path.assert_called_once()
+    default_path.assert_not_called()
+
+
+def test_mosaic_main_default_uses_shared_stamp_per_filter_path(tmp_path: Path):
+    """Default mosaic (no --filters) uses shared-stamp per-filter coadds."""
+    from st123.mosaic.mosaic import MosaicBox
+
+    project, fake, table, plan = _jwst_plan_fixture(tmp_path)
+
+    with (
+        patch(
+            'st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
+        ),
+        patch(
+            'st123.scripts.mosaic._collect_mission_jhat',
+            return_value=[str(fake)],
+        ),
+        patch(
+            'st123.utils.helpers.input_list', return_value=table
+        ),
+        patch(
+            'st123.scripts.mosaic._run_default_sw_coadd'
+        ) as default_path,
+        patch(
+            'st123.scripts.mosaic._run_forced_filter_coadds'
+        ) as forced_path,
+        patch.object(
+            MosaicBox,
+            'frames_for_mission',
+            return_value=[str(fake)],
+        ),
+    ):
+        forced_path.return_value = ['coadd.fits']
+
+        rc = mosaic_script.main(
+            ['--base-dir', str(project), '--ncores', '1']
         )
 
     assert rc == 0

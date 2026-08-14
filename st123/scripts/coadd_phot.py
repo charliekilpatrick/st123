@@ -7,10 +7,6 @@ import logging
 import sys
 from pathlib import Path
 
-from st123.photometry.aperture import (
-    forced_aperture_photometry,
-    read_coords_table,
-)
 from st123.scripts.utils.options import (
     add_common_runtime,
     add_image_arg,
@@ -81,7 +77,7 @@ def create_parser():
             '<image_stem>_forced_phot.ecsv).'
         ),
     )
-    add_common_runtime(parser, ncores=False, plot=False, verbose=True)
+    add_common_runtime(parser, plot=False, verbose=True)
     return parser
 
 
@@ -96,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'coadd-phot')
     try:
+        from st123.photometry.aperture import (
+            forced_aperture_photometry,
+            read_coords_table,
+        )
+
         image = str(Path(args.image).expanduser().resolve())
         if not Path(image).is_file():
             raise FileNotFoundError(f'Image not found: {image}')

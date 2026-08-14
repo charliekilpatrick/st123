@@ -14,7 +14,10 @@ from st123.alignment.hst_reference import (
     Level3GaiaScore,
     _illuminated_mask,
     _local_detectable,
+    count_phot_sources,
+    ensure_l3_science_refcat,
     pick_best_level3,
+    write_detection_refcat,
 )
 from st123.utils.settings import HST_CR_DQ_BIT, hst_crpars, hst_driz_bits
 
@@ -165,3 +168,72 @@ def test_pick_best_level3_ranks_detectable(tmp_path: Path, monkeypatch):
     assert best is not None
     assert best.name.startswith('coadd_b')
     assert scores[0].n_detectable == 7
+
+
+def _toy_l3_with_stars(path: Path, *, n_stars: int = 40) -> Path:
+    rng = np.random.default_rng(0)
+    ny = nx = 128
+    data = rng.normal(10.0, 1.0, size=(ny, nx)).astype(np.float32)
+    for _ in range(n_stars):
+        x = int(rng.integers(8, nx - 8))
+        y = int(rng.integers(8, ny - 8))
+        yy, xx = np.mgrid[-3:4, -3:4]
+        data[y - 3 : y + 4, x - 3 : x + 4] += 80.0 * np.exp(
+            -(xx * xx + yy * yy) / 2.0
+        )
+    hdr = _wcs_header(nx, ny)
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFC3'
+    primary.header['FILTER'] = 'F625W'
+    sci = fits.ImageHDU(data, header=hdr, name='SCI')
+    wht = fits.ImageHDU(np.ones((ny, nx), dtype=np.float32), name='WHT')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fits.HDUList([primary, sci, wht]).writeto(path, overwrite=True)
+    return path
+
+
+def test_write_detection_refcat_dense(tmp_path: Path):
+    img = _toy_l3_with_stars(tmp_path / 'coadd_wfc3_f625w_drc.fits')
+    out = tmp_path / 'ref.phot.txt'
+    write_detection_refcat(img, out, nsigma=4.0, fwhm=2.0)
+    n = count_phot_sources(out)
+    assert n >= 20
+    header = out.read_text().splitlines()[0]
+    assert header.startswith('ra dec mag x y')
+
+
+def test_list_level3_and_find_hst_abs_ref_boxed(tmp_path: Path):
+    from st123.alignment.hst_jhat import find_hst_abs_ref_image
+    from st123.alignment.hst_reference import list_level3_products
+
+    ref = tmp_path / 'reference'
+    boxed = ref / 'group_0' / 'ref_5'
+    boxed.mkdir(parents=True)
+    boxed_coadd = _toy_l3_with_stars(
+        boxed / 'coadd_0_5_wfc3_f625w_drc.fits', n_stars=5
+    )
+    flat = _toy_l3_with_stars(ref / 'coadd_acs_f814w_drc.fits', n_stars=5)
+    # find_hst_abs_ref_image ignores tiny files (<500 KB).
+    for path in (boxed_coadd, flat):
+        with path.open('ab') as fh:
+            fh.write(b'\0' * 600_000)
+    found = list_level3_products(ref)
+    assert boxed_coadd.resolve() in found
+    assert flat.resolve() in found
+    jhat = tmp_path / 'jhat_hst'
+    jhat.mkdir()
+    assert find_hst_abs_ref_image(jhat) == boxed_coadd.resolve()
+
+
+def test_ensure_l3_science_refcat_rebuilds_sparse(tmp_path: Path):
+    img = _toy_l3_with_stars(tmp_path / 'coadd.fits', n_stars=50)
+    out = tmp_path / 'coadd.phot.txt'
+    # Stale Gaia-only leftover (too few rows for WFPC2 JHAT).
+    out.write_text(
+        'ra dec mag x y\n'
+        '177.0 55.0 18.0 10.0 10.0\n'
+        '177.1 55.1 19.0 20.0 20.0\n'
+    )
+    assert count_phot_sources(out) == 2
+    ensure_l3_science_refcat(img, out, min_sources=30)
+    assert count_phot_sources(out) >= 30

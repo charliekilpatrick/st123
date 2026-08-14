@@ -36,7 +36,6 @@ from jwst import source_catalog
 from jwst.source_catalog import reference_data
 import astropy.units as u
 import pysiaf
-from astroquery.gaia import Gaia
 from astroquery.mast import Catalogs
 from astropy.time import Time
 import pandas as pd
@@ -254,97 +253,33 @@ def get_GAIA_sources(ra0,dec0,radius_deg,radius_factor=1.1,
                      remove_null=True,
                      columns=['source_id','ref_epoch','ra','ra_error','dec','dec_error','pmra','pmra_error','pmdec','pmdec_error',
                               'g','g_err','bp','bp_err','rp','rp_err','bp_rp','bp_g','g_rp','bp_rp_err','bp_g_err','g_rp_err']):
-#                     columns=['source_id','ref_epoch','ra','ra_error','dec','dec_error','pmra','pmra_error','pmdec','pmdec_error',
-#                              'phot_g_mean_mag','phot_bp_mean_mag','phot_rp_mean_mag','bp_rp','bp_g','g_rp','phot_g_mean_flux','phot_g_mean_flux_error','phot_bp_mean_flux','phot_bp_mean_flux_error','phot_rp_mean_flux','phot_rp_mean_flux_error']):
-    if datarelease is None:
-        dr = 'gaiadr2'
-    elif datarelease.lower() in ['dr2','gaiadr2']:
-        dr = 'gaiadr2'
-    elif datarelease.lower() in ['edr3','gaiaedr3']:
-        dr = 'gaiaedr3'
-    elif datarelease.lower() in ['dr3','gaiadr3']:
-        dr = 'gaiadr3'
-    else:
-        raise RuntimeError(f'datarelease {datarelease} not known yet')
-    
-    query ="SELECT * FROM {}.gaia_source WHERE CONTAINS(POINT('ICRS',\
-            {}.gaia_source.ra,{}.gaia_source.dec),\
-            CIRCLE('ICRS',{},{} ,{}))=1;".format(dr,dr,dr,ra0,dec0,radius_deg)
-    
-    job5 = Gaia.launch_job_async(query)
-    tb_gaia = job5.get_results() 
-    print("Number of stars:",len(tb_gaia))
-    
-    if mjd is not None:
-        print(f'### Applying proper motion correction to epoch mjd={mjd}')
-        time_gaia = Time(tb_gaia['ref_epoch'], format = 'jyear')[0]
-        time_obs = Time(mjd, format ='mjd')
+    """
+    Gaia cone query for JHAT.
 
-        dRA = ((time_obs - time_gaia).to(u.yr).value * tb_gaia['pmra'].data * u.mas / np.cos(np.deg2rad(tb_gaia['dec']))).to(u.deg).value
-        dDec = ((time_obs - time_gaia).to(u.yr).value * tb_gaia['pmdec'].data * u.mas).to(u.deg).value
-
-        if pm_median:
-            ok = (np.isfinite(dRA)) & (np.isfinite(dDec)) 
-            dRA_median = np.median(dRA[ok])
-            dDec_median = np.median(dDec[ok])
-            print(f'adding median pm dRA={dRA_median} and dDec={dDec_median}')
-            tb_gaia['ra1'] = tb_gaia['ra'] + dRA_median
-            tb_gaia['dec1'] = tb_gaia['dec'] + dDec_median
-            tb_gaia['ref_epoch1'] = time_obs.decimalyear
-        else:
-            tb_gaia['ra1'] = tb_gaia['ra'] + dRA
-            tb_gaia['dec1'] = tb_gaia['dec'] + dDec
-            tb_gaia['ref_epoch1'] = time_obs.decimalyear
-        if not('ra1' in columns): columns.append('ra1')
-        if not('dec1' in columns): columns.append('dec1')
-        if not('ref_epoch1' in columns): columns.append('ref_epoch1')
-        #tb_gaia['dRA'] = dRA
-        #tb_gaia['dDec'] = dDec
-        #columns.extend(['dRA','dDec'])
-        racol='ra1'
-        deccol='dec1'
-    else:
-        print(f'### NO propoer motion correction!!!')
-        racol='ra'
-        deccol='dec'
-    
-    df = tb_gaia.to_pandas()
-    if ('SOURCE_ID' in df.columns) and ('source_id' not in df.columns):
-        df = df.rename(columns={'SOURCE_ID': 'source_id'})
-
-    #Table.from_pandas(df).write('Gaia_reference_catalog.txt',format='ascii')
-
-    # renames columns from f'phot_{filt}_mean_mag' to f'{filt}'
-    if rename_mag_colnames:
-        for filt in ['g','bp','rp']:
-            df.rename(columns={f'phot_{filt}_mean_mag':f'{filt}'},inplace=True)
-                              
-    if calc_mag_errors:
-        for filt in ['g','bp','rp']:
-            fluxcol = f'phot_{filt}_mean_flux'
-            dfluxcol = f'{fluxcol}_error'
-            df[f'{filt}_err'] =  2.5 / math.log(10.0) * df[dfluxcol] / df[fluxcol]
-
-        for (filt1,filt2) in [('bp','rp'),('bp','g'),('g','rp')]:
-            df[f'{filt1}_{filt2}'] = df[f'{filt1}'] - df[f'{filt2}']
-            df[f'{filt1}_{filt2}_err'] = np.sqrt(np.square(df[f'{filt1}']) - np.square(df[f'{filt2}']))
-
-    if remove_null:
-        ixs = df.index.values
-        for colname in [racol,deccol]:
-            #print('XXX',indices)
-            (notnull,) = np.where(pd.notnull(df.loc[ixs,colname]))
-            ixs = ixs[notnull]
-        df = df.loc[ixs]
-        print("Number of stars after removing nan's:",len(df[racol]))
-                 
-    if columns is not None:
-        df = df[columns]
-    
-    #print(df['source_id'])
-    #sys.exit(0)
-
-    return(df,racol,deccol)
+    ESA Gaia TAP is disabled in the st123-vendored tree. This delegates to
+    ``st123.alignment.gaia_catalog.jhat_get_gaia_sources`` (CDS VizieR with
+    mirror retries).
+    """
+    try:
+        from st123.alignment.gaia_catalog import jhat_get_gaia_sources
+    except ImportError as exc:
+        raise RuntimeError(
+            'ESA Gaia TAP is disabled in this JHAT build. Install st123 so '
+            'Gaia queries use Vizier, or provide a local refcat file.'
+        ) from exc
+    return jhat_get_gaia_sources(
+        ra0,
+        dec0,
+        radius_deg,
+        radius_factor=radius_factor,
+        mjd=mjd,
+        pm_median=pm_median,
+        datarelease=datarelease,
+        calc_mag_errors=calc_mag_errors,
+        rename_mag_colnames=rename_mag_colnames,
+        remove_null=remove_null,
+        columns=columns,
+    )
 
     
 

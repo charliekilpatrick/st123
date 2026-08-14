@@ -9,11 +9,18 @@ Typical workflow
    helpers in :mod:`st123.mast`).
 2. **Align** JWST frames with JHAT (``align`` and related helpers under
    :mod:`st123.alignment`).
-3. **Mosaic / coadd** (``mosaic``) under :mod:`st123.mosaic`.
+3. **Mosaic / coadd** (``mosaic``) under :mod:`st123.mosaic`. Each
+   ``reference/group_*/ref_*`` box gets a shared sky stamp
+   (``stamp_wcs.fits``); JWST filters and HST drizzle products are built on
+   that footprint so missions stay registered.
 4. **Prepare DOLPHOT** (``dolphot-prep``) and run the external ``dolphot``
-   binary; optionally warm-start MIRI from NIRCam
-   (``dolphot-warmstart``, :mod:`st123.photometry`).
-5. **Catalog** photometry products (``catalog``).
+   binary. Warm-start options via ``dolphot-warmstart``
+   (:mod:`st123.photometry`): NIRCam→MIRI (``--target miri``, default) or
+   NIRCam reference/catalog → HST science (``--target hst``). See the README
+   “HST one-target end-to-end” and “HST warmstart from NIRCam” sections for
+   recommended globals (``UseWCS=2``, ``Align=0``, ``Force1=1``) and QA.
+5. **Catalog** photometry products (``catalog``), or scrape a ``.phot`` with
+   :func:`st123.photometry.dolphot.nearest_phot_source`.
 
 Work-directory layout
 =====================
@@ -34,7 +41,7 @@ Installed entry points (see ``pyproject.toml`` ``[project.scripts]``):
 * ``link-raw``, ``image-overlap``, ``region`` — path / footprint helpers
 * ``dolphot-prep`` — DOLPHOT mask / calcsky / paramfile prep
   (console name kept distinct from the ``dolphot`` binary)
-* ``dolphot-warmstart`` — NIRCam→MIRI warm-start setup
+* ``dolphot-warmstart`` — NIRCam→MIRI or NIRCam→HST warm-start setup
 * ``catalog`` — combined photometry catalogs
 
 Run ``<command> --help`` for options. Shared knobs such as ``--ncores``

@@ -16,7 +16,6 @@ from astropy.io import fits
 from astropy.table import Column, Table
 from astropy.time import Time
 
-from st123.mast import parse_s_region
 from st123.utils.settings import (
     BEST_FILTER_TYPES,
     BEST_REFERENCE_FILTERS,
@@ -580,6 +579,9 @@ def get_sky_pgons(table: Table) -> np.ndarray:
     """
     Parse ``S_REGION`` sky polygons from images listed in a table.
 
+    When ``S_REGION`` is missing, fall back to the SCI WCS footprint
+    (``WCS.calc_footprint``) so mixed JWST/HST planning still works.
+
     Parameters
     ----------
     table : astropy.table.Table
@@ -590,11 +592,39 @@ def get_sky_pgons(table: Table) -> np.ndarray:
     numpy.ndarray
         Object-dtype array of Shapely polygons (one per row).
     """
+    # Lazy: avoid utils.helpers ↔ mast.mast import cycles at package load.
+    from shapely.geometry import Polygon
+    from st123.mast.mast import parse_s_region
+
     pgons = []
     for im in table['image']:
         with fits.open(im) as hdul:
-            region = hdul['SCI'].header['S_REGION']
-        pgons.append(parse_s_region(region))
+            region = None
+            sci = None
+            for hdu in hdul:
+                name = str(getattr(hdu, 'name', '') or '').upper()
+                if name == 'SCI' or (sci is None and getattr(hdu, 'data', None) is not None):
+                    if name == 'SCI' or sci is None:
+                        sci = hdu
+                    if hdu.header.get('S_REGION'):
+                        region = hdu.header['S_REGION']
+                        break
+            if region is None and 'SCI' in hdul:
+                region = hdul['SCI'].header.get('S_REGION')
+                sci = hdul['SCI']
+            if region:
+                pgons.append(parse_s_region(region))
+                continue
+            if sci is None:
+                raise KeyError(f'No SCI / S_REGION in {im}')
+            from astropy.wcs import WCS
+
+            try:
+                wcs = WCS(sci.header, fobj=hdul, naxis=2)
+            except Exception:
+                wcs = WCS(sci.header, naxis=2, relax=True)
+            corners = np.asarray(wcs.calc_footprint(center=False), dtype=float)
+            pgons.append(Polygon(corners))
     return np.array(pgons, dtype=object)
 
 
@@ -679,7 +709,30 @@ def input_list(input_images: list[str | Path]) -> Table:
     with fits.open(img[0]) as hdu:
         primary = hdu[0].header
 
-    exp = [fits.getval(image, 'EFFEXPTM') for image in img]
+    def _exptime(path: str) -> float:
+        hdr = fits.getheader(path, ext=0)
+        for key in ('EFFEXPTM', 'EXPTIME', 'TEXPTIME'):
+            if key in hdr and hdr[key] is not None:
+                try:
+                    return float(hdr[key])
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    def _visit_id(path: str) -> str:
+        hdr = fits.getheader(path, ext=0)
+        # JWST: VISIT_ID. HST: ROOTNAME[:6] (ipppssoot visit stem), else ASN_ID.
+        for key in ('VISIT_ID', 'ROOTNAME', 'ASN_ID'):
+            val = hdr.get(key)
+            if val is None or str(val).strip() == '':
+                continue
+            token = str(val).strip()
+            if key == 'ROOTNAME' and len(token) >= 6:
+                return token[:6].lower()
+            return token
+        return os.path.basename(path)[:6].lower()
+
+    exp = [_exptime(image) for image in img]
     if 'DATE-OBS' in primary and 'TIME-OBS' in primary:
         dat = [
             f"{fits.getval(image, 'DATE-OBS')}T{fits.getval(image, 'TIME-OBS')}"
@@ -693,16 +746,29 @@ def input_list(input_images: list[str | Path]) -> Table:
             for image in img
         ]
     else:
-        raise ValueError(
-            f'Cannot determine observation time from headers of {img[0]}'
-        )
+        # Mixed JWST/HST tables: probe each file for a usable time keyword.
+        dat = []
+        for image in img:
+            hdr = fits.getheader(image, ext=0)
+            if 'DATE-OBS' in hdr and 'TIME-OBS' in hdr:
+                dat.append(f"{hdr['DATE-OBS']}T{hdr['TIME-OBS']}")
+            elif 'EXPSTART' in hdr:
+                dat.append(
+                    Time(hdr['EXPSTART'], format='mjd').datetime.strftime(
+                        '%Y-%m-%dT%H:%M:%S'
+                    )
+                )
+            else:
+                raise ValueError(
+                    f'Cannot determine observation time from headers of {image}'
+                )
 
     fil = [get_filter(image) for image in img]
     ins = [get_instrument(image) for image in img]
     module = [get_module(image) for image in img]
     chip = [get_chip(image) for image in img]
     zpt = [get_zpt(i, ccdchip=c, zptype='abmag') for i, c in zip(img, chip)]
-    visit = [fits.getval(i, 'VISIT_ID', ext=0) for i in img]
+    visit = [_visit_id(i) for i in img]
     # MIRI (and some HST) products omit PUPIL; treat as clear / unused.
     pupil = []
     for path in img:

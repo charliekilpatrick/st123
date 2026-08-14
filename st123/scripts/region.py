@@ -6,13 +6,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-
-from st123.mosaic.region import (
-    SRegionPolygon,
-    illuminated_s_region_from_fits,
-    save_illuminated_region_plot,
-)
 from st123.scripts.utils.options import (
     add_common_runtime,
     configure_logging_from_args,
@@ -78,7 +71,7 @@ def create_parser():
         action='store_true',
         help='Display the plot interactively',
     )
-    add_common_runtime(parser, ncores=False, plot=True, verbose=True)
+    add_common_runtime(parser, plot=True, verbose=True)
     return parser
 
 
@@ -86,6 +79,14 @@ def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'region')
     try:
+        import matplotlib.pyplot as plt
+
+        from st123.mosaic.region import (
+            SRegionPolygon,
+            illuminated_s_region_from_fits,
+            save_illuminated_region_plot,
+        )
+
         (
             s_region_polygon,
             region_mask,

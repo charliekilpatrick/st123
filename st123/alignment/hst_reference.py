@@ -14,11 +14,15 @@ from typing import Iterable, Optional, Sequence, Union
 
 import numpy as np
 from astropy.io import fits
+from astropy.table import Table
 from astropy.wcs import WCS
 
 PathLike = Union[str, Path]
 
 logger = logging.getLogger(__name__)
+
+# Science-frame JHAT needs a dense L3 phot catalog (not sparse Gaia-only).
+MIN_L3_REFCAT_SOURCES = 30
 
 
 @dataclass(frozen=True)
@@ -107,7 +111,7 @@ def score_level3_gaia(
     """
     Count Gaia sources on illuminated, locally detectable pixels in *image*.
     """
-    from st123.alignment.align import query_gaia
+    from st123.alignment.gaia_catalog import query_gaia
     from st123.utils.helpers import get_filter, get_instrument
 
     path = Path(image).expanduser().resolve()
@@ -115,7 +119,7 @@ def score_level3_gaia(
     filt = get_filter(path).lower()
 
     try:
-        gaia = query_gaia(str(path), telescope='hst')
+        gaia = query_gaia(str(path), telescope='hst', backend='vizier')
     except Exception as exc:
         logger.warning('Gaia query failed for %s: %s', path.name, exc)
         return Level3GaiaScore(path, 0, 0, 0, inst, filt)
@@ -161,15 +165,28 @@ def score_level3_gaia(
 
 
 def list_level3_products(directory: PathLike) -> list[Path]:
-    """Find coadd / drizzle products under *directory*."""
+    """
+    Find coadd / drizzle products under *directory*.
+
+    Searches the shared ``group_*/ref_*`` box layout and legacy flat
+    ``coadd_*.fits`` products (e.g. ``reference_prelim/``).
+    """
     root = Path(directory).expanduser().resolve()
     if not root.is_dir():
         return []
     out: list[Path] = []
-    for pat in ('coadd_*.fits', '*_drc.fits', '*_drz.fits'):
+    patterns = (
+        'group_*/ref_*/coadd_*.fits',
+        'coadd_*.fits',
+        '*_drc.fits',
+        '*_drz.fits',
+    )
+    for pat in patterns:
         for path in sorted(root.glob(pat)):
             name = path.name.lower()
             if name.endswith('_wht.fits') or name.endswith('_ctx.fits'):
+                continue
+            if not path.is_file():
                 continue
             out.append(path.resolve())
     # De-dupe preserving order
@@ -182,6 +199,148 @@ def list_level3_products(directory: PathLike) -> list[Path]:
         seen.add(key)
         uniq.append(p)
     return uniq
+
+
+def count_phot_sources(phot_path: PathLike) -> int:
+    """Count data rows in a whitespace JHAT ``*.phot.txt`` (0 if unreadable)."""
+    path = Path(phot_path).expanduser()
+    if not path.is_file():
+        return 0
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace').strip().splitlines()
+    except OSError:
+        return 0
+    if len(text) <= 1:
+        return 0
+    return max(0, len(text) - 1)
+
+
+def write_detection_refcat(
+    image: PathLike,
+    output: PathLike,
+    *,
+    nsigma: float = 5.0,
+    fwhm: float = 2.5,
+    max_sources: int = 5000,
+) -> Path:
+    """
+    Build a dense JHAT phot catalog from DAOStarFinder on an L3 / coadd SCI.
+
+    Writes ``ra dec mag x y`` (plus ``dmag``) using the image WCS so that after
+    ``gaia_simple`` the sky frame is Gaia-tied while source density remains high
+    enough for sparse-field WFPC2 matching.
+    """
+    from astropy.stats import sigma_clipped_stats
+    from photutils.detection import DAOStarFinder
+
+    src = Path(image).expanduser().resolve()
+    out = Path(output).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with fits.open(src, memmap=True) as hdul:
+        idx = _sci_hdu_index(hdul)
+        data = np.asarray(hdul[idx].data, dtype=float)
+        if data.ndim > 2:
+            data = data[0]
+        w = WCS(hdul[idx].header, hdul, naxis=2)
+        wht = None
+        if 'WHT' in hdul and hdul['WHT'].data is not None:
+            wht = np.asarray(hdul['WHT'].data, dtype=float)
+            if wht.ndim > 2:
+                wht = wht[0]
+
+    work = np.array(data, copy=True)
+    if wht is not None:
+        work = np.where(wht > 0, work, np.nan)
+    finite = np.isfinite(work)
+    if int(np.count_nonzero(finite)) < 1000:
+        raise RuntimeError(f'write_detection_refcat: too few finite pixels in {src.name}')
+
+    _, median, std = sigma_clipped_stats(work[finite], sigma=3.0, maxiters=5)
+    std = float(max(std, 1e-6))
+    finder = DAOStarFinder(fwhm=float(fwhm), threshold=float(nsigma) * std)
+    # photutils rejects NaNs; fill with median for detection only.
+    det = np.where(finite, work, median)
+    sources = finder(det - median)
+    if sources is None or len(sources) == 0:
+        raise RuntimeError(f'write_detection_refcat: no sources in {src.name}')
+
+    sources.sort('flux')
+    sources.reverse()
+    if len(sources) > int(max_sources):
+        sources = sources[: int(max_sources)]
+
+    x = np.asarray(sources['xcentroid'], dtype=float)
+    y = np.asarray(sources['ycentroid'], dtype=float)
+    ra, dec = w.all_pix2world(x, y, 0)
+    flux = np.asarray(sources['flux'], dtype=float)
+    flux = np.where(flux > 0, flux, np.nan)
+    mag = -2.5 * np.log10(flux)
+    catalog = Table(
+        {
+            'ra': ra,
+            'dec': dec,
+            'mag': mag,
+            'x': x,
+            'y': y,
+            'dmag': np.full(len(mag), 0.05),
+        }
+    )
+    with open(out, 'w', encoding='utf-8') as fh:
+        fh.write('ra dec mag x y dmag\n')
+        for row in catalog:
+            if not (
+                np.isfinite(row['ra'])
+                and np.isfinite(row['dec'])
+                and np.isfinite(row['mag'])
+            ):
+                continue
+            fh.write(
+                f'{float(row["ra"]):.10f} {float(row["dec"]):.10f} '
+                f'{float(row["mag"]):.4f} {float(row["x"]):.4f} '
+                f'{float(row["y"]):.4f} {float(row["dmag"]):.4f}\n'
+            )
+    n = count_phot_sources(out)
+    logger.info(
+        'Wrote L3 detection refcat %s (%d sources, thr=%.1fσ fwhm=%.1f)',
+        out.name,
+        n,
+        nsigma,
+        fwhm,
+    )
+    return out
+
+
+def ensure_l3_science_refcat(
+    l3_image: PathLike,
+    output: PathLike,
+    *,
+    min_sources: int = MIN_L3_REFCAT_SOURCES,
+    force: bool = False,
+) -> Path:
+    """
+    Ensure a dense detection phot catalog exists for science-frame JHAT.
+
+    Rebuilds when missing, *force*, or when the existing file has fewer than
+    *min_sources* rows (guards against sparse Gaia-only leftovers).
+    """
+    out = Path(output).expanduser().resolve()
+    n_exist = count_phot_sources(out)
+    if not force and n_exist >= int(min_sources):
+        logger.info(
+            'Keeping existing L3 science refcat %s (%d sources)',
+            out.name,
+            n_exist,
+        )
+        return out
+    if out.is_file() and n_exist < int(min_sources):
+        logger.info(
+            'Rebuilding sparse L3 science refcat %s (%d < %d sources)',
+            out.name,
+            n_exist,
+            int(min_sources),
+        )
+    return write_detection_refcat(l3_image, out)
 
 
 def pick_best_level3(
@@ -212,8 +371,44 @@ def pick_best_level3(
     if not uniq:
         return None, []
 
-    scores = [score_level3_gaia(p, snr=snr) for p in uniq]
-    # Rank: detectable desc, illuminated desc, prefer non-WFPC2, then FOV count.
+    logger.info(
+        'Scoring %d L3 product(s) against Gaia '
+        '(field cache under reduction/gaia/ when present)',
+        len(uniq),
+    )
+    scores: list[Level3GaiaScore] = []
+    for i, path in enumerate(uniq, start=1):
+        logger.info('  [%d/%d] Gaia score %s …', i, len(uniq), path.name)
+        scores.append(score_level3_gaia(path, snr=snr))
+        logger.info(
+            '  [%d/%d] %s → detectable=%d illuminated=%d fov=%d',
+            i,
+            len(uniq),
+            path.name,
+            scores[-1].n_detectable,
+            scores[-1].n_illuminated,
+            scores[-1].n_gaia_fov,
+        )
+    # Rank: detectable desc, illuminated desc, prefer non-WFPC2, then FOV
+    # count, then redder broadband filters (F814W over F555W) — deeper
+    # continuum usually yields tighter Gaia centroids on sparse fields.
+    def _filter_rank(filt: str) -> int:
+        key = str(filt or '').strip().lower()
+        pref = {
+            'f814w': 50,
+            'f850lp': 48,
+            'f775w': 45,
+            'f606w': 40,
+            'f625w': 38,
+            'f555w': 30,
+            'f475w': 25,
+            'f438w': 20,
+            'f336w': 10,
+            'f275w': 8,
+            'f225w': 5,
+        }
+        return pref.get(key, 0)
+
     scores_sorted = sorted(
         scores,
         key=lambda s: (
@@ -221,6 +416,7 @@ def pick_best_level3(
             s.n_illuminated,
             0 if s.instrument != 'wfpc2' else -1,
             s.n_gaia_fov,
+            _filter_rank(s.filt),
         ),
         reverse=True,
     )
@@ -251,12 +447,18 @@ def ensure_preliminary_level3s(
     *,
     num_cores: int = 4,
     force: bool = False,
+    instruments: Sequence[str] | None = None,
 ) -> list[Path]:
     """
     Build per-filter AstroDrizzle coadds from *raw_dir* into *outdir*.
 
     Used before JHAT so a Gaia-rich level-3 exists as the absolute reference.
     Skips groups whose coadd already exists unless *force*.
+
+    Parameters
+    ----------
+    instruments : sequence of str or None, optional
+        If set, only drizzle these instruments (e.g. ``ACS``, ``WFC3``).
     """
     from st123.mosaic.hst_drizzle import (
         drizzle_filter_group,
@@ -277,9 +479,19 @@ def ensure_preliminary_level3s(
         return []
 
     groups = group_hst_frames(frames)
+    if instruments:
+        allow = {str(i).split('_')[0].strip().lower() for i in instruments if str(i).strip()}
+        before = len(groups)
+        groups = {key: vals for key, vals in groups.items() if key[0] in allow}
+        logger.info(
+            'Preliminary L3 instrument filter %s: %d → %d group(s)',
+            sorted(allow),
+            before,
+            len(groups),
+        )
     products: list[Path] = []
     for (inst, filt), imgs in sorted(groups.items()):
-        suffix = _drizzle_suffix(inst)
+        suffix = _drizzle_suffix(inst, imgs)
         dest = out / f'coadd_{inst}_{filt}_{suffix}.fits'
         if dest.is_file() and not force:
             logger.info('Keeping existing preliminary L3 %s', dest.name)

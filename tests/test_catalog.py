@@ -61,7 +61,7 @@ def test_catalog_main_calls_create_common(tmp_path: Path):
     csv_path = tmp_path / 'rsg_f115w.csv'
     pd.DataFrame({'idx': [1, 2], 'x': [10.0, 11.0]}).to_csv(csv_path, index=False)
     outfile = tmp_path / 'combined.csv'
-    with patch('st123.scripts.catalog.create_common_catalog') as mock_create:
+    with patch('st123.photometry.catalog.create_common_catalog') as mock_create:
         rc = catalog_script.main(['--photdir', str(tmp_path), '--outfile', str(outfile)])
     assert rc == 0
     mock_create.assert_called_once()

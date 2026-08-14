@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from st123.alignment.hst_jhat import (
+    _post_jhat_refcat_refine,
     ensure_wfpc2_jhat_patch,
     propagate_jhat_wcs_to_all_sci,
     wfpc2_filter_key_and_name,
@@ -102,7 +104,7 @@ def test_propagate_jhat_wcs_to_all_sci(tmp_path: Path):
     assert stats['n_updated'] == 3
 
     with fits.open(aln) as hdul, fits.open(src) as src_hdul:
-        assert hdul[0].header.get('ST123WPROP') is True
+        assert hdul[0].header.get('ST123WPR') is True
         for k in range(4):
             # All aligned SCI should now be ~1" north of source SCI.
             w0 = WCS(src_hdul[k + 1].header, naxis=2)
@@ -111,3 +113,79 @@ def test_propagate_jhat_wcs_to_all_sci(tmp_path: Path):
             ra1, dec1 = w1.pixel_to_world_values(50, 50)
             ddec_as = (dec1 - dec0) * 3600.0
             assert abs(ddec_as - 1.0) < 0.05
+
+
+def test_post_jhat_skips_global_when_per_chip_updates(tmp_path):
+    recovered = tmp_path / 'frame_jhat.fits'
+    recovered.touch()
+    phot = tmp_path / 'ref.phot.txt'
+    phot.write_text('ra dec mag\n')
+
+    with (
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+            return_value={'n_updated': 2},
+        ) as mock_chip,
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            return_value={'applied': True},
+        ) as mock_global,
+    ):
+        stats = _post_jhat_refcat_refine(
+            recovered, phot, refine_refcat=True, refine_per_chip=True
+        )
+
+    mock_chip.assert_called_once()
+    mock_global.assert_not_called()
+    assert stats['per_chip_updated'] == 2
+    assert stats['global_ran'] is False
+
+
+def test_post_jhat_global_fallback_when_per_chip_updates_none(tmp_path):
+    recovered = tmp_path / 'frame_jhat.fits'
+    recovered.touch()
+    phot = tmp_path / 'ref.phot.txt'
+    phot.write_text('ra dec mag\n')
+
+    with (
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+            return_value={'n_updated': 0},
+        ) as mock_chip,
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            return_value={'applied': True},
+        ) as mock_global,
+    ):
+        stats = _post_jhat_refcat_refine(
+            recovered, phot, refine_refcat=True, refine_per_chip=True
+        )
+
+    mock_chip.assert_called_once()
+    mock_global.assert_called_once()
+    assert stats['global_ran'] is True
+    assert stats['global_applied'] is True
+
+
+def test_post_jhat_global_when_per_chip_disabled(tmp_path):
+    recovered = tmp_path / 'frame_jhat.fits'
+    recovered.touch()
+    phot = tmp_path / 'ref.phot.txt'
+    phot.write_text('ra dec mag\n')
+
+    with (
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+        ) as mock_chip,
+        patch(
+            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            return_value={'applied': False},
+        ) as mock_global,
+    ):
+        stats = _post_jhat_refcat_refine(
+            recovered, phot, refine_refcat=True, refine_per_chip=False
+        )
+
+    mock_chip.assert_not_called()
+    mock_global.assert_called_once()
+    assert stats['global_ran'] is True

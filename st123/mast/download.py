@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -21,9 +22,37 @@ from st123.mast.mast import (
     query_jwst,
     resolve_mast_token,
 )
+from st123.utils.jwst_coverage import (
+    mast_table_jwst_coverage,
+    should_skip_miri_only_jwst,
+)
 from st123.utils.logging import capture_output
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class MastDownloadResult:
+    """Outcome of a JWST (or similar) MAST download query."""
+
+    n_observations: int
+    skipped_miri_only: bool = False
+
+    def __int__(self) -> int:
+        return int(self.n_observations)
+
+    def __bool__(self) -> bool:
+        return bool(self.n_observations) or bool(self.skipped_miri_only)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return self.n_observations == other
+        if isinstance(other, MastDownloadResult):
+            return (
+                self.n_observations == other.n_observations
+                and self.skipped_miri_only == other.skipped_miri_only
+            )
+        return NotImplemented
 
 
 def suppress_stdout():
@@ -52,7 +81,9 @@ def resolve_outdir(
     Parameters
     ----------
     outdir : str or pathlib.Path
-        Explicit output directory (required; typically the CLI ``--base-dir``).
+        Explicit download tree root (required). The ``download`` CLI passes
+        ``<base-dir>/download``; library callers should do the same when
+        writing the canonical layout.
     create : bool, optional
         If True (default), create ``outdir`` (and parents) when missing.
     obj : str or None, optional
@@ -79,7 +110,9 @@ def resolve_outdir(
             os.makedirs(outdir_s, exist_ok=True)
         except OSError as exc:
             raise PermissionError(
-                f'Cannot create download directory {outdir_s!r}: {exc}'
+                f'Cannot create download directory {outdir_s}: {exc}. '
+                'Check that you have write permission for this path '
+                '(and its parents).'
             ) from exc
     return outdir_s
 
@@ -96,7 +129,8 @@ def query_mast_jwst(
     mirimage_only: bool = False,
     dry_run: bool = False,
     allowed_filters: Optional[Sequence[str]] = None,
-) -> int:
+    force_miri: bool = False,
+) -> MastDownloadResult:
     """
     Query MAST and download available JWST imaging.
 
@@ -105,7 +139,7 @@ def query_mast_jwst(
     coord : astropy.coordinates.SkyCoord
         Target coordinates.
     outdir : str or pathlib.Path
-        Output directory for downloads (typically ``--base-dir``).
+        Download tree root (typically ``<base-dir>/download``).
     radius : astropy.units.Quantity
         Search radius.
     stage : int, optional
@@ -128,11 +162,17 @@ def query_mast_jwst(
         List matching products without downloading.
     allowed_filters : sequence of str or None, optional
         Optional filter whitelist (e.g. ``F560W``).
+    force_miri : bool, optional
+        When False (default), MIRI-only fields (no NIRCam) are skipped if
+        both NIRCam and MIRI were requested. Pass True (or request MIRI
+        alone via ``instruments=['MIRI']``) to download MIRI anyway.
 
     Returns
     -------
-    int
-        Number of observation product sets downloaded (or listed in dry-run).
+    MastDownloadResult
+        ``n_observations`` downloaded (or listed in dry-run). When a
+        MIRI-only field is skipped, ``skipped_miri_only`` is True and
+        ``n_observations`` is 0.
     """
     outdir_s = str(outdir)
     os.makedirs(outdir_s, exist_ok=True)
@@ -141,6 +181,11 @@ def query_mast_jwst(
     if instruments is not None:
         kwargs['instruments'] = instruments
 
+    logger.info(
+        'Querying MAST JWST imaging within %s of %s',
+        radius,
+        coord.to_string('decimal'),
+    )
     with capture_output():
         obs_table = query_jwst(coord, **kwargs)
     if allowed_filters:
@@ -160,11 +205,24 @@ def query_mast_jwst(
         f' ({n_skipped} skipped: no matching products expected)' if n_skipped else '',
     )
     if len(obs_table) == 0:
-        return 0
+        return MastDownloadResult(0)
+
+    has_nircam, has_miri = mast_table_jwst_coverage(obs_table)
+    if should_skip_miri_only_jwst(
+        has_nircam,
+        has_miri,
+        instruments,
+        force_miri=force_miri,
+    ):
+        logger.warning(
+            'MIRI-only JWST field (no NIRCam); skipping JWST download. '
+            'Pass --force-miri (or --instruments MIRI) to download MIRI.'
+        )
+        return MastDownloadResult(0, skipped_miri_only=True)
 
     # Pass token again so download authenticates even if called standalone.
     with capture_output():
-        return download_jwst_observations(
+        n = download_jwst_observations(
             obs_table,
             outdir=outdir_s,
             stage=stage,
@@ -173,6 +231,7 @@ def query_mast_jwst(
             mirimage_only=mirimage_only,
             dry_run=dry_run,
         )
+    return MastDownloadResult(int(n))
 
 
 def query_mast_hst(
@@ -191,14 +250,15 @@ def query_mast_hst(
     Query MAST and download available HST imaging.
 
     WFPC2 ``c1m`` DQ companions are always downloaded (required for drizzle /
-    ``wfpc2mask``).
+    ``wfpc2mask``). ``ACS`` includes ACS/WFC (``flc``) plus ACS/HRC and
+    ACS/SBC (``flt``).
 
     Parameters
     ----------
     coord : SkyCoord
         Target coordinates.
     outdir : str or pathlib.Path
-        Output directory (typically ``--base-dir``).
+        Download tree root (typically ``<base-dir>/download``).
     radius : Quantity
         Search radius.
     token : str or None, optional
@@ -217,7 +277,8 @@ def query_mast_hst(
     Returns
     -------
     int
-        Number of observation product sets downloaded (or listed).
+        Number of observations ready for the pipeline (newly downloaded /
+        listed, or already fully present on disk). ``0`` if none.
     """
     outdir_s = str(outdir)
     os.makedirs(outdir_s, exist_ok=True)
@@ -227,6 +288,12 @@ def query_mast_hst(
     if allowed_filters:
         filters = [normalize_filter_name(f) for f in allowed_filters]
 
+    logger.info(
+        'Querying MAST HST imaging within %s of %s (instruments=%s)',
+        radius,
+        coord.to_string('decimal'),
+        ', '.join(inst),
+    )
     with capture_output():
         obs_table = query_hst(
             coord,
@@ -263,7 +330,7 @@ def query_and_download_miri(
 ) -> int:
     """
     Download public MIRI imager products into
-    ``<download_dir>/JWST/MIRI/<FILTER>/<obsid>/``.
+    ``<download_dir>/download/JWST/MIRI/<FILTER>/<obsid>/<filename>``.
 
     This is the canonical layout expected by ``align --mode reference``.
     ``obj`` is deprecated; the dataset label is ``download_dir.name``.
@@ -273,7 +340,8 @@ def query_and_download_miri(
     coord : astropy.coordinates.SkyCoord
         Target coordinates.
     download_dir : str or pathlib.Path
-        Dataset root (same role as CLI ``--base-dir``).
+        Dataset / project root (same role as CLI ``--base-dir``). Products
+        are written under ``<download_dir>/download/``.
     radius : astropy.units.Quantity
         Search radius.
     stage : int, optional
@@ -292,15 +360,18 @@ def query_and_download_miri(
     int
         Number of observation product sets downloaded (or listed in dry-run).
     """
-    download_dir = Path(download_dir).expanduser().resolve()
-    label = obj or download_dir.name
+    from st123.utils.settings import DOWNLOAD_DIR_NAME
+
+    project = Path(download_dir).expanduser().resolve()
+    outdir = project / DOWNLOAD_DIR_NAME
+    label = obj or project.name
     logger.info('Target: %s', label)
     logger.info('Coordinates: %s', coord.to_string('hmsdms'))
     logger.info('Search radius: %s', radius)
-    logger.info('Download directory: %s', download_dir)
-    return query_mast_jwst(
+    logger.info('Download directory: %s', outdir)
+    result = query_mast_jwst(
         coord,
-        outdir=str(download_dir),
+        outdir=str(outdir),
         radius=radius,
         stage=stage,
         token=token,
@@ -309,4 +380,6 @@ def query_and_download_miri(
         mirimage_only=True,
         dry_run=dry_run,
         allowed_filters=allowed_filters,
+        force_miri=True,
     )
+    return int(result)

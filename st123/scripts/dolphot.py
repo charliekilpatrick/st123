@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Prepare JWST/HST frames for DOLPHOT (stage, mask, calcsky, dolphot.param).
 
+Default with ``--base-dir``: discover mosaic coadds / ``dolphot_frames.txt``
+under ``reference/group_*/ref_*/``. Pass ``--files`` and/or ``--refimage`` to
+use an explicit frame list instead.
+
 HST one-target mixed run (all cameras, best coadd as ``img0``)::
 
     dolphot-prep --instrument hst --base-dir /path/to/Target --ncores 8
@@ -10,21 +14,12 @@ See README "HST one-target end-to-end" for the full download→dolphot recipe.
 
 from __future__ import annotations
 
+import argparse
 import glob
 import logging
 import shutil
 from pathlib import Path
 
-from st123.photometry.dolphot import (
-    MosaicPhotJob,
-    discover_mosaic_phot_jobs,
-    dolphot_command,
-    filter_frames_for_instrument,
-    prepare_frames,
-    prepare_hst_frames,
-    prepare_mosaic_phot_job,
-    setup_paramfile,
-)
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
@@ -34,7 +29,6 @@ from st123.scripts.utils.options import (
     resolve_project_root,
     resolve_reduction_dir,
 )
-from st123.utils.helpers import get_filter
 from st123.utils.settings import BEST_REFERENCE_FILTERS, hst_base_params, miri_base_params
 from st123.utils.logging import shutdown_logging
 
@@ -43,14 +37,31 @@ logger = logging.getLogger(__name__)
 _HST_INSTRUMENTS = frozenset({'acs', 'wfc3', 'wfpc2'})
 _HST_MIXED = 'hst'
 _HST_CLI_INSTRUMENTS = frozenset({*_HST_INSTRUMENTS, _HST_MIXED})
+_CLI_INSTRUMENTS = ('nircam', 'miri', 'acs', 'wfc3', 'wfpc2', 'hst')
+
+
+def _parse_instrument(value: str) -> str:
+    """Normalize ``--instrument`` to a lowercase CLI choice (accepts NIRCAM)."""
+    key = str(value).strip().lower()
+    if key == 'nrc':
+        key = 'nircam'
+    if key not in _CLI_INSTRUMENTS:
+        raise argparse.ArgumentTypeError(
+            f'invalid instrument {value!r}; choose from '
+            f'{", ".join(_CLI_INSTRUMENTS)}'
+        )
+    return key
 
 
 def create_parser():
     parser = build_parser(
         description=(
             'Stage JHAT frames for DOLPHOT: write dolphot.param, run '
-            'instrument mask + calcsky (and HST splitgroups). Use '
-            '--from-mosaic after mosaic, or pass --files / --refimage. '
+            'instrument mask + calcsky (and HST splitgroups). Default with '
+            '--base-dir: discover mosaic coadds under '
+            'reference/group_*/ref_*/ (and dolphot_frames.txt) and prep every '
+            'mosaic box for the requested instrument. Override with '
+            '--files and/or --refimage for an explicit frame list. '
             'HST: --instrument wfc3|wfpc2|acs --base-dir … stages under '
             '<project>/dolphot/<instrument>_0_0/. '
             'Mixed (option C): --instrument hst uses all JHAT frames and the '
@@ -59,11 +70,14 @@ def create_parser():
     )
     parser.add_argument(
         '--instrument',
-        choices=('nircam', 'miri', 'acs', 'wfc3', 'wfpc2', 'hst'),
+        type=_parse_instrument,
         default='nircam',
+        metavar='INSTRUMENT',
         help=(
-            'Instrument module (selects mask binary, calcsky defaults, and '
-            'frame filtering). Use hst for a mixed ACS+WFC3+WFPC2 run against '
+            'Instrument module (case-insensitive): nircam, miri, acs, wfc3, '
+            'wfpc2, or hst. Selects mask binary, calcsky defaults, and frame '
+            'filtering. In mosaic mode, preps all group_*/ref_* boxes for '
+            'that instrument. Use hst for a mixed ACS+WFC3+WFPC2 run against '
             'the best coadd reference.'
         ),
     )
@@ -71,24 +85,29 @@ def create_parser():
         '--from-mosaic',
         action='store_true',
         help=(
-            'Discover coadds under <reduction>/reference/group_*/ref_*/ '
-            '(and dolphot_frames.txt when present) and prep phot/miri runs.'
+            'Deprecated no-op: mosaic discovery is already the default when '
+            '--base-dir is set without --files/--refimage. Kept for older '
+            'scripts.'
         ),
     )
     parser.add_argument(
         '--files',
         nargs='+',
         default=None,
-        help='Explicit FITS paths (JHAT frames). Ignored with --from-mosaic.',
+        help=(
+            'Explicit FITS paths (JHAT frames). Disables default mosaic '
+            'discovery.'
+        ),
     )
     add_base_dir(
         parser,
         required=False,
         aliases=('--basedir', '--workdir', '--data-dir', '--indir'),
         help=(
-            'Project root or reduction workdir. With --from-mosaic, resolves '
-            'to reduction/. With --files omitted (non-mosaic), glob for '
-            '*_jhat.fits here. Aliases: --indir, --workdir, --data-dir.'
+            'Project root or reduction workdir. Default: discover mosaic '
+            'products under reduction/reference/. With --files/--refimage, '
+            'also used to glob *_jhat.fits when --files is omitted. '
+            'Aliases: --indir, --workdir, --data-dir.'
         ),
     )
     parser.add_argument(
@@ -96,7 +115,7 @@ def create_parser():
         type=str,
         default=None,
         help=(
-            'Staging directory. With --from-mosaic, overrides the default '
+            'Staging directory. In mosaic mode, overrides the default '
             '(reduction/phot_* or <project>/dolphot/miri_*). HST default: '
             '<project>/dolphot/<instrument>_0_0.'
         ),
@@ -105,16 +124,19 @@ def create_parser():
         '--refimage',
         type=str,
         default=None,
-        help='Reference image for dolphot.param (--files / HST mode).',
+        help=(
+            'Explicit reference image for dolphot.param. Disables default '
+            'mosaic discovery (use with --files or --base-dir JHAT glob).'
+        ),
     )
     parser.add_argument(
         '--ref-filter',
         type=str,
         default=None,
         help=(
-            'With --from-mosaic, prefer coadd_*_<filter>_i2d.fits as the '
-            'reference. Default: F560W when --instrument miri, else the '
-            'manifest # ref line.'
+            'In mosaic mode, prefer coadd_*_<filter>_*.fits (JWST i2d or '
+            'HST drc/drz) as the reference. Default: F560W when '
+            '--instrument miri, else the manifest # ref line.'
         ),
     )
     parser.add_argument(
@@ -153,6 +175,8 @@ def _log_run_commands(
     dolphot_bin: str | None,
     ncores: int,
 ) -> None:
+    from st123.photometry.dolphot import dolphot_command
+
     logger.info(
         'Run DOLPHOT with:\n  %s',
         dolphot_command(
@@ -183,43 +207,45 @@ def _pick_hst_reference(
     instrument: str | None = None,
 ) -> Path:
     """
-    Prefer deepest/longest-filter coadd under reduction/reference, else first frame.
+    Prefer deepest/longest-filter coadd under ``reference/group_*/ref_*``.
 
-    When *instrument* is a single camera (``wfc3`` / ``acs`` / ``wfpc2``),
-    coadds whose filename contains that instrument are preferred. For mixed
-    ``hst`` (or ``None``), prefer WFC3 → ACS → WFPC2, then
+    Also accepts legacy flat ``reference/coadd_*.fits``. When *instrument* is a
+    single camera (``wfc3`` / ``acs`` / ``wfpc2``), coadds whose filename
+    contains that instrument are preferred. For mixed ``hst`` (or ``None``),
+    prefer WFC3 → ACS → WFPC2, then
     :data:`~st123.utils.settings.BEST_REFERENCE_FILTERS`.
     """
     ref_dir = reduction / 'reference'
     coadds: list[Path] = []
     if ref_dir.is_dir():
-        coadds = sorted(
-            p
-            for p in ref_dir.iterdir()
-            if p.is_file()
-            and p.name.startswith('coadd_')
-            and (
-                p.name.endswith('_drc.fits')
-                or p.name.endswith('_drz.fits')
-            )
-        )
+        boxed = sorted(ref_dir.glob('group_*/ref_*/coadd_*.fits'))
+        flat = sorted(ref_dir.glob('coadd_*.fits'))
+        for p in boxed + flat:
+            name = p.name.lower()
+            if not (
+                name.endswith('_drc.fits') or name.endswith('_drz.fits')
+            ):
+                continue
+            coadds.append(p)
     if coadds:
         inst = (instrument or '').lower()
         mixed = inst in ('', _HST_MIXED)
 
-        def _rank(path: Path) -> tuple[int, int, str]:
+        def _rank(path: Path) -> tuple[int, int, int, str]:
             name = path.name.lower()
+            # Prefer boxed layout over legacy flat products.
+            layout_rank = 0 if 'group_' in path.as_posix() else 1
             if mixed:
-                if 'coadd_wfc3_' in name:
+                if 'wfc3' in name:
                     inst_rank = 0
-                elif 'coadd_acs_' in name:
+                elif 'acs' in name:
                     inst_rank = 1
-                elif 'coadd_wfpc2_' in name:
+                elif 'wfpc2' in name:
                     inst_rank = 2
                 else:
                     inst_rank = 3
             else:
-                inst_rank = 0 if (inst and f'coadd_{inst}_' in name) else 1
+                inst_rank = 0 if (inst and inst in name) else 1
             filt_rank = len(BEST_REFERENCE_FILTERS)
             for i, filt in enumerate(BEST_REFERENCE_FILTERS):
                 if f'_{filt}_' in name:
@@ -227,6 +253,8 @@ def _pick_hst_reference(
                     break
             else:
                 try:
+                    from st123.utils.helpers import get_filter
+
                     filt = get_filter(path)
                     for i, pref in enumerate(BEST_REFERENCE_FILTERS):
                         if filt == pref:
@@ -234,7 +262,7 @@ def _pick_hst_reference(
                             break
                 except Exception:
                     pass
-            return (inst_rank, filt_rank, name)
+            return (layout_rank, inst_rank, filt_rank, name)
 
         return sorted(coadds, key=_rank)[0]
     if frames:
@@ -244,19 +272,27 @@ def _pick_hst_reference(
 
 def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
     """Prefer jhat frames; fall back to reduction/raw calibrated products."""
-    jhat = reduction / 'jhat'
+    from st123.photometry.dolphot import filter_frames_for_instrument
+
+    jhat_dirs = (reduction / 'jhat_hst', reduction / 'jhat')
     raw = reduction / 'raw'
     files: list[Path] = []
-    if jhat.is_dir():
-        files = sorted(
-            p
-            for p in jhat.glob('*_jhat.fits')
-            if not p.name.lower().startswith('coadd_')
+    for jhat in jhat_dirs:
+        if not jhat.is_dir():
+            continue
+        files.extend(
+            sorted(
+                p
+                for p in jhat.glob('*_jhat.fits')
+                if not p.name.lower().startswith('coadd_')
+            )
         )
     if not files and raw.is_dir():
         patterns = ('*_flc.fits', '*_flt.fits', '*_c0m.fits')
         for pat in patterns:
             files.extend(sorted(raw.glob(pat)))
+        files = sorted(set(files))
+    else:
         files = sorted(set(files))
     if instrument.lower() == _HST_MIXED:
         return files
@@ -264,6 +300,11 @@ def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
 
 
 def _run_hst(args) -> int:
+    from st123.photometry.dolphot import (
+        filter_frames_for_instrument,
+        prepare_hst_frames,
+    )
+
     if args.base_dir is None and not args.files:
         logger.error('HST dolphot-prep requires --base-dir or --files')
         return 1
@@ -327,6 +368,7 @@ def _run_hst(args) -> int:
         skip_mask=args.skip_mask,
         skip_sky=args.skip_sky,
         skip_split=args.skip_split,
+        ncores=args.ncores,
     )
     logger.info('Wrote %s (%d frames + ref)', param, len(files))
     _log_run_commands(
@@ -340,12 +382,16 @@ def _run_hst(args) -> int:
 
 
 def _run_from_mosaic(args) -> int:
+    from st123.photometry.dolphot import (
+        MosaicPhotJob,
+        discover_mosaic_phot_jobs,
+        prepare_hst_frames,
+        prepare_mosaic_phot_job,
+    )
+
     if args.base_dir is None:
-        logger.error('--from-mosaic requires --base-dir')
+        logger.error('mosaic discovery requires --base-dir')
         return 1
-    if args.instrument in _HST_CLI_INSTRUMENTS:
-        # HST coadds live flat under reference/; reuse HST staging path.
-        return _run_hst(args)
 
     reduction = Path(resolve_reduction_dir(args.base_dir))
     project = Path(resolve_project_root(args.base_dir))
@@ -358,9 +404,13 @@ def _run_from_mosaic(args) -> int:
     if ref_filter is None and instrument == 'miri':
         ref_filter = 'F560W'
 
+    hst_mode = instrument in _HST_CLI_INSTRUMENTS
     if instrument == 'miri':
         out_root = project / 'dolphot'
         outdir_prefix = 'miri'
+    elif hst_mode:
+        out_root = project / 'dolphot'
+        outdir_prefix = instrument
     else:
         out_root = reduction
         outdir_prefix = 'phot'
@@ -373,6 +423,9 @@ def _run_from_mosaic(args) -> int:
         outdir_prefix=outdir_prefix,
     )
     if not jobs:
+        if hst_mode:
+            # Legacy / no-box fallback: stage a single HST phot dir.
+            return _run_hst(args)
         logger.error(
             'no mosaic coadds / dolphot_frames.txt under %s',
             reduction / 'reference',
@@ -383,7 +436,7 @@ def _run_from_mosaic(args) -> int:
     if args.outdir is not None:
         if len(jobs) > 1:
             logger.error(
-                '--outdir with --from-mosaic requires a single mosaic box '
+                '--outdir in mosaic mode requires a single mosaic box '
                 '(found %d)',
                 len(jobs),
             )
@@ -409,13 +462,27 @@ def _run_from_mosaic(args) -> int:
                 len(job.frames),
                 job.phot_outdir,
             )
-        param = prepare_mosaic_phot_job(
-            job,
-            instrument=instrument,
-            dolphot_bin=args.dolphot_bin,
-            skip_mask=args.skip_mask,
-            skip_sky=args.skip_sky,
-        )
+        if hst_mode:
+            param = prepare_hst_frames(
+                list(job.frames),
+                job.phot_outdir,
+                instrument,
+                refimage=job.refimage,
+                dolphot_bin=args.dolphot_bin,
+                skip_mask=args.skip_mask,
+                skip_sky=args.skip_sky,
+                skip_split=args.skip_split,
+                ncores=args.ncores,
+            )
+        else:
+            param = prepare_mosaic_phot_job(
+                job,
+                instrument=instrument,
+                dolphot_bin=args.dolphot_bin,
+                skip_mask=args.skip_mask,
+                skip_sky=args.skip_sky,
+                ncores=args.ncores,
+            )
         logger.info('Wrote %s (%d frames + ref)', param, len(job.frames))
         phot_out = f'{job.phot_outdir.name}.phot'
         _log_run_commands(
@@ -429,6 +496,8 @@ def _run_from_mosaic(args) -> int:
 
 
 def _run_explicit(args) -> int:
+    from st123.photometry.dolphot import prepare_frames, setup_paramfile
+
     if args.instrument in _HST_CLI_INSTRUMENTS:
         return _run_hst(args)
 
@@ -443,7 +512,7 @@ def _run_explicit(args) -> int:
         )
         files = sorted(Path(p) for p in glob.glob(pattern))
     else:
-        logger.error('provide --files, --base-dir, or --from-mosaic')
+        logger.error('provide --base-dir, or --files / --refimage')
         return 1
 
     missing = [p for p in files if not p.is_file()]
@@ -505,9 +574,24 @@ def _run_explicit(args) -> int:
         dolphot_bin=args.dolphot_bin,
         skip_mask=args.skip_mask,
         skip_sky=args.skip_sky,
+        ncores=args.ncores,
     )
     logger.info('Prepared %d %s frame(s)', len(work), args.instrument)
     return 0
+
+
+def use_mosaic_discovery(args) -> bool:
+    """
+    True when dolphot-prep should discover mosaic coadds / frame lists.
+
+    Default whenever ``--base-dir`` is set. Opt out with ``--files`` and/or
+    ``--refimage``. ``--from-mosaic`` is accepted but redundant.
+    """
+    if getattr(args, 'files', None) or getattr(args, 'refimage', None):
+        return False
+    if getattr(args, 'base_dir', None) is None:
+        return False
+    return True
 
 
 def main(argv=None) -> int:
@@ -515,7 +599,7 @@ def main(argv=None) -> int:
     configure_logging_from_args(args, 'dolphot-prep')
     try:
         try:
-            if args.from_mosaic:
+            if use_mosaic_discovery(args):
                 return _run_from_mosaic(args)
             return _run_explicit(args)
         except FileNotFoundError as exc:

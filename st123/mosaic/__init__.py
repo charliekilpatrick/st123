@@ -6,56 +6,65 @@ Submodules
 - :mod:`st123.mosaic.region` — illuminated footprints and ``S_REGION`` polygons
 - :mod:`st123.mosaic.image_overlap` — science vs reference footprint overlap
 - :mod:`st123.mosaic.mosaic` — overlap splitting, PSF matching, coadds, GWCS
+- :mod:`st123.mosaic.hst_drizzle` — HST AstroDrizzle helpers
 
-Heavy symbols from :mod:`st123.mosaic.mosaic` are resolved lazily so importing
-footprint helpers does not require optional stack packages (``ccdproc``, etc.).
-HST AstroDrizzle helpers live in :mod:`st123.mosaic.hst_drizzle`.
+All public symbols are lazy so console scripts can import a single submodule
+(e.g. ``hst_drizzle``) without loading DrizzlePac / JWST resample stacks.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from st123.mosaic.hst_drizzle import (
-    drizzle_filter_group,
-    drizzle_project,
-    subtract_per_chip_sky,
-    group_hst_frames,
-    unify_hst_astrometric_frame,
-)
-from st123.mosaic.image_overlap import (
-    AreaMetrics,
-    BestOverlap,
-    MirIFootprint,
-    OverlapResult,
-    ScienceFootprint,
-    compute_cumulative_overlap_fraction,
-    compute_overlap,
-    find_best_refs,
-    load_header_s_region,
-    overlap_area_pixels,
-    polygon_area,
-)
-from st123.mosaic.region import (
-    SRegionPolygon,
-    auto_bridge_pixels,
-    default_adjacency_pixels,
-    expand_illuminated_region,
-    find_dq_hdu,
-    find_image_hdu,
-    illuminated_mask,
-    illuminated_mask_from_dq,
-    illuminated_s_region_from_fits,
-    illuminated_s_region_string,
-    infer_coordinate_frame,
-    mask_to_pixel_polygon,
-    pixel_polygon_to_s_region,
-    save_illuminated_region_plot,
-    select_right_illuminated_component,
-)
-
-_MOSAIC_LAZY = frozenset(
+_HST_EXPORTS = frozenset(
     {
+        'drizzle_filter_group',
+        'drizzle_project',
+        'drizzle_project_boxed',
+        'subtract_per_chip_sky',
+        'group_hst_frames',
+        'unify_hst_astrometric_frame',
+    }
+)
+_OVERLAP_EXPORTS = frozenset(
+    {
+        'AreaMetrics',
+        'BestOverlap',
+        'MirIFootprint',
+        'OverlapResult',
+        'ScienceFootprint',
+        'compute_cumulative_overlap_fraction',
+        'compute_overlap',
+        'find_best_refs',
+        'load_header_s_region',
+        'overlap_area_pixels',
+        'polygon_area',
+    }
+)
+_REGION_EXPORTS = frozenset(
+    {
+        'SRegionPolygon',
+        'auto_bridge_pixels',
+        'default_adjacency_pixels',
+        'expand_illuminated_region',
+        'find_dq_hdu',
+        'find_image_hdu',
+        'illuminated_mask',
+        'illuminated_mask_from_dq',
+        'illuminated_s_region_from_fits',
+        'illuminated_s_region_string',
+        'infer_coordinate_frame',
+        'mask_to_pixel_polygon',
+        'pixel_polygon_to_s_region',
+        'save_illuminated_region_plot',
+        'select_right_illuminated_component',
+    }
+)
+_MOSAIC_EXPORTS = frozenset(
+    {
+        'FULL_GROUP_LABEL',
+        'MosaicBox',
+        'MosaicPlan',
         'apply_wcs_to_coadd',
         'assign_gwcs',
         'coadd',
@@ -70,81 +79,61 @@ _MOSAIC_LAZY = frozenset(
         'edit_spec_groups',
         'find_optimal_wcs',
         'get_pgons',
+        'is_hst_mosaic_instrument',
+        'is_jwst_mosaic_instrument',
+        'mosaic_box_dirname',
+        'mosaic_coadd_basename',
+        'mosaic_hst_coadd_basename',
         'mosaic_pixel_scale_arcsec',
         'mp_init',
+        'plan_mosaic_boxes',
+        'plan_existing_box',
+        'plan_centered_box',
+        'build_centered_stamp_wcs',
         'rescale_wcs_to_pixel_scale',
+        'slice_box_wcs',
+        'filter_frames_overlapping_box',
+        'STAMP_WCS_BASENAME',
+        'assign_stable_box_ids',
+        'ensure_box_stamp_wcs',
+        'load_stamp_wcs',
+        'local_bbox_for_wcs',
+        'stamp_sky_center',
+        'stamp_sky_polygon',
+        'write_stamp_wcs',
         'split_observations',
         'update_path',
         'update_photmjsr',
         'write_dolphot_frame_list',
+        'unify_jwst_astrometric_frame',
+        'harmonize_jwst_frames_to_ref',
     }
 )
 
-__all__ = [
-    'AreaMetrics',
-    'BestOverlap',
-    'MirIFootprint',
-    'OverlapResult',
-    'SRegionPolygon',
-    'ScienceFootprint',
-    'apply_wcs_to_coadd',
-    'assign_gwcs',
-    'auto_bridge_pixels',
-    'coadd',
-    'compute_cumulative_overlap_fraction',
-    'compute_overlap',
-    'convolve_images',
-    'copy_files',
-    'create_ccddata',
-    'create_coadd_mosaic',
-    'create_default_mosaic',
-    'create_dirs',
-    'create_gwcs',
-    'create_psf_kernel',
-    'default_adjacency_pixels',
-    'drizzle_filter_group',
-    'drizzle_project',
-    'edit_spec_groups',
-    'subtract_per_chip_sky',
-    'unify_hst_astrometric_frame',
-    'expand_illuminated_region',
-    'find_best_refs',
-    'find_dq_hdu',
-    'find_image_hdu',
-    'find_optimal_wcs',
-    'get_pgons',
-    'group_hst_frames',
-    'illuminated_mask',
-    'illuminated_mask_from_dq',
-    'illuminated_s_region_from_fits',
-    'illuminated_s_region_string',
-    'infer_coordinate_frame',
-    'load_header_s_region',
-    'mask_to_pixel_polygon',
-    'mosaic_pixel_scale_arcsec',
-    'mp_init',
-    'overlap_area_pixels',
-    'pixel_polygon_to_s_region',
-    'polygon_area',
-    'rescale_wcs_to_pixel_scale',
-    'save_illuminated_region_plot',
-    'select_right_illuminated_component',
-    'split_observations',
-    'update_path',
-    'update_photmjsr',
-    'write_dolphot_frame_list',
-]
+__all__ = sorted(
+    _HST_EXPORTS | _OVERLAP_EXPORTS | _REGION_EXPORTS | _MOSAIC_EXPORTS
+)
 
 
 def __getattr__(name: str) -> Any:
-    if name in _MOSAIC_LAZY:
-        from st123.mosaic import mosaic as mosaic_mod
+    if name in _HST_EXPORTS:
+        from st123.mosaic import hst_drizzle as _mod
 
-        value = getattr(mosaic_mod, name)
-        globals()[name] = value
-        return value
+        return getattr(_mod, name)
+    if name in _OVERLAP_EXPORTS:
+        from st123.mosaic import image_overlap as _mod
+
+        return getattr(_mod, name)
+    if name in _REGION_EXPORTS:
+        from st123.mosaic import region as _mod
+
+        return getattr(_mod, name)
+    if name in _MOSAIC_EXPORTS:
+        from st123.mosaic import mosaic as _mod
+
+        return getattr(_mod, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    return list(__all__)

@@ -43,7 +43,10 @@ requires_ngc3310 = pytest.mark.skipif(
 
 EXPECTED_NIRCAM_JHAT_COUNT = 80
 EXPECTED_MIRI_JHAT_COUNT = 36
-EXPECTED_JHAT_COUNT = EXPECTED_NIRCAM_JHAT_COUNT + EXPECTED_MIRI_JHAT_COUNT
+EXPECTED_JWST_JHAT_COUNT = EXPECTED_NIRCAM_JHAT_COUNT + EXPECTED_MIRI_JHAT_COUNT
+# Legacy shared reduction/jhat/ may also hold HST JHAT products.
+EXPECTED_HST_JHAT_COUNT = 30  # ACS + WFC3 + WFPC2 on this host
+EXPECTED_JHAT_COUNT = EXPECTED_JWST_JHAT_COUNT + EXPECTED_HST_JHAT_COUNT
 EXPECTED_PHOT_NIRCAM = EXPECTED_NIRCAM_JHAT_COUNT + 1  # jhat + coadd
 EXPECTED_SW_COADD_FILTER = 'f150w2'
 
@@ -102,12 +105,13 @@ def test_mosaic_main_finds_jhat_under_reduction_not_project_root(tmp_path: Path)
     fake.write_text('x')
 
     with patch(
-        'st123.scripts.mosaic.input_list', side_effect=RuntimeError('STOP')
-    ) as mock_input:
+        'st123.mosaic.mosaic.plan_mosaic_boxes',
+        side_effect=RuntimeError('STOP'),
+    ) as mock_plan:
         with pytest.raises(RuntimeError, match='STOP'):
             mosaic_script.main(['--base-dir', str(project), '--ncores', '1'])
 
-    files = mock_input.call_args.args[0]
+    files = mock_plan.call_args.args[1]
     assert len(files) == 1
     assert Path(files[0]).resolve() == fake.resolve()
     assert 'reduction' in Path(files[0]).parts
@@ -259,11 +263,14 @@ def test_ngc3310_jhat_inventory_for_mosaic():
     files = sorted(NGC3310_JHAT.glob('*jhat.fits'))
     nircam = [p for p in files if 'nrc' in p.name.lower()]
     miri = [p for p in files if 'mir' in p.name.lower()]
+    jwst = nircam + miri
     assert len(nircam) == EXPECTED_NIRCAM_JHAT_COUNT
     assert len(miri) == EXPECTED_MIRI_JHAT_COUNT
+    assert len(jwst) == EXPECTED_JWST_JHAT_COUNT
     assert len(files) == EXPECTED_JHAT_COUNT
-    table = input_list([str(p) for p in files])
-    assert len(table) == EXPECTED_JHAT_COUNT
+    # Mosaic filter expectations are JWST-driven.
+    table = input_list([str(p) for p in jwst])
+    assert len(table) == EXPECTED_JWST_JHAT_COUNT
     assert set(table['group']) == {0}
     filters = {str(f) for f in table['filter']}
     assert EXPECTED_SW_COADD_FILTER in filters

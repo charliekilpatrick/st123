@@ -74,6 +74,8 @@ image-overlap = "st123.scripts.image_overlap:main"
 region = "st123.scripts.region:main"
 catalog = "st123.scripts.catalog:main"
 dolphot-prep = "st123.scripts.dolphot:main"
+run-dolphot = "st123.scripts.run_dolphot:main"
+dolphot-warmstart-prep = "st123.scripts.dolphot_warmstart:main"
 dolphot-warmstart = "st123.scripts.dolphot_warmstart:main"
 coadd-phot = "st123.scripts.coadd_phot:main"
 

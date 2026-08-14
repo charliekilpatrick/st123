@@ -79,7 +79,6 @@ from st123.utils.logging import (  # noqa: E402
 # Import the science stack quietly: these packages print banners and emit
 # import-time log records that break stpipe handlers inside spawn workers.
 with suppress_output():
-    from astroquery.gaia import Gaia  # noqa: E402
     from jhat import jwst_photclass, st_wcs_align  # noqa: E402
     from jwst.associations import asn_from_list  # noqa: E402
     from jwst.associations.lib.rules_level3_base import (  # noqa: E402
@@ -87,6 +86,11 @@ with suppress_output():
     )
     from jwst.datamodels import ImageModel  # noqa: E402
     from jwst.pipeline import calwebb_image3  # noqa: E402
+
+# JHAT's stock Gaia path uses ESA TAP; force Vizier for all JWST align paths.
+from st123.alignment.gaia_catalog import install_jhat_gaia_vizier_patch  # noqa: E402
+
+install_jhat_gaia_vizier_patch()
 
 from st123.mosaic.region import SRegionPolygon  # noqa: E402
 from st123.utils.helpers import (  # noqa: E402
@@ -96,8 +100,10 @@ from st123.utils.helpers import (  # noqa: E402
 )
 from st123.utils.compatibility import patch_jwst_for_photutils3  # noqa: E402
 from st123.utils.settings import (  # noqa: E402
+    CROWDED_JHAT_NBRIGHT,
     DEFAULT_MAX_REFERENCE_DISPERSION_MAS,
     FILTER_MAX_REFERENCE_DISPERSION_MAS,
+    crowded_jwst_params,
     relaxed_gaia_params,
     relaxed_jwst_params,
     strict_gaia_params,
@@ -195,7 +201,11 @@ DEFAULT_CALIBRATOR_SETTINGS = CalibratorSettings()
 # ~20-star solutions that looked good vs the refined subset (JWDISPM ~25 mas)
 # while destroying dither-to-dither consistency (~300–600 mas peer offsets).
 # Pre-align pipeline WCSs already agree at ~20 mas; peer QA below recovers
-# that when REFERENCE overfits.
+# that when REFERENCE overfits. Crowded/bright nuclei (e.g. M82) additionally
+# use the ``crowded_jwst_params`` retry in :func:`align_jwst_image`.
+# Keep global F770W cuts close to the proven baseline. Bright/crowded nuclei
+# are handled by the ``crowded_jwst_params`` retry in :func:`align_jwst_image`
+# rather than starving all F770W frames of calibrators.
 F770W_CALIBRATOR_SETTINGS = CalibratorSettings(
     nbright=200,
     refine_sigma=2.0,
@@ -321,6 +331,21 @@ class SuccessfulAlignment:
     original_ref: str
     aligned_to: str
     photfile: str | None = None
+    # True when this parent is a PENDING REFERENCE quality-hold used only to
+    # bootstrap MIRI_REL (not yet a finalized SUCCESS absolute).
+    provisional: bool = False
+
+
+# Ranking offsets for MIRI_REL parent selection (mas-equivalent score terms).
+_SAME_FILTER_PARENT_BONUS_MAS: float = -35.0
+_F770W_SEED_BONUS_MAS: float = -50.0
+_PROVISIONAL_PARENT_PENALTY_MAS: float = 55.0
+# Reject provisional parents above the filter REFERENCE threshold whenever at
+# least one finalized SUCCESS parent is available.
+_PROVISIONAL_ABOVE_THRESHOLD_PENALTY_MAS: float = 200.0
+# F770W mean/median skew: hold REFERENCE when mean is inflated vs median.
+F770W_MEAN_MEDIAN_SKEW_RATIO: float = 1.5
+F770W_SKEW_MEAN_FLOOR_FRAC: float = 0.7
 
 
 def filter_wavelength_um(filter_name: str) -> float:
@@ -464,10 +489,12 @@ def rank_fallback_parents(
     Rank already-aligned MIRI parents for relative fallback.
 
     Among parents with sky overlap at or above ``min_overlap_fraction``, sort by
-    lowest ``sqrt(parent_abs**2 + assume_relative_mas**2) +
-    wavelength_penalty_mas_per_um * |dlambda|``, then closest wavelength, then
-    largest overlap. This prefers high-quality parents without favouring
-    arbitrarily blue ones that often fail matching across large wavelength gaps.
+    lowest estimated absolute score with these preferences:
+    - same-filter SUCCESS parents
+    - F770W seed parents for redder targets
+    - finalized (non-provisional) parents over PENDING REFERENCE holds
+    - then ``sqrt(parent_abs**2 + assume_relative_mas**2) +
+      wavelength_penalty * |dlambda|``, closest wavelength, largest overlap
 
     Parameters
     ----------
@@ -494,7 +521,11 @@ def rank_fallback_parents(
     if not successes:
         return []
 
+    target_filt = str(filter_name or '').upper().split('_', 1)[0]
     target_wl = filter_wavelength_um(filter_name)
+    thr = max_reference_dispersion_mas(filter_name)
+    has_finalized = any(not p.provisional for p in successes)
+    f770_wl = filter_wavelength_um('F770W')
     ranked: list[tuple[float, float, float, SuccessfulAlignment]] = []
     for parent in successes:
         if parent.miri_path == miri_path:
@@ -505,11 +536,34 @@ def rank_fallback_parents(
             continue
         if frac < min_overlap_fraction:
             continue
+        # Skip provisional parents above the filter threshold when a finalized
+        # SUCCESS parent exists — avoids inheriting inflated absolute scores.
+        if (
+            parent.provisional
+            and has_finalized
+            and thr is not None
+            and float(parent.dispersion_mas) > float(thr)
+        ):
+            continue
         est_abs = combine_dispersion_mas(
             float(parent.dispersion_mas), float(assume_relative_mas)
         )
         dlam = abs(parent.wavelength_um - target_wl)
         score = est_abs + float(wavelength_penalty_mas_per_um) * dlam
+        parent_filt = str(parent.filter or '').upper().split('_', 1)[0]
+        if parent_filt == target_filt:
+            score += _SAME_FILTER_PARENT_BONUS_MAS
+        # Redder-than-F770W frames should prefer an F770W absolute seed.
+        if target_wl > f770_wl + 0.05:
+            if parent_filt == 'F770W':
+                score += _F770W_SEED_BONUS_MAS
+            elif parent.wavelength_um + 0.05 < f770_wl:
+                # Prefer F770W over much-bluer seeds when both overlap.
+                score += 8.0
+        if parent.provisional:
+            score += _PROVISIONAL_PARENT_PENALTY_MAS
+            if thr is not None and float(parent.dispersion_mas) > float(thr):
+                score += _PROVISIONAL_ABOVE_THRESHOLD_PENALTY_MAS
         ranked.append((score, dlam, -frac, parent))
 
     if not ranked:
@@ -519,6 +573,160 @@ def rank_fallback_parents(
     for _score, _dlam, neg_frac, parent in ranked[: max(1, int(max_parents))]:
         out.append((parent, -neg_frac))
     return out
+
+
+def build_miri_rel_parent_pool(
+    filter_name: str,
+    successes: list[SuccessfulAlignment],
+    row_by_miri: dict[str, AlignmentSummaryRow],
+    pending_paths: set[str] | list[str],
+) -> list[SuccessfulAlignment]:
+    """
+    Build the MIRI_REL parent pool: finalized SUCCESS, then safe provisionals.
+
+    Provisional PENDING REFERENCE holds are included only when they meet the
+    filter dispersion threshold, or when no finalized parents exist yet
+    (same-filter bootstrap).
+
+    Parameters
+    ----------
+    filter_name : str
+        Current filter wave.
+    successes : list of SuccessfulAlignment
+        Finalized SUCCESS parents (any filter wave so far).
+    row_by_miri : dict
+        Live summary rows keyed by MIRI path.
+    pending_paths : set or list of str
+        MIRI paths in the current filter wave.
+
+    Returns
+    -------
+    list of SuccessfulAlignment
+        Deduplicated parent pool (finalized entries win on path clashes).
+    """
+    thr = max_reference_dispersion_mas(filter_name)
+    finalized = [p for p in successes if not p.provisional]
+    # Refresh provisional flag on any SUCCESS that somehow still carries it.
+    for parent in finalized:
+        parent.provisional = False
+
+    provisionals = provisional_fallback_parents_from_holds(
+        filter_name, row_by_miri, pending_paths
+    )
+    safe_prov: list[SuccessfulAlignment] = []
+    for parent in provisionals:
+        parent.provisional = True
+        if thr is None or float(parent.dispersion_mas) <= float(thr):
+            safe_prov.append(parent)
+        elif not finalized:
+            # Bootstrap only: whole wave held / no SUCCESS yet.
+            safe_prov.append(parent)
+
+    seen: dict[str, SuccessfulAlignment] = {}
+    for parent in list(finalized) + safe_prov:
+        seen.setdefault(parent.miri_path, parent)
+    return list(seen.values())
+
+
+def repropagate_miri_rel_absolutes(
+    successes: list[SuccessfulAlignment],
+    row_by_miri: dict[str, AlignmentSummaryRow],
+    rows: list[AlignmentSummaryRow],
+) -> int:
+    """
+    Recompute MIRI_REL absolute dispersions after parent absolutes improve.
+
+    Children that aligned to a provisional / early parent keep an inflated
+    ``JWDISPM`` = √(parent₀² + rel²) even after the parent later lands a better
+    absolute. This rewrites headers, summary rows, and ``successes`` from the
+    stored ``JWDISPR`` / ``relative_dispersion_mas`` and the parent's current
+    absolute — WCS is unchanged.
+
+    Parameters
+    ----------
+    successes : list of SuccessfulAlignment
+        Live SUCCESS parents (updated in place).
+    row_by_miri : dict
+        Summary rows keyed by MIRI path (updated in place).
+    rows : list of AlignmentSummaryRow
+        Ordered summary rows (updated in place).
+
+    Returns
+    -------
+    int
+        Number of child frames whose absolute dispersion decreased.
+    """
+    by_jhat: dict[str, SuccessfulAlignment] = {}
+    by_miri: dict[str, SuccessfulAlignment] = {}
+    for parent in successes:
+        by_jhat[str(Path(parent.jhat_path).resolve())] = parent
+        by_miri[parent.miri_path] = parent
+
+    n_updated = 0
+    # Iterate to convergence for short MIRI_REL chains (parent→child→…).
+    for _ in range(max(1, len(successes))):
+        changed = False
+        for child in list(successes):
+            if str(child.align_mode).upper() != 'MIRI_REL':
+                continue
+            parent = by_jhat.get(str(Path(child.aligned_to).resolve()))
+            if parent is None:
+                continue
+            rel = float(child.relative_dispersion_mas)
+            # Prefer JWDISPR from the product when present.
+            try:
+                with fits.open(child.jhat_path, memmap=True) as hdul:
+                    jwdispr = hdul[0].header.get('JWDISPR')
+                if jwdispr is not None:
+                    rel_hdr = float(jwdispr) * 1000.0
+                    if math.isfinite(rel_hdr) and rel_hdr > 0:
+                        rel = rel_hdr
+            except Exception:
+                pass
+            new_abs = combine_dispersion_mas(float(parent.dispersion_mas), rel)
+            old_abs = float(child.dispersion_mas)
+            if not math.isfinite(new_abs) or new_abs >= old_abs - 0.05:
+                continue
+            write_alignment_provenance(
+                child.jhat_path,
+                align_mode='MIRI_REL',
+                original_ref=str(parent.original_ref or child.original_ref),
+                aligned_to=child.aligned_to,
+                relative_dispersion_mas=rel,
+                absolute_dispersion_mas=new_abs,
+                n_calibrators=(
+                    row_by_miri[child.miri_path].n_calibrators
+                    if child.miri_path in row_by_miri
+                    and isinstance(row_by_miri[child.miri_path].n_calibrators, int)
+                    else None
+                ),
+            )
+            child.dispersion_mas = new_abs
+            child.relative_dispersion_mas = rel
+            child.original_ref = str(parent.original_ref or child.original_ref)
+            child.provisional = False
+            row = row_by_miri.get(child.miri_path)
+            if row is not None and isinstance(row.dispersion_mas, float):
+                row.dispersion_mas = new_abs
+                row.original_ref = child.original_ref
+                row_by_miri[child.miri_path] = row
+                for idx, existing in enumerate(rows):
+                    if existing.miri_path == child.miri_path:
+                        rows[idx] = row
+                        break
+            by_jhat[str(Path(child.jhat_path).resolve())] = child
+            by_miri[child.miri_path] = child
+            n_updated += 1
+            changed = True
+            logger.info(
+                f'Repropagated MIRI_REL absolute {Path(child.miri_path).name}: '
+                f'{old_abs:.2f} → {new_abs:.2f} mas '
+                f'(parent {Path(parent.miri_path).name} '
+                f'abs={parent.dispersion_mas:.2f}, rel={rel:.2f})'
+            )
+        if not changed:
+            break
+    return n_updated
 
 
 def select_fallback_parent(
@@ -1292,9 +1500,16 @@ def generate_level3_mosaic(
     image3.resample.pixfrac = 1.0
     image3.weight_type = 'ivm'
 
+    mosaic_path = f'{outdir_level3}/{filter_name}_i2d.fits'
+    logger.info(
+        'Image3Pipeline.run(%s) → %s (resample + source catalog)...',
+        asn_file,
+        mosaic_path,
+    )
     with capture_output():
         image3.run(asn_file)
-    return f'{outdir_level3}/{filter_name}_i2d.fits'
+    logger.info('Image3Pipeline finished: %s', mosaic_path)
+    return mosaic_path
 
 
 def create_alignment_mosaic(
@@ -1347,16 +1562,27 @@ def create_alignment_mosaic(
     if align_table is None:
         raise ValueError('No compatible alignment filter found')
 
+    logger.info(
+        'Visit mosaic: filter=%s, %d frame(s), align_to=%s, outdir=%s',
+        align_filter or '(auto)',
+        len(align_table),
+        'Gaia' if align_to == 'gaia' else align_to,
+        outdir,
+    )
+
     # Alignment groups pick the correct reference image for each module.
+    logger.info('Building alignment groups / reference images...')
     align_table = add_alignment_groups(align_table)
     repo = str(_resolve_repo_root())
     jobs = []
+    n_skip = 0
     for row in align_table:
         image = row['image']
         jhat_dest = os.path.join(
             outdir, os.path.basename(image.replace('cal.fits', 'jhat.fits'))
         )
         if os.path.exists(jhat_dest):
+            n_skip += 1
             continue
         ref_image = row['ref_img']
         phot_sidecar = ref_image.replace('.fits', '.phot.txt')
@@ -1376,6 +1602,12 @@ def create_alignment_mosaic(
                 filter=str(row.get('filter', '')),
             )
         )
+    logger.info(
+        'Relative JHAT: %d to run, %d already present (workers=%d)',
+        len(jobs),
+        n_skip,
+        max(1, int(ncores)),
+    )
     results = _run_jobs_parallel(
         jobs,
         run_visit_align_job,
@@ -1390,8 +1622,18 @@ def create_alignment_mosaic(
         os.path.join(outdir, os.path.basename(i.replace('cal.fits', 'jhat.fits')))
         for i in align_table['image']
     ]
+    logger.info(
+        'Starting Level-3 Image3 mosaic from %d JHAT frame(s) '
+        '(JWST pipeline stdout suppressed; this often takes several minutes)...',
+        len(inputfiles),
+    )
     mosaic_name = generate_level3_mosaic(inputfiles, outdir)
+    logger.info('Level-3 mosaic written: %s', mosaic_name)
 
+    logger.info(
+        'Aligning Level-3 mosaic to %s (JHAT; can take several minutes)...',
+        'Gaia' if align_to == 'gaia' else align_to,
+    )
     guess_offset = align_jwst_image(
         align_image=mosaic_name,
         outdir=outdir,
@@ -1411,116 +1653,12 @@ def create_alignment_mosaic(
     return aligned_mosaic, guess_offset, n_failures
 
 
-def cut_gaia_sources(image: str, table_gaia: Table) -> Table:
-    """
-    Drop Gaia sources that fall outside an image.
-
-    Parameters
-    ----------
-    image : str
-        Image file name.
-    table_gaia : astropy.table.Table
-        Gaia table with ``ra`` / ``dec`` columns.
-
-    Returns
-    -------
-    astropy.table.Table
-        Sources inside the image bounds.
-    """
-    im = fits.open(image)
-    hdr = im['SCI'].header
-    w = wcs.WCS(hdr)
-    nx, ny = hdr['NAXIS1'], hdr['NAXIS2']
-
-    pix_coords = w.all_world2pix(
-        np.array(table_gaia['ra']), np.array(table_gaia['dec']), 0
-    )
-    im_x, im_y = pix_coords[0], pix_coords[1]
-    mask = (im_x > 0) & (im_x < nx) & (im_y > 0) & (im_y < ny)
-
-    return table_gaia[mask]
-
-
-def query_gaia(
-    image: str,
-    dr: str = 'gaiadr3',
-    telescope: str = 'jwst',
-    save_file: str | bool = False,
-) -> Table:
-    """
-    Query Gaia for sources covering an image.
-
-    Parameters
-    ----------
-    image : str
-        Image file name.
-    dr : str, optional
-        Gaia data release table prefix.
-    telescope : str, optional
-        ``'jwst'`` uses the ImageModel GWCS; ``'hst'`` uses the SCI WCS.
-    save_file : str or bool, optional
-        Path to save the ``ra``/``dec`` list, or ``False`` to skip.
-
-    Returns
-    -------
-    astropy.table.Table
-        Gaia sources inside the image.
-    """
-    im = fits.open(image)
-    hdr = im['SCI'].header
-    nx = hdr['NAXIS1']
-    ny = hdr['NAXIS2']
-
-    if telescope == 'jwst':
-        image_model = ImageModel(im)
-
-        def pix_to_world(x, y):
-            return image_model.meta.wcs(x, y)
-
-        ra0, dec0 = pix_to_world(nx / 2.0 - 1, ny / 2.0 - 1)
-    elif telescope == 'hst':
-        w = wcs.WCS(hdr)
-
-        def pix_to_world(x, y):
-            return w.pixel_to_world_values(x, y)
-
-        ra0, dec0 = pix_to_world(nx / 2.0 - 1, ny / 2.0 - 1)
-    else:
-        raise ValueError(f'Unsupported telescope: {telescope}')
-
-    coord0 = SkyCoord(ra0, dec0, unit=(u.deg, u.deg), frame='icrs')
-    radius_deg = []
-    for x in [0, nx - 1]:
-        for y in [0, ny - 1]:
-            ra, dec = pix_to_world(x, y)
-            radius_deg.append(
-                coord0.separation(
-                    SkyCoord(ra, dec, unit=(u.deg, u.deg), frame='icrs')
-                ).deg
-            )
-    radius_deg = np.amax(radius_deg) * 1.1
-
-    query = (
-        "SELECT * FROM {}.gaia_source WHERE CONTAINS(POINT('ICRS',"
-        '{}.gaia_source.ra,{}.gaia_source.dec),'
-        "CIRCLE('ICRS',{},{} ,{}))=1;".format(dr, dr, dr, ra0, dec0, radius_deg)
-    )
-
-    job = Gaia.launch_job_async(query)
-    tb_gaia = job.get_results()
-    pm_cols = ('pmra', 'pmdec', 'pmra_error', 'pmdec_error')
-    if all(col in tb_gaia.colnames for col in pm_cols):
-        tb_gaia['pm/pmerr'] = (tb_gaia['pmra'] ** 2 + tb_gaia['pmdec'] ** 2) / (
-            tb_gaia['pmra_error'] ** 2 + tb_gaia['pmdec_error'] ** 2
-        )
-    tb_gaia = cut_gaia_sources(image, tb_gaia)
-    logger.info('Number of Gaia stars:', len(tb_gaia))
-
-    if save_file:
-        logger.info(f'Saving Gaia query to {save_file}')
-        np.savetxt(save_file, np.array(tb_gaia[['ra', 'dec']]), fmt='%s')
-
-    return tb_gaia
+# Gaia catalog helpers live in :mod:`st123.alignment.gaia_catalog` (Vizier
+# default) so HST scoring does not import the JWST stack just to query Gaia.
+from st123.alignment.gaia_catalog import (  # noqa: E402
+    cut_gaia_sources,
+    query_gaia,
+)
 
 
 def expand_mask(
@@ -1898,6 +2036,71 @@ def guess_shift(align_image, ref_table, radius_px=50, res=5, sig=2, plot=False):
     return best_x, best_y
 
 
+def assess_field_brightness(
+    align_image: str,
+    *,
+    bright_median: float = 80.0,
+    bright_p99: float = 500.0,
+    bright_frac: float = 0.20,
+) -> dict[str, Any]:
+    """
+    Estimate whether a JWST/MIRI SCI frame is extremely bright or crowded.
+
+    Used to prefer a stricter / brighter-source JHAT retry before the existing
+    relaxed-parameter fallback (which otherwise adds faint PAH / arm structure
+    as false calibrators in nuclei like M82 F770W).
+
+    Parameters
+    ----------
+    align_image : str
+        Path to a ``*_cal.fits`` (or similar) with a SCI extension.
+    bright_median, bright_p99 : float
+        SCI thresholds (MJy/sr-like native units) flagging a bright field.
+    bright_frac : float
+        Minimum fraction of finite pixels above ``max(50, 5*median)`` to flag
+        extended bright structure.
+
+    Returns
+    -------
+    dict
+        ``bright`` (bool) plus diagnostic ``median``, ``p99``, ``hot_frac``.
+    """
+    try:
+        with fits.open(align_image, memmap=True) as hdul:
+            sci = np.asarray(hdul['SCI'].data, dtype=np.float64)
+    except Exception:
+        return {
+            'bright': False,
+            'median': float('nan'),
+            'p99': float('nan'),
+            'hot_frac': float('nan'),
+        }
+    finite = np.isfinite(sci)
+    if finite.sum() < 1000:
+        return {
+            'bright': False,
+            'median': float('nan'),
+            'p99': float('nan'),
+            'hot_frac': float('nan'),
+        }
+    vals = sci[finite]
+    med = float(np.median(vals))
+    p99 = float(np.percentile(vals, 99.0))
+    thr = max(50.0, 5.0 * max(med, 0.0))
+    hot_frac = float(np.mean(vals > thr))
+    bright = bool(
+        med >= float(bright_median)
+        or p99 >= float(bright_p99)
+        or hot_frac >= float(bright_frac)
+    )
+    return {
+        'bright': bright,
+        'median': med,
+        'p99': p99,
+        'hot_frac': hot_frac,
+    }
+
+
 def run_jhat(
     align_image,
     outdir,
@@ -1986,11 +2189,17 @@ def align_jwst_image(
     jhat_params=None,
 ):
     """
-    Align an image with JHAT, retrying with relaxed parameters when needed.
+    Align an image with JHAT, retrying when the first solution is poor.
 
-    Three attempts are made in order: strict parameters, relaxed parameters,
-    and relaxed parameters seeded with a grid-searched pixel shift. The first
-    solution within one pixel of the reference wins.
+    Attempts, in order:
+
+    1. Strict parameters (always first so globally bright galaxies do not
+       starve calibrators off-nucleus).
+    2. Crowded/bright fallback when the strict residual is still high —
+       fewer, brighter, high-SNR calibrators (before relaxing, which would
+       add faint PAH / arm structure).
+    3. Relaxed parameters.
+    4. Relaxed parameters seeded with a grid-searched pixel shift.
 
     Parameters
     ----------
@@ -2019,9 +2228,8 @@ def align_jwst_image(
     soft_fail_pix : float
         Median-residual threshold in detector pixels (default 2.0).
     jhat_params : dict or None
-        Optional overrides merged into ``strict_jwst_params`` /
-        ``strict_gaia_params`` (e.g. tighter ``objmag_lim`` /
-        ``sharpness_lim`` for F770W).
+        Optional overrides merged into the JHAT parameter dictionaries
+        (e.g. tighter ``objmag_lim`` / ``sharpness_lim`` for F770W).
 
     Returns
     -------
@@ -2032,11 +2240,38 @@ def align_jwst_image(
         f'Aligning {os.path.basename(align_image)} to '
         f"{'Gaia' if gaia else photfilename.replace('.phot.txt', '.fits')}"
     )
-    params = dict(strict_gaia_params if gaia else strict_jwst_params)
-    if jhat_params:
-        params.update(jhat_params)
-    if plot:
-        params['showplots'] = 2
+    field = assess_field_brightness(align_image)
+    if field.get('bright'):
+        logger.info(
+            'Bright/crowded SCI detected for %s '
+            '(median=%.3g p99=%.3g hot_frac=%.3f); prefer bright-calibrator cuts',
+            os.path.basename(align_image),
+            field.get('median', float('nan')),
+            field.get('p99', float('nan')),
+            field.get('hot_frac', float('nan')),
+        )
+
+    def _base_params(kind: str) -> dict:
+        if kind == 'crowded' and not gaia:
+            p = dict(crowded_jwst_params)
+        elif kind == 'relaxed':
+            p = dict(relaxed_gaia_params if gaia else relaxed_jwst_params)
+        else:
+            p = dict(strict_gaia_params if gaia else strict_jwst_params)
+        if jhat_params:
+            # Crowded retry keeps its brighter objmag / SNR floor unless the
+            # caller override is itself stricter on those keys.
+            if kind == 'crowded':
+                for key, val in jhat_params.items():
+                    if key in ('objmag_lim', 'SNR_min', 'find_stars_threshold', 'd2d_max'):
+                        continue
+                    p[key] = val
+            else:
+                p.update(jhat_params)
+        if plot:
+            p['showplots'] = 2
+        return p
+
     try:
         wv = float(os.path.basename(align_image).split('_jhat')[0][1:4])
         factor = 2 if wv > 220 else 1
@@ -2054,16 +2289,28 @@ def align_jwst_image(
     disp_in_mu = disp_in_med = disp_fn_mu = disp_fn_med = 99.99
     guess_offset = (0, 0)
 
-    try:
+    def _attempt(
+        kind: str,
+        *,
+        nbright: int,
+        x0: float | None = None,
+        y0: float | None = None,
+        sig_clip: float | None = None,
+        track_guess: bool = False,
+    ):
+        nonlocal disp_in_mu, disp_in_med, disp_fn_mu, disp_fn_med, guess_offset
+        params = _base_params(kind)
+        xs = float(xshift if x0 is None else x0)
+        ys = float(yshift if y0 is None else y0)
         run_jhat(
             align_image=align_image,
             outdir=outdir,
             params=params,
             gaia=gaia,
             photfilename=photfilename,
-            xshift=xshift,
-            yshift=yshift,
-            Nbright=Nbright,
+            xshift=xs,
+            yshift=ys,
+            Nbright=nbright,
             verbose=verbose,
         )
         disp_in_mu, disp_in_med, disp_fn_mu, disp_fn_med = jwst_dispersion(
@@ -2072,46 +2319,54 @@ def align_jwst_image(
             photfile=photfilename,
             gaia=gaia,
             plot=plot,
-            sig=sig,
+            sig=sig if sig_clip is None else sig_clip,
         )
-        guess_offset = (0, 0)
+        guess_offset = (xs * factor, ys * factor) if track_guess else (0, 0)
+
+    # 1) Strict first (consistent across outer / nucleus fields)
+    try:
+        _attempt('strict', nbright=int(Nbright))
     except Exception:
         logger.error(traceback.format_exc())
         disp_fn_med = 99.99
 
-    # Retry with relaxed params / guess shift when the strict solution is still
-    # worse than one MIRI/NIRCam pixel. Preserve caller JHAT overrides.
-    if disp_fn_med / pixscale > retry_pix:
-        params = dict(relaxed_gaia_params if gaia else relaxed_jwst_params)
-        if jhat_params:
-            params.update(jhat_params)
-        if plot:
-            params['showplots'] = 2
+    # 2) Crowded/bright fallback before relaxing — only when needed.
+    # Use for bright/crowded SCI *or* any high residual; never as the default
+    # first attempt on globally bright galaxies.
+    if disp_fn_med / pixscale > retry_pix and not gaia:
+        why = (
+            'bright/crowded SCI'
+            if field.get('bright')
+            else f'strict residual {float(disp_fn_med) * 1000.0:.1f} mas'
+        )
+        logger.info(
+            'Retrying %s with crowded/bright calibrator cuts (%s)',
+            os.path.basename(align_image),
+            why,
+        )
         try:
-            run_jhat(
-                align_image=align_image,
-                outdir=outdir,
-                params=params,
-                gaia=gaia,
-                photfilename=photfilename,
-                xshift=xshift,
-                yshift=yshift,
-                Nbright=Nbright,
-                verbose=verbose,
+            _attempt(
+                'crowded',
+                nbright=min(int(Nbright), int(CROWDED_JHAT_NBRIGHT)),
+                sig_clip=1,
             )
-            disp_in_mu, disp_in_med, disp_fn_mu, disp_fn_med = jwst_dispersion(
-                align_image=align_image,
-                outdir=outdir,
-                photfile=photfilename,
-                gaia=gaia,
-                plot=plot,
-                sig=1,
-            )
-            guess_offset = (0, 0)
         except Exception:
             logger.error(traceback.format_exc())
             disp_fn_med = 99.99
 
+    # 3) Relaxed params when crowded/bright still fails
+    if disp_fn_med / pixscale > retry_pix:
+        logger.info(
+            'Retrying %s with relaxed JHAT parameters',
+            os.path.basename(align_image),
+        )
+        try:
+            _attempt('relaxed', nbright=int(Nbright), sig_clip=1)
+        except Exception:
+            logger.error(traceback.format_exc())
+            disp_fn_med = 99.99
+
+    # 4) Guess-shift + relaxed
     if disp_fn_med / pixscale > retry_pix:
         if gaia:
             ref_table = query_gaia(align_image)
@@ -2121,26 +2376,14 @@ def align_jwst_image(
             align_image, ref_table, radius_px=50, res=4, sig=1, plot=plot
         )
         try:
-            run_jhat(
-                align_image=align_image,
-                outdir=outdir,
-                params=params,
-                gaia=gaia,
-                photfilename=photfilename,
-                xshift=xsh,
-                yshift=ysh,
-                Nbright=Nbright,
-                verbose=verbose,
+            _attempt(
+                'relaxed',
+                nbright=int(Nbright),
+                x0=float(xsh),
+                y0=float(ysh),
+                sig_clip=1,
+                track_guess=True,
             )
-            disp_in_mu, disp_in_med, disp_fn_mu, disp_fn_med = jwst_dispersion(
-                align_image=align_image,
-                outdir=outdir,
-                photfile=photfilename,
-                gaia=gaia,
-                plot=plot,
-                sig=1,
-            )
-            guess_offset = (xsh * factor, ysh * factor)
         except Exception:
             logger.error(traceback.format_exc())
             disp_fn_med = 99.99
@@ -2178,7 +2421,7 @@ def align_jwst_image(
             )
         guess_offset = (0, 0)
 
-        shutil.copy(align_image, jhat_image)
+        safe_copy(align_image, jhat_image)
         with fits.open(jhat_image, mode='update') as filehandle:
             d_mu = finite_arcsec(disp_in_mu)
             d_med = finite_arcsec(disp_in_med)
@@ -2524,6 +2767,26 @@ def resolve_outdir(outdir: str) -> str:
     return str(path)
 
 
+def safe_copy(src: str, dest: str) -> None:
+    """
+    Copy ``src`` → ``dest``, tolerating EPERM on metadata/utime.
+
+    Shared ``alignment_output`` trees are often owned by another user: ``copy2``
+    can fail on utime/chmod even when the content is group-writable.
+    """
+    dest_path = Path(dest)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if dest_path.exists():
+        try:
+            dest_path.unlink()
+        except OSError:
+            pass
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        shutil.copyfile(src, dest)
+
+
 def stage_photfile(
     photfile: str,
     outdir: str,
@@ -2550,7 +2813,7 @@ def stage_photfile(
     dest = os.path.join(outdir, dest_name or os.path.basename(photfile))
     if os.path.exists(dest) and os.path.samefile(photfile, dest):
         return dest
-    shutil.copy2(photfile, dest)
+    safe_copy(photfile, dest)
     logger.info(f'Copied reference catalog → {dest}')
     return dest
 
@@ -2597,15 +2860,28 @@ def build_ref_catalog(
         return stage_photfile(photfile, outdir)
 
     dest_name = Path(phot_catalog_path(image, outdir)).name
-    # Do not reuse cached catalogs for i2d: they may predate the fix_phot
-    # (FITS WCS) path and silently reintroduce the GWCS coordinate bug.
-    if cache_dir is not None and not is_level3_i2d(image):
+    # Prefer a reusable cache when present. For i2d, only reuse catalogs that
+    # look like fix_phot products (enough sources); tiny/corrupt caches must
+    # not short-circuit a rebuild.
+    if cache_dir is not None:
         cache_path = Path(cache_dir).expanduser().resolve()
         cache_path.mkdir(parents=True, exist_ok=True)
         cached = cache_path / dest_name
         if cached.is_file():
-            logger.info(f'Reusing cached reference catalog: {cached}')
-            return stage_photfile(str(cached), outdir, dest_name=dest_name)
+            reuse = True
+            if is_level3_i2d(image):
+                try:
+                    n_cached = len(read_jhat_phot_table(str(cached)))
+                except Exception:
+                    n_cached = 0
+                reuse = n_cached >= 50
+                if not reuse:
+                    logger.info(
+                        f'Ignoring thin/corrupt i2d cache ({n_cached} rows): {cached}'
+                    )
+            if reuse:
+                logger.info(f'Reusing cached reference catalog: {cached}')
+                return stage_photfile(str(cached), outdir, dest_name=dest_name)
 
     dest = phot_catalog_path(image, outdir)
     logger.info(f'Running photometry on reference: {image}')
@@ -2634,8 +2910,15 @@ def build_ref_catalog(
         cache_path = Path(cache_dir).expanduser().resolve()
         cache_path.mkdir(parents=True, exist_ok=True)
         cache_dest = cache_path / Path(staged).name
-        shutil.copy2(staged, cache_dest)
-        logger.info(f'Cached reference catalog → {cache_dest}')
+        try:
+            safe_copy(staged, str(cache_dest))
+            logger.info(f'Cached reference catalog → {cache_dest}')
+        except OSError as exc:
+            # Shared caches owned by another user often reject overwrite.
+            logger.warning(
+                f'Could not update phot cache {cache_dest}: {exc}; '
+                f'continuing with staged catalog {staged}'
+            )
 
     return staged
 
@@ -3359,9 +3642,9 @@ def refine_alignment_iteratively(
         backup_jhat = jhat + '.refine_bak'
         backup_phot = align_phot + '.refine_bak'
         if os.path.exists(jhat):
-            shutil.copy2(jhat, backup_jhat)
+            safe_copy(jhat, backup_jhat)
         if os.path.exists(align_phot):
-            shutil.copy2(align_phot, backup_phot)
+            safe_copy(align_phot, backup_phot)
 
         # Only seed pixel offsets for F770W-style tight refine (hard residual
         # ceiling). Seeding large F560W XOFFSET/YOFFSET (~50–130 px) into JHAT
@@ -3406,9 +3689,9 @@ def refine_alignment_iteratively(
                 f'restoring previous JHAT products and stopping'
             )
             if os.path.exists(backup_jhat):
-                shutil.copy2(backup_jhat, jhat)
+                safe_copy(backup_jhat, jhat)
             if os.path.exists(backup_phot):
-                shutil.copy2(backup_phot, align_phot)
+                safe_copy(backup_phot, align_phot)
             for bak in (backup_jhat, backup_phot):
                 if os.path.exists(bak):
                     os.remove(bak)
@@ -3832,13 +4115,176 @@ def _normalize_align_mode(align_mode: str | None) -> str:
     return mode
 
 
+# Soft-fail sentinel written by align_jwst_image (99.99 arcsec → mas).
+SOFT_FAIL_DISPERSION_MAS: float = 99990.0
+
+
+def is_soft_fail_dispersion(dispersion_mas: float | str | None) -> bool:
+    """
+    Return whether a dispersion is the soft-fail / unusable sentinel.
+
+    Parameters
+    ----------
+    dispersion_mas : float or str or None
+        Dispersion in milliarcseconds (or non-numeric placeholder).
+
+    Returns
+    -------
+    bool
+        True when missing, non-finite, or at/above the soft-fail sentinel.
+    """
+    try:
+        value = float(dispersion_mas)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    return (not math.isfinite(value)) or value >= SOFT_FAIL_DISPERSION_MAS
+
+
+def reference_solution_usable(row: AlignmentSummaryRow) -> bool:
+    """
+    Return whether a REFERENCE row may be used as a provisional MIRI_REL parent.
+
+    Usable means a real JHAT product with a positive calibrator count and a
+    non-sentinel finite dispersion. Soft-fail copies (``JWNCAL=0`` /
+    ``99990`` mas) are never usable. Meeting ``min_calibrators`` is *not*
+    required here — see :func:`reference_solution_keepable` for final SUCCESS.
+
+    Parameters
+    ----------
+    row : AlignmentSummaryRow
+        Row to test.
+
+    Returns
+    -------
+    bool
+        True when the REFERENCE solution may parent MIRI_REL attempts.
+    """
+    if not isinstance(row.dispersion_mas, float):
+        return False
+    if is_soft_fail_dispersion(row.dispersion_mas):
+        return False
+    if not isinstance(row.n_calibrators, int) or int(row.n_calibrators) <= 0:
+        return False
+    if not row.aligned_path or str(row.aligned_path) == 'NA':
+        return False
+    return True
+
+
+def reference_solution_keepable(row: AlignmentSummaryRow) -> bool:
+    """
+    Return whether a REFERENCE hold may be finalized as SUCCESS.
+
+    Requires :func:`reference_solution_usable` plus either:
+    - ``n_calibrators >= min_calibrators`` for the filter, or
+    - absolute dispersion at or below the per-filter REFERENCE threshold
+
+    The second clause keeps sparse-but-tight solutions (common at F2100W:
+    ``n_cal`` of a few with ~20 mas residuals). High-dispersion tiny-n_cal
+    solutions (e.g. 94 mas with ``n_cal=3``) remain non-keepable so they
+    finalize as FAILURE when MIRI_REL cannot improve them.
+
+    Parameters
+    ----------
+    row : AlignmentSummaryRow
+        Row to test.
+
+    Returns
+    -------
+    bool
+        True when the REFERENCE solution may be kept as final SUCCESS.
+    """
+    if not reference_solution_usable(row):
+        return False
+    min_cal = calibrator_settings_for_filter(row.filter).min_calibrators
+    if int(row.n_calibrators) >= int(min_cal):
+        return True
+    thr = max_reference_dispersion_mas(row.filter)
+    if thr is None:
+        # F560W: no quality-hold threshold — allow sparse usable REFERENCE.
+        return True
+    return float(row.dispersion_mas) <= float(thr)
+
+
+def read_jhat_dispersion_median_mas(jhat_path: str | Path) -> float | None:
+    """
+    Read ``JWDISPD`` (median dispersion) from a JHAT product, in mas.
+
+    Parameters
+    ----------
+    jhat_path : str or pathlib.Path
+        JHAT product path.
+
+    Returns
+    -------
+    float or None
+        Median dispersion in milliarcseconds, or ``None`` if missing.
+    """
+    path = Path(jhat_path)
+    if not path.is_file():
+        return None
+    try:
+        with fits.open(path, memmap=True) as hdul:
+            val = hdul[0].header.get('JWDISPD', hdul[0].header.get('GADISPD'))
+        if val is None:
+            return None
+        med = float(val) * 1000.0
+        if not math.isfinite(med):
+            return None
+        return med
+    except Exception:
+        return None
+
+
+def f770w_reference_gate_dispersion_mas(
+    mean_mas: float,
+    median_mas: float | None,
+) -> tuple[float, str | None]:
+    """
+    Dispersion value used for F770W REFERENCE quality-hold decisions.
+
+    Uses ``max(mean, median)`` when median is available, and reports a skew
+    reason when mean ≫ median (busy PAH fields inflate the mean).
+
+    Parameters
+    ----------
+    mean_mas : float
+        ``JWDISPM`` in mas.
+    median_mas : float or None
+        ``JWDISPD`` in mas.
+
+    Returns
+    -------
+    tuple
+        ``(gate_dispersion_mas, skew_reason_or_None)``.
+    """
+    mean = float(mean_mas)
+    if median_mas is None or not math.isfinite(float(median_mas)):
+        return mean, None
+    med = float(median_mas)
+    gate = max(mean, med)
+    thr = max_reference_dispersion_mas('F770W') or 50.0
+    skew_reason = None
+    if (
+        med > 0
+        and mean > F770W_MEAN_MEDIAN_SKEW_RATIO * med
+        and mean > F770W_SKEW_MEAN_FLOOR_FRAC * float(thr)
+    ):
+        skew_reason = (
+            f'F770W mean/median skew mean={mean:.2f} med={med:.2f} mas '
+            f'(ratio>{F770W_MEAN_MEDIAN_SKEW_RATIO:.1f})'
+        )
+    return gate, skew_reason
+
+
 def _is_reference_quality_hold(row: AlignmentSummaryRow) -> bool:
     """
     Report whether a row is a REFERENCE solution held pending MIRI_REL.
 
     These rows keep finite metrics and JHAT paths so MIRI_REL can be tried.
     They are omitted from the live alignment summary until MIRI_REL finishes
-    (kept if improved) or the REFERENCE solution is restored as SUCCESS.
+    (kept as SUCCESS only when improved or when a usable REFERENCE remains
+    after a failed MIRI_REL attempt). Exhausted holds with no MIRI_REL parent
+    finalize as FAILURE.
 
     Parameters
     ----------
@@ -3857,6 +4303,61 @@ def _is_reference_quality_hold(row: AlignmentSummaryRow) -> bool:
         and bool(row.aligned_path)
         and str(row.aligned_path) != 'NA'
     )
+
+
+def provisional_fallback_parents_from_holds(
+    filter_name: str,
+    row_by_miri: dict[str, AlignmentSummaryRow],
+    pending_paths: set[str] | list[str],
+) -> list[SuccessfulAlignment]:
+    """
+    Build provisional MIRI_REL parents from usable PENDING REFERENCE holds.
+
+    When an entire filter wave is quality-held, ``successes`` is empty and
+    same-filter relative alignment would otherwise never run. Usable PENDING
+    REFERENCE products (positive calibrators, non-sentinel dispersion) are
+    exposed as provisional parents so siblings can try MIRI_REL.
+
+    Parameters
+    ----------
+    filter_name : str
+        Current filter wave.
+    row_by_miri : dict
+        Live summary rows keyed by MIRI path.
+    pending_paths : set or list of str
+        MIRI paths in the current filter wave.
+
+    Returns
+    -------
+    list of SuccessfulAlignment
+        Provisional parents (not yet final SUCCESS rows).
+    """
+    filt = str(filter_name).upper()
+    out: list[SuccessfulAlignment] = []
+    for miri in pending_paths:
+        row = row_by_miri.get(miri)
+        if row is None or not _is_reference_quality_hold(row):
+            continue
+        if str(row.filter).upper() != filt:
+            continue
+        if not reference_solution_usable(row):
+            continue
+        out.append(
+            SuccessfulAlignment(
+                miri_path=row.miri_path,
+                jhat_path=str(row.aligned_path),
+                filter=row.filter,
+                wavelength_um=filter_wavelength_um(row.filter),
+                dispersion_mas=float(row.dispersion_mas),
+                relative_dispersion_mas=float(row.dispersion_mas),
+                align_mode='REFERENCE',
+                original_ref=str(row.original_ref),
+                aligned_to=str(row.aligned_to),
+                photfile=find_aligned_photfile(str(row.aligned_path)),
+                provisional=True,
+            )
+        )
+    return out
 
 
 def harvest_alignment_metrics(
@@ -4130,9 +4631,11 @@ def discover_miri_images(data_dir: Path) -> list[str]:
     """
     Find MIRI cal images under a dataset root.
 
-    The preferred layout is
-    ``<data-dir>/JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/*_mirimage/*_cal.fits``;
-    older ``<FILTER>/<obsid>/…`` and ``<FILTER>_<obsid>/…`` trees also match.
+    Preferred layout is
+    ``<data-dir>/download/JWST/MIRI/<FILTER>/<obsid>/*mirimage*_cal.fits``
+    (flattened MAST products). Also matches legacy nested
+    ``…/mastDownload/JWST/*_mirimage/*_cal.fits`` trees and older
+    ``<FILTER>/<obsid>/…`` layouts.
 
     Non-full-frame MIRI products (subarrays / cutouts) are skipped — they are
     unsupported by ``mirimask`` and the alignment→DOLPHOT path.
@@ -4150,15 +4653,20 @@ def discover_miri_images(data_dir: Path) -> list[str]:
     data_dir = Path(data_dir)
     found: set[str] = set()
     n_skipped = 0
-    for path in data_dir.glob('**/mastDownload/JWST/*_mirimage/*_cal.fits'):
-        if not is_full_frame_miri(path):
-            n_skipped += 1
-            logger.info(
-                'Skipping non-full-frame MIRI cal (unsupported): %s',
-                path,
-            )
-            continue
-        found.add(str(path.resolve()))
+    patterns = (
+        '**/mastDownload/JWST/*_mirimage/*_cal.fits',
+        '**/MIRI/*/*/*mirimage*_cal.fits',
+    )
+    for pattern in patterns:
+        for path in data_dir.glob(pattern):
+            if not is_full_frame_miri(path):
+                n_skipped += 1
+                logger.info(
+                    'Skipping non-full-frame MIRI cal (unsupported): %s',
+                    path,
+                )
+                continue
+            found.add(str(path.resolve()))
     if n_skipped:
         logger.info(
             'Skipped %d non-full-frame MIRI cal frame(s) during discovery',
@@ -4250,7 +4758,9 @@ def filter_name_from_miri_path(miri_path: str) -> str | None:
     """
     Infer the MIRI filter from a MAST download path.
 
-    Supports ``.../JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/...``,
+    Supports flattened
+    ``.../JWST/MIRI/<FILTER>/<obsid>/<filename>``, nested
+    ``.../JWST/MIRI/<FILTER>/<obsid>/mastDownload/JWST/...``,
     ``.../<FILTER>/<obsid>/mastDownload/JWST/...``, and
     ``.../<FILTER>_<obsid>/mastDownload/JWST/...``.
 
@@ -4265,6 +4775,13 @@ def filter_name_from_miri_path(miri_path: str) -> str | None:
         Filter name, or ``None`` when the path has no filter segment.
     """
     parts = Path(miri_path).parts
+    # Flat canonical: …/MIRI/<FILTER>/<obsid>/<file>
+    for i, part in enumerate(parts):
+        if part.upper() != 'MIRI' or i + 1 >= len(parts):
+            continue
+        tok = str(parts[i + 1])
+        if _looks_like_filter(tok):
+            return tok.upper()
     for i, part in enumerate(parts):
         if part != 'mastDownload' or i < 1:
             continue
@@ -4942,6 +5459,34 @@ def _format_worker_done(result) -> str:
     if status in ('SKIP', 'REJECTED'):
         return f'DONE  {base}  {filt}  {status}'
     return f'DONE  {base}  {filt}  FAILURE'
+
+
+def _log_align_worker_detail(
+    result,
+    *,
+    kept_reference: bool = False,
+) -> None:
+    """
+    Log a worker ``error`` detail string at an appropriate level.
+
+    REFERENCE quality-holds and other deferred fallbacks are INFO (recoverable).
+    ERROR is reserved for terminal FAILURE after fallbacks are exhausted.
+    """
+    if not result.error:
+        return
+    status = str(result.row.get('status', '')).upper()
+    err = str(result.error)
+    recoverable = (
+        kept_reference
+        or status == 'PENDING'
+        or status in {'SUCCESS', 'SKIP', 'REJECTED'}
+        or result.ok
+        or 'trying MIRI_REL' in err
+    )
+    if recoverable:
+        logger.info('  detail: %s', err)
+        return
+    logger.error('  detail: %s', err)
 
 
 def _needs_miri_fallback(row: AlignmentSummaryRow) -> bool:
@@ -5639,26 +6184,46 @@ def run_reference_align_job(job: dict[str, Any]) -> AlignWorkerResult:
         max_disp = max_reference_dispersion_mas(filt)
     elif float(max_disp) <= 0:
         max_disp = None
+    gate_disp = float(row.dispersion_mas)
+    skew_reason = None
+    filt_key = str(filt or '').upper().split('_', 1)[0]
     if (
+        filt_key == 'F770W'
+        and row.aligned_path not in ('NA', None, '')
+        and isinstance(row.dispersion_mas, float)
+    ):
+        med_mas = read_jhat_dispersion_median_mas(str(row.aligned_path))
+        gate_disp, skew_reason = f770w_reference_gate_dispersion_mas(
+            float(row.dispersion_mas), med_mas
+        )
+    hold_for_disp = (
         max_disp is not None
         and float(max_disp) > 0
-        and float(row.dispersion_mas) > float(max_disp)
-    ):
+        and gate_disp > float(max_disp)
+    )
+    hold_for_skew = skew_reason is not None
+    if hold_for_disp or hold_for_skew:
         # Keep REFERENCE products on disk, but mark PENDING (not FAILURE) so
         # the parent can try MIRI_REL before recording a final status.
         # PENDING rows are omitted from the live alignment summary.
         row.status = 'PENDING'
+        if hold_for_skew and not hold_for_disp:
+            err = f'{skew_reason}; trying MIRI_REL'
+        else:
+            err = (
+                f'REFERENCE dispersion {gate_disp:.3f} mas '
+                f'exceeds quality threshold {float(max_disp):.3f} mas'
+            )
+            if skew_reason:
+                err = f'{err}; {skew_reason}'
+            err = f'{err}; trying MIRI_REL'
         return AlignWorkerResult(
             miri_path=miri_path,
             filter=row.filter,
             mode='reference',
             ok=False,
             row=asdict(row),
-            error=(
-                f'REFERENCE dispersion {float(row.dispersion_mas):.3f} mas '
-                f'exceeds quality threshold {float(max_disp):.3f} mas; '
-                f'trying MIRI_REL'
-            ),
+            error=err,
         )
 
     success = SuccessfulAlignment(
@@ -5849,13 +6414,25 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
         rel_mas = float(row.dispersion_mas)
         abs_mas = combine_dispersion_mas(parent.dispersion_mas, rel_mas)
 
-        # Quality-hold: keep MIRI_REL only when it improves absolute dispersion.
+        # Keep MIRI_REL when it improves absolute dispersion. If the held
+        # REFERENCE is under-calibrated, also accept a finalized parent chain
+        # whose absolute is only moderately worse — prefer a real relative
+        # tie over a tiny-n_cal REFERENCE SUCCESS.
+        ref_under_cal = bool(job.get('reference_under_calibrated'))
+        parent_finalized = not bool(getattr(parent, 'provisional', False))
         if ref_disp_f is not None and abs_mas >= ref_disp_f:
-            errors.append(
-                f'{Path(parent.miri_path).name}: abs {abs_mas:.3f} mas '
-                f'not better than REFERENCE {ref_disp_f:.3f} mas'
+            accept_under_cal = (
+                ref_under_cal
+                and parent_finalized
+                and abs_mas < max(float(ref_disp_f) * 1.25, float(ref_disp_f) + 15.0)
+                and abs_mas < 150.0
             )
-            continue
+            if not accept_under_cal:
+                errors.append(
+                    f'{Path(parent.miri_path).name}: abs {abs_mas:.3f} mas '
+                    f'not better than REFERENCE {ref_disp_f:.3f} mas'
+                )
+                continue
 
         write_alignment_provenance(
             row.aligned_path,
@@ -5888,6 +6465,7 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
             original_ref=parent.original_ref,
             aligned_to=parent.jhat_path,
             photfile=find_aligned_photfile(row.aligned_path),
+            provisional=False,
         )
         _cleanup_alignment_backups(backups)
         return AlignWorkerResult(
@@ -6044,8 +6622,13 @@ def align_from_frames(
     remaining hard failures.
 
     Summary ``status`` is binary SUCCESS / FAILURE; the method is recorded in
-    ``align_mode``. Per-frame failures are always recorded and processing
-    continues.
+    ``align_mode``. REFERENCE quality-holds are omitted from the live summary
+    while MIRI_REL is pending. Soft-fail / tiny-``n_cal`` REFERENCE holds are
+    never promoted to SUCCESS; keepable holds (enough calibrators) may be kept
+    when MIRI_REL cannot improve them. After each MIRI_REL pass, absolute
+    dispersions are re-propagated from finalized parents so children do not
+    inherit stale provisional-parent scores. Per-frame failures are always
+    recorded and processing continues.
 
     Parameters
     ----------
@@ -6122,13 +6705,20 @@ def align_from_frames(
         prev: AlignmentSummaryRow, *, reason: str
     ) -> None:
         """
-        Keep the REFERENCE solution after MIRI_REL does not improve it.
+        Keep a usable REFERENCE solution after MIRI_REL does not improve it.
 
         The per-filter dispersion cut is a *try MIRI_REL* trigger, not a hard
-        reject: a usable REFERENCE WCS remains SUCCESS when fallback cannot
-        beat it.
+        reject: a *keepable* REFERENCE WCS (usable + enough calibrators)
+        remains SUCCESS when fallback cannot beat it. Soft-fail / tiny-n_cal
+        / unusable holds must not use this path.
         """
         nonlocal n_ok
+        if not reference_solution_keepable(prev):
+            finalize_quality_hold_as_failure(
+                prev,
+                reason=f'{reason}; REFERENCE not keepable',
+            )
+            return
         final = AlignmentSummaryRow(
             miri_path=prev.miri_path,
             filter=prev.filter,
@@ -6144,29 +6734,62 @@ def align_from_frames(
         idx = rows.index(prev)
         rows[idx] = final
         row_by_miri[prev.miri_path] = final
-        if isinstance(final.dispersion_mas, float) and final.aligned_path not in (
-            None,
-            'NA',
-        ):
-            successes.append(
-                SuccessfulAlignment(
-                    miri_path=final.miri_path,
-                    jhat_path=str(final.aligned_path),
-                    filter=final.filter,
-                    wavelength_um=filter_wavelength_um(final.filter),
-                    dispersion_mas=float(final.dispersion_mas),
-                    relative_dispersion_mas=float(final.dispersion_mas),
-                    align_mode='REFERENCE',
-                    original_ref=str(final.original_ref),
-                    aligned_to=str(final.aligned_to),
-                    photfile=None,
-                )
+        successes.append(
+            SuccessfulAlignment(
+                miri_path=final.miri_path,
+                jhat_path=str(final.aligned_path),
+                filter=final.filter,
+                wavelength_um=filter_wavelength_um(final.filter),
+                dispersion_mas=float(final.dispersion_mas),
+                relative_dispersion_mas=float(final.dispersion_mas),
+                align_mode='REFERENCE',
+                original_ref=str(final.original_ref),
+                aligned_to=str(final.aligned_to),
+                photfile=find_aligned_photfile(str(final.aligned_path)),
+                provisional=False,
             )
-            n_ok += 1
+        )
+        n_ok += 1
         logger.info(
             f'DONE  {Path(prev.miri_path).name}  {prev.filter}  SUCCESS  '
             f'align_mode=REFERENCE  dispersion_mas={final.dispersion_mas:.3f} '
             f'({reason})',
+        )
+        flush_summary()
+
+    def finalize_quality_hold_as_failure(
+        prev: AlignmentSummaryRow, *, reason: str
+    ) -> None:
+        """
+        Finalize a REFERENCE quality hold as FAILURE (no usable MIRI_REL).
+
+        Soft-fail / quality-held frames must not appear as SUCCESS in the
+        alignment summary when relative alignment never lands.
+        """
+        disp = prev.dispersion_mas
+        disp_txt = (
+            f'{disp:.3f}' if isinstance(disp, float) else str(disp)
+        )
+        final = AlignmentSummaryRow(
+            miri_path=prev.miri_path,
+            filter=prev.filter,
+            status='FAILURE',
+            n_calibrators=prev.n_calibrators,
+            dispersion_mas=prev.dispersion_mas,
+            aligned_path=prev.aligned_path,
+            align_mode=_normalize_align_mode(prev.align_mode),
+            original_ref=prev.original_ref,
+            aligned_to=prev.aligned_to,
+            ref_overlap_frac=prev.ref_overlap_frac,
+        )
+        idx = rows.index(prev)
+        rows[idx] = final
+        row_by_miri[prev.miri_path] = final
+        # Never seed later waves from a failed quality hold.
+        successes[:] = [s for s in successes if s.miri_path != prev.miri_path]
+        logger.info(
+            f'DONE  {Path(prev.miri_path).name}  {prev.filter}  FAILURE  '
+            f'align_mode=REFERENCE  dispersion_mas={disp_txt} ({reason})',
         )
         flush_summary()
 
@@ -6175,7 +6798,8 @@ def align_from_frames(
         row = AlignmentSummaryRow(**result.row)
         prev = row_by_miri.get(result.miri_path)
 
-        # MIRI_REL did not improve a REFERENCE quality hold: keep REFERENCE.
+        # MIRI_REL did not improve a REFERENCE quality hold: keep keepable
+        # REFERENCE only; soft-fail / tiny-n_cal / unusable → FAILURE.
         if (
             not result.ok
             and result.mode == 'fallback'
@@ -6185,9 +6809,26 @@ def align_from_frames(
             why = 'MIRI_REL did not improve REFERENCE'
             if result.error:
                 why = f'{why}: {result.error}'
-            finalize_quality_hold_keep_reference(prev, reason=why)
-            if verbose and result.error:
-                logger.error(f'  detail: {result.error}')
+            if reference_solution_keepable(prev):
+                finalize_quality_hold_keep_reference(prev, reason=why)
+                if verbose:
+                    _log_align_worker_detail(result, kept_reference=True)
+            else:
+                detail = 'REFERENCE not keepable'
+                if reference_solution_usable(prev) and not reference_solution_keepable(
+                    prev
+                ):
+                    min_cal = calibrator_settings_for_filter(prev.filter).min_calibrators
+                    detail = (
+                        f'REFERENCE n_calibrators={prev.n_calibrators} '
+                        f'< min_calibrators={min_cal}'
+                    )
+                finalize_quality_hold_as_failure(
+                    prev,
+                    reason=f'{why}; {detail}',
+                )
+                if verbose:
+                    _log_align_worker_detail(result)
             return
 
         if prev is None:
@@ -6205,8 +6846,8 @@ def align_from_frames(
                     n_fallback += 1
 
         logger.info(_format_worker_done(result))
-        if verbose and result.error:
-            logger.error(f'  detail: {result.error}')
+        if verbose:
+            _log_align_worker_detail(result)
         flush_summary()
 
     if summary_outfile is not None:
@@ -6319,7 +6960,7 @@ def align_from_frames(
 
         # --- Passes 2+: parallel MIRI fallback ---
         if fallback:
-            for pass_idx in (1, 2):
+            for pass_idx in (1, 2, 3):
                 need_fallback = [
                     miri
                     for miri, row in row_by_miri.items()
@@ -6335,9 +6976,17 @@ def align_from_frames(
                         seen.add(miri)
                         ordered_need.append(miri)
 
+                # Finalized SUCCESS first; provisional holds only if under
+                # threshold (or as bootstrap when no SUCCESS exists yet).
+                parent_pool = build_miri_rel_parent_pool(
+                    filt, successes, row_by_miri, pending.keys()
+                )
+
                 fb_jobs = []
                 for miri in ordered_need:
-                    ranked = rank_fallback_parents(miri, filt, successes, max_parents=5)
+                    ranked = rank_fallback_parents(
+                        miri, filt, parent_pool, max_parents=5
+                    )
                     if not ranked:
                         continue
                     prev_row = row_by_miri.get(miri)
@@ -6348,6 +6997,13 @@ def align_from_frames(
                         and isinstance(prev_row.dispersion_mas, float)
                         else None
                     )
+                    min_cal = calibrator_settings_for_filter(filt).min_calibrators
+                    ref_under_cal = bool(
+                        prev_row is not None
+                        and _is_reference_quality_hold(prev_row)
+                        and isinstance(prev_row.n_calibrators, int)
+                        and int(prev_row.n_calibrators) < int(min_cal)
+                    )
                     fb_jobs.append(
                         {
                             **pending[miri],
@@ -6356,10 +7012,17 @@ def align_from_frames(
                             'parents': [asdict(p) for p, _ov in ranked],
                             'overlap_fraction': ranked[0][1],
                             'reference_dispersion_mas': ref_disp,
+                            'reference_under_calibrated': ref_under_cal,
                         }
                     )
 
                 if not fb_jobs:
+                    # Still re-propagate in case earlier passes left stale abs.
+                    n_reprop = repropagate_miri_rel_absolutes(
+                        successes, row_by_miri, rows
+                    )
+                    if n_reprop:
+                        flush_summary()
                     break
 
                 any_new = False
@@ -6378,18 +7041,43 @@ def align_from_frames(
                     label=f'{filt} fallback pass {pass_idx}',
                     on_result=on_fallback,
                 )
+                n_reprop = repropagate_miri_rel_absolutes(
+                    successes, row_by_miri, rows
+                )
+                if n_reprop:
+                    any_new = True
+                    flush_summary()
                 if not any_new:
                     break
 
+        # Final absolute re-propagation across the wave (parent chains).
+        n_reprop = repropagate_miri_rel_absolutes(successes, row_by_miri, rows)
+        if n_reprop:
+            flush_summary()
+
         # Finalize remaining REFERENCE quality-holds when no MIRI_REL parent
-        # was available (or fallback was disabled): keep the REFERENCE WCS.
+        # was available (or fallback was disabled): FAILURE, not SUCCESS.
         for miri in list(pending):
             row = row_by_miri.get(miri)
             if row is None or not _is_reference_quality_hold(row):
                 continue
-            finalize_quality_hold_keep_reference(
+            if reference_solution_keepable(row) and not fallback:
+                finalize_quality_hold_keep_reference(
+                    row,
+                    reason='fallback disabled; keepable REFERENCE retained',
+                )
+                continue
+            if reference_solution_keepable(row):
+                # Had parents but MIRI_REL never scheduled / never returned —
+                # still keep keepable REFERENCE (dispersion hold only).
+                finalize_quality_hold_keep_reference(
+                    row,
+                    reason='no successful MIRI_REL; keepable REFERENCE retained',
+                )
+                continue
+            finalize_quality_hold_as_failure(
                 row,
-                reason='no MIRI_REL parent; keeping REFERENCE solution',
+                reason='no MIRI_REL parent; REFERENCE quality hold not kept',
             )
 
         # Final failure tally for this filter wave.
