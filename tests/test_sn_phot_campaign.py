@@ -1,4 +1,8 @@
-"""Tests for examples/sn_phot campaign MIRI-only JWST skip helpers."""
+"""Tests for examples/sn_phot campaign MIRI-only JWST skip helpers.
+
+``examples/`` is gitignored (local-only), so these tests skip on CI / clean
+checkouts where ``run_campaign.py`` is absent.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,11 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 _CAMPAIGN = _REPO / 'examples' / 'sn_phot' / 'run_campaign.py'
+
+pytestmark = pytest.mark.skipif(
+    not _CAMPAIGN.is_file(),
+    reason='examples/sn_phot/run_campaign.py not present (examples/ is local-only)',
+)
 
 
 def _load_campaign():
