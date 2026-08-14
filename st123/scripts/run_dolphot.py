@@ -177,7 +177,10 @@ def create_parser() -> argparse.ArgumentParser:
             'dolphot <name>.phot -pdolphot.param MaxThreads=<ncores> in each. '
             'Use --parallel to run several at once; --wait (default) blocks '
             'until all finish; --background starts them and exits when all '
-            'can be launched immediately (n_runs <= --parallel).'
+            'can be launched immediately (n_runs <= --parallel). After a '
+            'successful wait-mode run, writes a compressed <run>.h5 catalog '
+            'sidecar by default (same layout as hst123); use '
+            '--no-write-dolphot-hdf5 to skip, or dolphot-hdf5 later.'
         ),
     )
     add_base_dir(
@@ -251,6 +254,28 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='List discovered runs and commands without executing dolphot.',
     )
+    parser.set_defaults(write_dolphot_hdf5=True)
+    parser.add_argument(
+        '--no-write-dolphot-hdf5',
+        dest='write_dolphot_hdf5',
+        action='store_false',
+        help=(
+            'Skip writing compressed <run>.h5 catalog sidecars after '
+            'successful wait-mode dolphot runs (default: write when h5py is '
+            'available).'
+        ),
+    )
+    parser.add_argument(
+        '--write-dolphot-hdf5',
+        dest='write_dolphot_hdf5',
+        action='store_true',
+        help='Write <run>.h5 after successful wait-mode runs (default).',
+    )
+    parser.add_argument(
+        '--force-dolphot-hdf5',
+        action='store_true',
+        help='Overwrite existing <run>.h5 sidecars when writing HDF5.',
+    )
     add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
@@ -284,6 +309,22 @@ def _runs_from_args(args: argparse.Namespace) -> list[DolphotRun]:
         instrument=instrument,
         group=args.group,
         box=box,
+    )
+
+
+def _write_run_hdf5(
+    run: DolphotRun,
+    *,
+    force: bool = False,
+) -> Path | None:
+    """Write compressed HDF5 for one finished run; return path or None."""
+    from st123.photometry.dolphot_catalog_hdf5 import ensure_dolphot_catalog_hdf5
+
+    return ensure_dolphot_catalog_hdf5(
+        run.outdir,
+        phot_out=run.phot_out,
+        force=force,
+        compression=True,
     )
 
 
@@ -424,8 +465,11 @@ def main(argv=None) -> int:
                     run.outdir,
                 )
             logger.info(
-                'Background launch done (%d process(es)); run-dolphot exiting',
+                'Background launch done (%d process(es)); run-dolphot exiting. '
+                'HDF5 sidecars are not written in background mode — run '
+                'dolphot-hdf5 --base-dir %s after jobs finish.',
                 len(procs),
+                args.base_dir,
             )
             return 0
 
@@ -448,6 +492,63 @@ def main(argv=None) -> int:
         for run, rc in sorted(results, key=lambda item: item[0].label):
             level = logger.error if rc else logger.info
             level('  %s: rc=%d', run.label, rc)
+
+        if bool(getattr(args, 'write_dolphot_hdf5', True)):
+            force_h5 = bool(getattr(args, 'force_dolphot_hdf5', False))
+            n_h5 = 0
+            n_h5_skip = 0
+            n_h5_fail = 0
+            for run, rc in sorted(results, key=lambda item: item[0].label):
+                if rc != 0:
+                    continue
+                try:
+                    from st123.photometry.dolphot_catalog_hdf5 import (
+                        hdf5_path_for_phot_base,
+                        phot_catalog_base_for_run,
+                    )
+
+                    dest = hdf5_path_for_phot_base(
+                        phot_catalog_base_for_run(run.outdir, run.phot_out)
+                    )
+                    if dest.is_file() and not force_h5:
+                        logger.info(
+                            '  %s: HDF5 exists, skip %s', run.label, dest.name
+                        )
+                        n_h5_skip += 1
+                        continue
+                    out = _write_run_hdf5(run, force=force_h5)
+                except ImportError as exc:
+                    logger.warning(
+                        'DOLPHOT HDF5 not written (install h5py): %s', exc
+                    )
+                    break
+                except Exception as exc:
+                    logger.error('  %s: HDF5 failed: %s', run.label, exc)
+                    n_h5_fail += 1
+                    continue
+                if out is None:
+                    logger.warning(
+                        '  %s: catalog/columns missing; skip HDF5 '
+                        '(run dolphot-hdf5 after products appear)',
+                        run.label,
+                    )
+                    n_h5_fail += 1
+                    continue
+                logger.info('  %s: wrote HDF5 %s', run.label, out)
+                n_h5 += 1
+            logger.info(
+                'DOLPHOT HDF5: %d wrote, %d skipped, %d failed/missing',
+                n_h5,
+                n_h5_skip,
+                n_h5_fail,
+            )
+        else:
+            logger.info(
+                'Skipping DOLPHOT HDF5 (--no-write-dolphot-hdf5); '
+                'use dolphot-hdf5 --base-dir %s later if needed',
+                args.base_dir,
+            )
+
         logger.info(
             'All DOLPHOT runs finished: %d ok, %d failed',
             len(results) - n_fail,

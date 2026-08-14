@@ -452,6 +452,37 @@ def test_download_main_hst_already_on_disk_is_success(monkeypatch, tmp_path):
     mock_link.assert_called_once()
 
 
+def test_download_main_hst_incomplete_exits_nonzero(monkeypatch, tmp_path):
+    """Partial MAST inventory must exit 1 after linking what landed (issue #4)."""
+    from st123.mast.download import MastDownloadResult
+
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / 'o'
+    with (
+        patch(
+            'st123.mast.download.query_mast_hst',
+            return_value=MastDownloadResult(1, n_failed=1),
+        ),
+        patch('st123.scripts.link_raw.link_raw_tree', return_value=2) as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--telescope',
+                'hst',
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--base-dir',
+                str(project),
+                '--instruments',
+                'ACS',
+            ]
+        )
+    assert rc == 1
+    mock_link.assert_called_once()
+
+
 def test_download_main_multi_telescope_combined(monkeypatch, tmp_path):
     """Instruments alone imply HST+JWST; --telescope is not required."""
     monkeypatch.chdir(tmp_path)

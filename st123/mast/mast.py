@@ -33,6 +33,75 @@ logger = logging.getLogger(__name__)
 _MAST_SESSION_TOKEN: str | None = None
 _MAST_PUBLIC_NOTICE: bool = False
 
+# MAST product-list / download retries (issue #4: silent partial inventory).
+_HST_MAST_MAX_ATTEMPTS = 3
+_HST_MAST_RETRY_DELAY_SEC = 5.0
+
+
+def _is_transient_mast_error(exc: BaseException) -> bool:
+    """True for timeouts / connection failures worth retrying against MAST."""
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            ConnectionResetError,
+            BrokenPipeError,
+            OSError,
+        ),
+    ):
+        return True
+    text = f'{type(exc).__name__}: {exc}'.lower()
+    needles = (
+        'timeout',
+        'timed out',
+        'time out',
+        'connection reset',
+        'connection aborted',
+        'connection refused',
+        'temporarily unavailable',
+        '503',
+        '502',
+        '504',
+        '429',
+        'remote end closed',
+        'broken pipe',
+    )
+    return any(n in text for n in needles)
+
+
+def _mast_call_with_retries(label: str, fn, *args, **kwargs):
+    """
+    Call ``fn`` with retries on transient MAST errors.
+
+    Returns
+    -------
+    tuple
+        ``(result, None)`` on success, or ``(None, last_exc)`` after exhausting
+        attempts (non-transient errors fail immediately).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _HST_MAST_MAX_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs), None
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _HST_MAST_MAX_ATTEMPTS and _is_transient_mast_error(exc):
+                delay = _HST_MAST_RETRY_DELAY_SEC * attempt
+                logger.warning(
+                    'Transient MAST error for %s (attempt %d/%d): %s; '
+                    'retrying in %.1fs',
+                    label,
+                    attempt,
+                    _HST_MAST_MAX_ATTEMPTS,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+            break
+    return None, last_exc
+
 
 def resolve_mast_token(token: Optional[str] = None) -> Optional[str]:
     """Resolve a MAST API token from an explicit value or the environment.
@@ -1098,7 +1167,7 @@ def download_hst_observations(
     layout: str = DEFAULT_DOWNLOAD_LAYOUT,
     dry_run: bool = False,
     extension: str = 'fits',
-) -> int:
+):
     """Download filtered HST science products for each observation into ``outdir``.
 
     Products are restricted to native pipeline science files (WFPC2 ``c0m``/
@@ -1108,6 +1177,11 @@ def download_hst_observations(
     the same file are skipped), and files already present under *outdir*
     are not re-fetched. Observation directories that already contain local
     science products skip the MAST product-list API call.
+
+    Transient MAST timeouts / connection errors on product-list and download
+    are retried; observations that still fail are counted in
+    ``MastDownloadResult.n_failed`` so callers can refuse a silent partial
+    inventory (issue #4).
 
     Parameters
     ----------
@@ -1126,23 +1200,26 @@ def download_hst_observations(
 
     Returns
     -------
-    int
-        Number of observations that are ready: newly downloaded (or listed in
-        dry-run), or already fully present / duplicated on disk. ``0`` only when
-        nothing usable was found (empty table, no science products, or all
-        downloads failed).
+    MastDownloadResult
+        ``n_observations`` ready (newly downloaded, listed in dry-run, or
+        already present). ``n_failed`` counts product-list / download failures
+        after retries. ``0`` ready only when nothing usable was found.
     """
+    # Lazy import avoids circular import with st123.mast.download.
+    from st123.mast.download import MastDownloadResult
+
     # Auth is normally done in query_hst; keep a cached no-op for standalone use.
     prepare_mast_auth(token)
 
     if obs_table is None or len(obs_table) == 0:
         logger.error('observation table is empty. Cannot download files.')
-        return 0
+        return MastDownloadResult(0)
 
     os.makedirs(outdir, exist_ok=True)
     n_obs = len(obs_table)
     n_downloaded = 0
     n_ready = 0
+    n_failed = 0
     n_unique = 0
     n_skipped_dup = 0
     n_skipped_existing = 0
@@ -1195,17 +1272,33 @@ def download_hst_observations(
                 )
                 continue
 
-        try:
-            logger.info(
-                '[%d/%d] %s: fetching MAST product list (obsid=%s)...',
-                i,
-                n_obs,
-                subdir,
-                obsid,
-            )
-            t0 = time.monotonic()
+        logger.info(
+            '[%d/%d] %s: fetching MAST product list (obsid=%s)...',
+            i,
+            n_obs,
+            subdir,
+            obsid,
+        )
+        t0 = time.monotonic()
+
+        def _fetch_products():
             with capture_output():
-                raw_products = Observations.get_product_list(obs)
+                return Observations.get_product_list(obs)
+
+        raw_products, plist_exc = _mast_call_with_retries(
+            f'product list obsid={obsid}',
+            _fetch_products,
+        )
+        if raw_products is None:
+            logger.error(
+                'could not get products for obsid=%s after retries: %s',
+                obsid,
+                plist_exc,
+            )
+            n_failed += 1
+            continue
+
+        try:
             dt = time.monotonic() - t0
             logger.info(
                 '[%d/%d] %s: product list returned %d row(s) in %.1fs',
@@ -1220,7 +1313,10 @@ def download_hst_observations(
                 raw_products = raw_products[raw_products['type'] == 'S']
             product_list = filter_hst_products(raw_products, instrument)
         except Exception as exc:
-            logger.warning('could not get products for obsid=%s: %s', obsid, exc)
+            logger.error(
+                'could not filter products for obsid=%s: %s', obsid, exc
+            )
+            n_failed += 1
             continue
         if len(product_list) == 0:
             # Should be rare after filter_hst_observations drops unsupported
@@ -1276,31 +1372,45 @@ def download_hst_observations(
             n_downloaded += 1
             n_ready += 1
             continue
-        try:
+
+        def _download():
             with capture_output():
                 Observations.download_products(
                     product_list, download_dir=download_dir, extension=extension
                 )
-            flat = flatten_mast_download_dir(download_dir)
-            if flat:
-                logger.debug(
-                    '[%d/%d] %s: flattened %d nested MAST product(s)',
-                    i,
-                    n_obs,
-                    subdir,
-                    len(flat),
-                )
-            n_downloaded += 1
-            n_ready += 1
-            for row in product_list:
-                existing.add(str(row['productFilename']))
-        except Exception as exc:
-            logger.warning('download failed for obsid=%s: %s', obsid, exc)
+
+        _, dl_exc = _mast_call_with_retries(
+            f'download obsid={obsid}',
+            _download,
+        )
+        if dl_exc is not None:
+            logger.error(
+                'download failed for obsid=%s after retries: %s',
+                obsid,
+                dl_exc,
+            )
+            n_failed += 1
+            continue
+
+        flat = flatten_mast_download_dir(download_dir)
+        if flat:
+            logger.debug(
+                '[%d/%d] %s: flattened %d nested MAST product(s)',
+                i,
+                n_obs,
+                subdir,
+                len(flat),
+            )
+        n_downloaded += 1
+        n_ready += 1
+        for row in product_list:
+            existing.add(str(row['productFilename']))
 
     logger.info(
         'Finished: downloaded HST products for %d/%d observation(s) '
         '(%d unique file(s); skipped %d duplicate listing(s), '
-        '%d already on disk, %d local obs skip(s); %d observation(s) ready).',
+        '%d already on disk, %d local obs skip(s); %d observation(s) ready, '
+        '%d failed).',
         n_downloaded,
         n_obs,
         n_unique,
@@ -1308,8 +1418,16 @@ def download_hst_observations(
         n_skipped_existing,
         n_skipped_local,
         n_ready,
+        n_failed,
     )
-    return n_ready
+    if n_failed:
+        logger.error(
+            'HST download incomplete: %d/%d observation(s) failed after '
+            'retries; re-run download or check MAST before mosaicking',
+            n_failed,
+            n_obs,
+        )
+    return MastDownloadResult(n_ready, n_failed=n_failed)
 
 
 def parse_s_region(region: str) -> shapely.Polygon:

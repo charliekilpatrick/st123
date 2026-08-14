@@ -33,10 +33,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MastDownloadResult:
-    """Outcome of a JWST (or similar) MAST download query."""
+    """Outcome of a MAST download query (HST or JWST)."""
 
     n_observations: int
     skipped_miri_only: bool = False
+    n_failed: int = 0
+
+    @property
+    def incomplete(self) -> bool:
+        """True when some matched observations failed after retries."""
+        return int(self.n_failed) > 0
 
     def __int__(self) -> int:
         return int(self.n_observations)
@@ -51,6 +57,7 @@ class MastDownloadResult:
             return (
                 self.n_observations == other.n_observations
                 and self.skipped_miri_only == other.skipped_miri_only
+                and self.n_failed == other.n_failed
             )
         return NotImplemented
 
@@ -245,7 +252,7 @@ def query_mast_hst(
     dry_run: bool = False,
     allowed_filters: Optional[Sequence[str]] = None,
     use_galaxy_size: bool = False,
-) -> int:
+) -> MastDownloadResult:
     """
     Query MAST and download available HST imaging.
 
@@ -276,9 +283,11 @@ def query_mast_hst(
 
     Returns
     -------
-    int
-        Number of observations ready for the pipeline (newly downloaded /
-        listed, or already fully present on disk). ``0`` if none.
+    MastDownloadResult
+        ``n_observations`` ready for the pipeline (newly downloaded /
+        listed, or already fully present on disk). ``n_failed`` counts
+        observations that still failed after product-list / download
+        retries (partial inventory → incomplete).
     """
     outdir_s = str(outdir)
     os.makedirs(outdir_s, exist_ok=True)
@@ -305,7 +314,7 @@ def query_mast_hst(
         )
     logger.info('Found %d HST imaging observation(s)', len(obs_table))
     if len(obs_table) == 0:
-        return 0
+        return MastDownloadResult(0)
 
     with capture_output():
         return download_hst_observations(
