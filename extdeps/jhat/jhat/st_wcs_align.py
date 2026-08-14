@@ -998,18 +998,21 @@ class st_wcs_align:
                 rmfile(outputfits)
 
 
-        # It is important to set fitgeometry to rshift for level 2
+        # st123: HST always uses rshift (incl. WFPC2 do_driz path). Upstream
+        # used general when do_driz=True, which overfits sparse matches.
+        # JWST level-2 also rshift; level-3 stays general.
         tweakreg.pipeline_level = self.phot.pipeline_level
-        if self.phot.pipeline_level==2 and not (self.telescope.lower()=='hst' and self.phot.do_driz):
+        if self.telescope.lower()=='hst' or self.phot.pipeline_level==2:
             tweakreg.fitgeometry = 'rshift'
-        else:    
+        else:
             tweakreg.fitgeometry = 'general'
         tweakreg.align_to_gaia = False
         tweakreg.save_gaia_catalog = False
         tweakreg.save_results = True
         # minimum number of objects required for fit
         tweakreg.save_catalogs = False
-        tweakreg.minobj = 4
+        # st123: allow 3-star solutions (sparse Gaia / WFPC2 chips)
+        tweakreg.minobj = 3
         
         # the following parameters should have not impact, since these steps in tweakreg are skipped
         if 1==1:

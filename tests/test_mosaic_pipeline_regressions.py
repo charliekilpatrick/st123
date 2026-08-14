@@ -41,8 +41,13 @@ requires_ngc3310 = pytest.mark.skipif(
     reason='NGC3310 reduction tree not available on this host',
 )
 
-EXPECTED_JHAT_COUNT = 80
-EXPECTED_PHOT_SCIENCE = 81  # 80 jhat + coadd
+EXPECTED_NIRCAM_JHAT_COUNT = 80
+EXPECTED_MIRI_JHAT_COUNT = 36
+EXPECTED_JWST_JHAT_COUNT = EXPECTED_NIRCAM_JHAT_COUNT + EXPECTED_MIRI_JHAT_COUNT
+# Legacy shared reduction/jhat/ may also hold HST JHAT products.
+EXPECTED_HST_JHAT_COUNT = 30  # ACS + WFC3 + WFPC2 on this host
+EXPECTED_JHAT_COUNT = EXPECTED_JWST_JHAT_COUNT + EXPECTED_HST_JHAT_COUNT
+EXPECTED_PHOT_NIRCAM = EXPECTED_NIRCAM_JHAT_COUNT + 1  # jhat + coadd
 EXPECTED_SW_COADD_FILTER = 'f150w2'
 
 
@@ -100,12 +105,13 @@ def test_mosaic_main_finds_jhat_under_reduction_not_project_root(tmp_path: Path)
     fake.write_text('x')
 
     with patch(
-        'st123.scripts.mosaic.input_list', side_effect=RuntimeError('STOP')
-    ) as mock_input:
+        'st123.mosaic.mosaic.plan_mosaic_boxes',
+        side_effect=RuntimeError('STOP'),
+    ) as mock_plan:
         with pytest.raises(RuntimeError, match='STOP'):
             mosaic_script.main(['--base-dir', str(project), '--ncores', '1'])
 
-    files = mock_input.call_args.args[0]
+    files = mock_plan.call_args.args[1]
     assert len(files) == 1
     assert Path(files[0]).resolve() == fake.resolve()
     assert 'reduction' in Path(files[0]).parts
@@ -177,8 +183,9 @@ def test_create_coadd_mosaic_always_sets_output_wcs(tmp_path: Path):
             filt='f150w2',
             sci_header=_sample_wcs_header(),
         )
-    assert image3.resample.output_wcs == str(tmp_path / 'mosaic_gwcs.asdf')
+    assert image3.resample.output_wcs == str(tmp_path / 'mosaic_gwcs_f150w2.asdf')
     assert Path(image3.resample.output_wcs).is_file()
+    assert image3.pixel_scale == pytest.approx(0.031)
 
 
 def test_create_coadd_mosaic_rejects_missing_gwcs_file(tmp_path: Path):
@@ -254,21 +261,32 @@ def test_ngc3310_resolve_reduction_dir_despite_reference_symlink():
 @requires_ngc3310
 def test_ngc3310_jhat_inventory_for_mosaic():
     files = sorted(NGC3310_JHAT.glob('*jhat.fits'))
+    nircam = [p for p in files if 'nrc' in p.name.lower()]
+    miri = [p for p in files if 'mir' in p.name.lower()]
+    jwst = nircam + miri
+    assert len(nircam) == EXPECTED_NIRCAM_JHAT_COUNT
+    assert len(miri) == EXPECTED_MIRI_JHAT_COUNT
+    assert len(jwst) == EXPECTED_JWST_JHAT_COUNT
     assert len(files) == EXPECTED_JHAT_COUNT
-    table = input_list([str(p) for p in files])
-    assert len(table) == EXPECTED_JHAT_COUNT
+    # Mosaic filter expectations are JWST-driven.
+    table = input_list([str(p) for p in jwst])
+    assert len(table) == EXPECTED_JWST_JHAT_COUNT
     assert set(table['group']) == {0}
     filters = {str(f) for f in table['filter']}
     assert EXPECTED_SW_COADD_FILTER in filters
     assert {'f150w', 'f200w', 'f444w'} <= filters
+    assert {'f560w', 'f770w'} <= filters
 
 
 @requires_ngc3310
 def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
-    from st123.mosaic.mosaic import split_observations
+    from st123.mosaic.mosaic import is_nircam_sw_broadband, split_observations
 
-    files = sorted(str(p) for p in NGC3310_JHAT.glob('*jhat.fits'))
-    table = input_list(files)
+    # NIRCam-only: historical SW coadd selection for this field.
+    nircam = sorted(
+        str(p) for p in NGC3310_JHAT.glob('*jhat.fits') if 'nrc' in p.name.lower()
+    )
+    table = input_list(nircam)
     split = split_observations(table=table[table['group'] == 0], N_max=150)
     split.boxsplit()
     filter_tables = split.get_sw_filter_tables(tol=0.05)
@@ -277,21 +295,36 @@ def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
     assert keys == [EXPECTED_SW_COADD_FILTER]
     assert len(filter_tables[0][EXPECTED_SW_COADD_FILTER]) == 16
 
+    # Mixed NIRCam+MIRI inventory must never promote MIRI into the SW table.
+    all_files = sorted(str(p) for p in NGC3310_JHAT.glob('*jhat.fits'))
+    mixed = input_list(all_files)
+    split_m = split_observations(table=mixed[mixed['group'] == 0], N_max=150)
+    split_m.boxsplit()
+    mixed_keys = [str(k) for k in split_m.get_sw_filter_tables(tol=0.05)[0].keys()]
+    assert EXPECTED_SW_COADD_FILTER in mixed_keys
+    assert all(is_nircam_sw_broadband(k) for k in mixed_keys)
+    assert 'f1130w' not in mixed_keys
+    assert 'f560w' not in mixed_keys
+
 
 @requires_ngc3310
 def test_ngc3310_mosaic_products_present_and_gwcs_compatible():
     coadd = NGC3310_REF0 / f'coadd_0_0_{EXPECTED_SW_COADD_FILTER}_i2d.fits'
-    i2d = NGC3310_REF0 / f'out_{EXPECTED_SW_COADD_FILTER}' / f'{EXPECTED_SW_COADD_FILTER}_i2d.fits'
-    gwcs_path = NGC3310_REF0 / 'mosaic_gwcs.asdf'
     frame_list = NGC3310_REF0 / 'dolphot_frames.txt'
     # dolphot.param is produced by dolphot-prep, not mosaic
     param = NGC3310_PHOT / 'dolphot.param'
+    # Prefer filter-specific GWCS; fall back to legacy mosaic_gwcs.asdf.
+    gwcs_candidates = [
+        NGC3310_REF0 / f'mosaic_gwcs_{EXPECTED_SW_COADD_FILTER}.asdf',
+        NGC3310_REF0 / 'mosaic_gwcs.asdf',
+        *sorted(NGC3310_REF0.glob('mosaic_gwcs_*.asdf')),
+    ]
+    gwcs_path = next((p for p in gwcs_candidates if p.is_file()), None)
 
     assert coadd.is_file() and coadd.stat().st_size > 0
-    assert i2d.is_file() and i2d.stat().st_size > 0
-    assert gwcs_path.is_file()
     assert frame_list.is_file()
     assert param.is_file()
+    assert gwcs_path is not None, 'no mosaic_gwcs*.asdf under ref_0'
 
     wcs = asdf.open(gwcs_path)['wcs']
     assert isinstance(wcs.forward_transform, FITSImagingWCSTransform)
@@ -307,15 +340,19 @@ def test_ngc3310_mosaic_products_present_and_gwcs_compatible():
 
 @requires_ngc3310
 def test_ngc3310_phot_prep_products_match_science_frames():
-    science = science_fits_paths(NGC3310_PHOT)
-    skies = sorted(NGC3310_PHOT.glob('*.sky.fits'))
-    assert len(science) == EXPECTED_PHOT_SCIENCE
-    assert len(skies) == EXPECTED_PHOT_SCIENCE
-    # Every science frame has a matching sky product.
+    # Count NIRCam prep products only (dolphot residuals may also sit here).
+    jhats = sorted(NGC3310_PHOT.glob('*nrc*_jhat.fits'))
+    coadds = sorted(NGC3310_PHOT.glob('coadd_*_i2d.fits'))
+    assert len(jhats) == EXPECTED_NIRCAM_JHAT_COUNT
+    assert len(coadds) >= 1
+    science = [str(p) for p in jhats + coadds]
+    assert len(science) == EXPECTED_PHOT_NIRCAM
     for path in science:
-        assert path.endswith('.fits')
         sky = Path(path[: -len('.fits')] + '.sky.fits')
         assert sky.is_file(), f'missing sky for {path}'
+    # science_fits_paths must at least include the staged JHAT/coadd frames.
+    all_science = {Path(p).name for p in science_fits_paths(NGC3310_PHOT)}
+    assert {p.name for p in jhats}.issubset(all_science)
 
 
 @requires_ngc3310

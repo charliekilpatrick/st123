@@ -9,16 +9,50 @@ from unittest.mock import patch
 import pytest
 from astropy.table import Table
 
+import numpy as np
+from astropy.io import fits
+
 from st123.mast import (
+    filter_hst_observations,
     filter_jwst_observations_by_stage,
     filter_jwst_products,
     is_hst_science_product,
     mast_login,
     observation_matches_calib_stage,
     parse_s_region,
+    prune_non_full_frame_miri,
     resolve_mast_token,
 )
-from st123.mast.mast import download_jwst_observations
+from st123.mast.mast import (
+    download_hst_observations,
+    download_jwst_observations,
+    prepare_mast_auth,
+    reset_mast_login_state,
+)
+
+
+def test_prune_non_full_frame_miri(tmp_path: Path):
+    good = tmp_path / 'jw_full_mirimage_cal.fits'
+    bad = tmp_path / 'jw_cut_mirimage_cal.fits'
+    for path, shape, sub in (
+        (good, (1024, 1032), 'FULL'),
+        (bad, (128, 136), 'SUB64'),
+    ):
+        primary = fits.PrimaryHDU()
+        primary.header['INSTRUME'] = 'MIRI'
+        primary.header['DETECTOR'] = 'MIRIMAGE'
+        primary.header['SUBARRAY'] = sub
+        fits.HDUList(
+            [
+                primary,
+                fits.ImageHDU(data=np.ones(shape, dtype=np.float32), name='SCI'),
+            ]
+        ).writeto(path)
+
+    rejected = prune_non_full_frame_miri(tmp_path, remove=True)
+    assert any(Path(p).name == bad.name for p in rejected)
+    assert good.is_file()
+    assert not bad.is_file()
 
 
 def test_filter_jwst_products_stage2_and_3():
@@ -103,7 +137,148 @@ def test_download_skips_unavailable_calib_level_silently(caplog):
 
 def test_is_hst_science_product():
     assert is_hst_science_product('j123_flc.fits', 'ACS/WFC')
+    assert is_hst_science_product('j123_flt.fits', 'ACS/HRC')
+    assert is_hst_science_product('j123_flt.fits', 'ACS/SBC')
+    assert is_hst_science_product('i123_flc.fits', 'WFC3/UVIS')
+    assert is_hst_science_product('i123_flt.fits', 'WFC3/IR')
+    assert is_hst_science_product('u123_c0m.fits', 'WFPC2')
+    assert is_hst_science_product('u123_c1m.fits', 'WFPC2')
+    # ACS/WFC science is flc (CTE-corrected); do not take the older flt.
+    assert not is_hst_science_product('j123_flt.fits', 'ACS/WFC')
+    assert not is_hst_science_product('j123_flc.fits', 'ACS/HRC')
     assert not is_hst_science_product('readme.txt', 'ACS/WFC')
+    assert not is_hst_science_product('j123_flc.fits', 'WFC3/IR')
+
+
+def test_filter_hst_observations_pipeline_only_excludes_hap():
+    obs = Table(
+        {
+            'obs_collection': ['HST', 'HST', 'HST', 'JWST'],
+            'dataproduct_type': ['IMAGE', 'IMAGE', 'IMAGE', 'IMAGE'],
+            'instrument_name': ['ACS/WFC', 'ACS/WFC', 'ACS/WFC', 'NIRCAM'],
+            'filters': ['F814W', 'F814W', 'F814W', 'F200W'],
+            'intentType': ['science', 'science', 'science', 'science'],
+            'dataRights': ['PUBLIC', 'PUBLIC', 'PUBLIC', 'PUBLIC'],
+            'project': ['HST', 'HAP', 'HAP', 'JWST'],
+            'obsid': [1, 2, 3, 4],
+            'obs_id': [
+                'jey335010',
+                'hst_17070_35_acs_wfc_f814w_jey335',
+                'hst_skycell-p2575x04y07_acs_wfc_f814w_all',
+                'jwst_x',
+            ],
+            't_min': [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    out = filter_hst_observations(obs, instruments=['ACS', 'WFC3', 'WFPC2'])
+    assert list(out['obsid']) == [1]
+    assert list(out['obs_id']) == ['jey335010']
+
+    # Opt out of pipeline-only when callers want HAP rows.
+    both = filter_hst_observations(
+        obs, instruments=['ACS'], pipeline_only=False
+    )
+    assert list(both['obsid']) == [1, 2, 3]
+
+
+def test_filter_hst_observations_keeps_acs_wfc_and_hrc():
+    """Bare ACS downloads ACS/WFC (flc) and ACS/HRC (flt)."""
+    from st123.mast.mast import has_supported_hst_science_products
+
+    assert has_supported_hst_science_products('ACS/WFC')
+    assert has_supported_hst_science_products('ACS/HRC')
+    assert has_supported_hst_science_products('ACS/SBC')
+
+    obs = Table(
+        {
+            'obs_collection': ['HST', 'HST', 'HST'],
+            'dataproduct_type': ['IMAGE', 'IMAGE', 'IMAGE'],
+            'instrument_name': ['ACS/WFC', 'ACS/HRC', 'WFC3/UVIS'],
+            'filters': ['F814W', 'F814W', 'F814W'],
+            'intentType': ['science', 'science', 'science'],
+            'dataRights': ['PUBLIC', 'PUBLIC', 'PUBLIC'],
+            'project': ['HST', 'HST', 'HST'],
+            'obsid': [1, 2, 3],
+            'obs_id': ['wfc', 'hrc', 'uvis'],
+            't_min': [1.0, 2.0, 3.0],
+        }
+    )
+    out = filter_hst_observations(obs, instruments=['ACS', 'WFC3'])
+    assert list(out['obsid']) == [1, 2, 3]
+    assert list(out['instrument_name']) == ['ACS/WFC', 'ACS/HRC', 'WFC3/UVIS']
+
+
+def test_flatten_mast_download_dir(tmp_path: Path):
+    from st123.mast.mast import flatten_mast_download_dir
+
+    obsid = tmp_path / 'HST' / 'ACS' / 'F814W' / '102617486'
+    nested = obsid / 'mastDownload' / 'HST' / 'jey335ehq'
+    nested.mkdir(parents=True)
+    src = nested / 'jey335ehq_flc.fits'
+    src.write_bytes(b'fits')
+    (nested / 'readme.txt').write_text('x')
+    moved = flatten_mast_download_dir(obsid)
+    dest = obsid / 'jey335ehq_flc.fits'
+    assert dest.is_file()
+    assert not src.exists()
+    assert moved == [str(dest)]
+    assert not (obsid / 'mastDownload').exists()
+
+
+def test_download_hst_dedupes_product_filenames(tmp_path: Path, caplog):
+    """Same FLC listed under two obsids is downloaded only once."""
+    obs = Table(
+        {
+            'obsid': [101, 102],
+            'obs_id': ['jey335010', 'jey335010b'],
+            'filters': ['F814W', 'F814W'],
+            'obs_collection': ['HST', 'HST'],
+            'instrument_name': ['ACS/WFC', 'ACS/WFC'],
+            'project': ['HST', 'HST'],
+        }
+    )
+    products_a = Table(
+        {
+            'type': ['S', 'S', 'D'],
+            'productFilename': [
+                'jey335elq_flc.fits',
+                'jey335ehq_flc.fits',
+                'something_drz.fits',
+            ],
+            'productType': ['SCIENCE', 'SCIENCE', 'SCIENCE'],
+        }
+    )
+    products_b = Table(
+        {
+            'type': ['S', 'S'],
+            'productFilename': [
+                'jey335elq_flc.fits',  # duplicate of obs 101
+                'jey335ehq_flc.fits',
+            ],
+            'productType': ['SCIENCE', 'SCIENCE'],
+        }
+    )
+
+    def _plist(obs_row):
+        return products_a if int(obs_row['obsid']) == 101 else products_b
+
+    with (
+        caplog.at_level(logging.INFO, logger='st123.mast.mast'),
+        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+    ):
+        n = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
+
+    # First obsid downloaded; second counted ready (duplicate listings).
+    assert n == 2
+    assert mock_dl.call_count == 1
+    downloaded = mock_dl.call_args[0][0]
+    assert sorted(downloaded['productFilename']) == [
+        'jey335ehq_flc.fits',
+        'jey335elq_flc.fits',
+    ]
+    assert 'duplicate' in caplog.text.lower() or 'already' in caplog.text.lower()
 
 
 def test_parse_s_region():
@@ -115,16 +290,60 @@ def test_parse_s_region():
 def test_mast_login_required_without_token(monkeypatch):
     monkeypatch.delenv('MAST_API_TOKEN', raising=False)
     monkeypatch.delenv('MAST_TOKEN', raising=False)
+    reset_mast_login_state()
     with pytest.raises(RuntimeError):
         mast_login(None, required=True)
     assert mast_login(None, required=False) is False
 
 
-def test_mast_login_success(monkeypatch):
+def test_mast_login_success_and_cached(monkeypatch):
     monkeypatch.delenv('MAST_API_TOKEN', raising=False)
+    monkeypatch.delenv('MAST_TOKEN', raising=False)
+    reset_mast_login_state()
     with patch('st123.mast.mast.Observations.login') as mock_login:
         assert mast_login('tok123', required=True) is True
+        assert mast_login('tok123', required=True) is True
         mock_login.assert_called_once_with(token='tok123')
+
+
+def test_prepare_mast_auth_public_without_token(monkeypatch, caplog):
+    monkeypatch.delenv('MAST_API_TOKEN', raising=False)
+    monkeypatch.delenv('MAST_TOKEN', raising=False)
+    reset_mast_login_state()
+    with caplog.at_level(logging.INFO, logger='st123.mast.mast'):
+        assert prepare_mast_auth(None) is False
+    assert 'public data only' in caplog.text.lower()
+
+
+def test_download_hst_skips_product_list_when_local(tmp_path: Path, caplog):
+    """Re-runs must not call MAST get_product_list when science FITS exist."""
+    obs = Table(
+        {
+            'obsid': [185903893],
+            'obs_id': ['jey312010'],
+            'filters': ['F555W'],
+            'obs_collection': ['HST'],
+            'instrument_name': ['ACS/WFC'],
+            'project': ['HST'],
+        }
+    )
+    sub = tmp_path / 'HST' / 'ACS' / 'F555W' / '185903893'
+    sub.mkdir(parents=True)
+    (sub / 'jey312k1q_flc.fits').write_bytes(b'fits')
+    (sub / 'jey312k5q_flc.fits').write_bytes(b'fits')
+
+    with (
+        caplog.at_level(logging.INFO, logger='st123.mast.mast'),
+        patch('st123.mast.mast.Observations.get_product_list') as mock_plist,
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+    ):
+        n = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
+
+    assert n == 1
+    mock_plist.assert_not_called()
+    mock_dl.assert_not_called()
+    assert 'skipping mast product list' in caplog.text.lower()
 
 
 def test_resolve_mast_token_explicit():

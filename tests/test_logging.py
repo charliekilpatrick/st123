@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +21,8 @@ from st123.utils.logging import (
     ColoredFormatter,
     FILE_FORMAT,
     STREAM_FORMAT,
+    _quiet_third_party_loggers,
+    _reset_premature_astropy_logger,
     get_logger,
     setup_script_logging,
     shutdown_logging,
@@ -125,9 +129,9 @@ def test_align_main_creates_log(tmp_path: Path):
         {'group': np.array([], dtype=int), 'visit': np.array([], dtype='U8')}
     )
     with (
-        patch('st123.scripts.align.get_input_images', return_value=[]),
+        patch('st123.alignment.align.get_input_images', return_value=[]),
         patch('st123.scripts.align.input_list', return_value=empty),
-        patch('st123.scripts.align.visit_filter_dict', return_value={}),
+        patch('st123.alignment.align.visit_filter_dict', return_value={}),
     ):
         rc = align_script.main(
             ['--base-dir', str(tmp_path), '--mode', 'visit', '--ncores', '1']
@@ -175,3 +179,33 @@ def test_file_handler_always_debug(tmp_path: Path):
         and not isinstance(h, logging.FileHandler)
     ]
     assert stream_handlers[0].level == logging.INFO
+
+
+def test_quiet_third_party_does_not_precreate_astropy_logger():
+    """Regression: pre-creating ``astropy`` breaks ``import astropy``."""
+    _reset_premature_astropy_logger()
+    # Simulate a bad prior state then ensure quiet repairs it.
+    plain = logging.Logger('astropy')
+    logging.Logger.manager.loggerDict['astropy'] = plain
+    assert not hasattr(logging.getLogger('astropy'), '_set_defaults')
+    _quiet_third_party_loggers()
+    assert 'astropy' not in logging.Logger.manager.loggerDict
+
+
+def test_setup_logging_then_astropy_import_in_subprocess(tmp_path: Path):
+    """Mosaic-like order: configure logging, then import astropy (fresh interp)."""
+    code = f"""
+import logging
+from st123.utils.logging import setup_script_logging
+setup_script_logging({str(tmp_path)!r}, 'mosaic')
+assert 'astropy' not in logging.Logger.manager.loggerDict
+from astropy.io import fits  # noqa: F401
+assert hasattr(logging.getLogger('astropy'), '_set_defaults')
+"""
+    proc = subprocess.run(
+        [sys.executable, '-c', code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout

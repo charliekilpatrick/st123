@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import time
 from typing import Iterable, Optional, Sequence
 
 import numpy as np
@@ -25,6 +27,11 @@ from st123.utils.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Token successfully passed to ``Observations.login`` in this process.
+# Avoids re-authing on every query/download stage in one ``download`` CLI run.
+_MAST_SESSION_TOKEN: str | None = None
+_MAST_PUBLIC_NOTICE: bool = False
 
 
 def resolve_mast_token(token: Optional[str] = None) -> Optional[str]:
@@ -50,6 +57,45 @@ def resolve_mast_token(token: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def reset_mast_login_state() -> None:
+    """Clear the in-process MAST login cache (tests / rare re-auth)."""
+    global _MAST_SESSION_TOKEN, _MAST_PUBLIC_NOTICE
+    _MAST_SESSION_TOKEN = None
+    _MAST_PUBLIC_NOTICE = False
+
+
+def prepare_mast_auth(token: Optional[str] = None) -> bool:
+    """
+    Optionally authenticate to MAST; never abort a public-data download.
+
+    * No token → log once that only public data will be queried; return False.
+    * Token present → login once per process (cached). Login failure warns and
+      continues with public data only (return False).
+
+    Returns
+    -------
+    bool
+        True when authenticated for proprietary access.
+    """
+    global _MAST_PUBLIC_NOTICE
+    resolved = resolve_mast_token(token)
+    if not resolved:
+        if not _MAST_PUBLIC_NOTICE:
+            logger.info(
+                'No MAST token set (MAST_API_TOKEN / --token); '
+                'continuing with public data only'
+            )
+            _MAST_PUBLIC_NOTICE = True
+        return False
+    if mast_login(resolved, required=False):
+        return True
+    logger.warning(
+        'MAST token was provided but login failed; '
+        'continuing with public data only'
+    )
+    return False
+
+
 def mast_login(token: Optional[str] = None, *, required: bool = False) -> bool:
     """
     Authenticate to MAST with an authorization token.
@@ -57,6 +103,9 @@ def mast_login(token: Optional[str] = None, *, required: bool = False) -> bool:
     Uses ``Observations.login(token=...)`` so proprietary products available to
     the token holder can be queried and downloaded (same pattern as hst123).
     See https://auth.mast.stsci.edu/info
+
+    Successful logins are cached for this process so query + download stages
+    do not call ``Observations.login`` twice.
 
     Parameters
     ----------
@@ -69,8 +118,9 @@ def mast_login(token: Optional[str] = None, *, required: bool = False) -> bool:
     Returns
     -------
     bool
-        True if login was attempted and succeeded, False otherwise.
+        True if login was attempted and succeeded (or already cached), else False.
     """
+    global _MAST_SESSION_TOKEN
     token = resolve_mast_token(token)
     if not token:
         if required:
@@ -79,9 +129,13 @@ def mast_login(token: Optional[str] = None, *, required: bool = False) -> bool:
                 'Pass token=... / --token, or set MAST_API_TOKEN.'
             )
         return False
+    if _MAST_SESSION_TOKEN == token:
+        logger.debug('MAST session already authenticated; skipping re-login')
+        return True
     try:
         logger.info('Logging in to MAST with token...')
         Observations.login(token=token)
+        _MAST_SESSION_TOKEN = token
         logger.info('MAST login successful.')
         return True
     except Exception as exc:
@@ -101,6 +155,17 @@ def _instrument_contains(obs_table: Table, detectors: Sequence[str]) -> list[boo
         any(det in str(inst).upper() for det in detectors)
         for inst in obs_table['instrument_name']
     ]
+
+
+def has_supported_hst_science_products(instrument_name: object) -> bool:
+    """
+    Return True when *instrument_name* has a native product rule.
+
+    Used to drop MAST detectors with no downloadable science files under
+    :data:`HST_PRODUCT_RULES` (e.g. unsupported instruments).
+    """
+    text = str(instrument_name)
+    return any(tag in text for _suffix, tag in HST_PRODUCT_RULES)
 
 
 def galaxy_query_radius(
@@ -161,6 +226,8 @@ def filter_hst_observations(
     filters: Optional[Sequence[str]] = None,
     instruments: Sequence[str] = DEFAULT_HST_INSTRUMENTS,
     public_only: bool = True,
+    *,
+    pipeline_only: bool = True,
 ) -> Table:
     """Apply standard HST imaging masks to a MAST observation table.
 
@@ -173,9 +240,14 @@ def filter_hst_observations(
         restriction is applied.
     instruments : sequence of str, optional
         Instrument substrings matched against ``instrument_name``
-        (default :data:`DEFAULT_HST_INSTRUMENTS`).
+        (default :data:`DEFAULT_HST_INSTRUMENTS`). Bare ``ACS`` matches
+        ``ACS/WFC``, ``ACS/HRC``, and ``ACS/SBC``.
     public_only : bool, optional
         When ``True``, keep only rows with ``dataRights == 'PUBLIC'``.
+    pipeline_only : bool, optional
+        When ``True`` (default), keep only ``project == 'HST'`` rows so HAP
+        visit / skycell reprocessings (and HLA) are excluded. Those duplicates
+        re-list the same ``flc``/``flt`` files or expose only derived products.
 
     Returns
     -------
@@ -186,6 +258,12 @@ def filter_hst_observations(
         [str(t).upper() == 'HST' for t in obs_table['obs_collection']],
         [str(p).upper() == 'IMAGE' for p in obs_table['dataproduct_type']],
         _instrument_contains(obs_table, instruments),
+        # Keep only detectors with a native product rule (ACS/WFC flc,
+        # ACS/HRC+SBC flt, WFC3 UVIS/IR, WFPC2).
+        [
+            has_supported_hst_science_products(inst)
+            for inst in obs_table['instrument_name']
+        ],
         [str(f).upper() != 'DETECTION' for f in obs_table['filters']],
         [str(i).upper() != 'CALIBRATION' for i in obs_table['intentType']],
     ]
@@ -194,6 +272,9 @@ def filter_hst_observations(
         masks.append([str(f).upper() in allowed for f in obs_table['filters']])
     if public_only:
         masks.append([str(r).upper() == 'PUBLIC' for r in obs_table['dataRights']])
+    # Native calwf3/calacs/calwp2 associations only (not HAP/HLA mosaics).
+    if pipeline_only and 'project' in obs_table.colnames:
+        masks.append([str(p).upper() == 'HST' for p in obs_table['project']])
 
     out = obs_table[_combine_masks(masks)]
     out.sort('t_min')
@@ -315,8 +396,11 @@ def query_hst(
 ) -> Table:
     """Query and filter HST imaging observations near ``coord``.
 
-    If a MAST token is provided (argument or environment), authenticate first and
+    If a MAST token is provided (argument or environment), authenticate once and
     include proprietary observations (``public_only`` is forced ``False``).
+    Without a token (or if login fails), only public data are queried.
+    By default only native pipeline rows (``project == 'HST'``) are kept so
+    HAP/HLA reprocessings of the same visit are excluded.
 
     Parameters
     ----------
@@ -341,15 +425,18 @@ def query_hst(
     Table
         Filtered HST imaging observation table.
     """
-    resolved = resolve_mast_token(token)
-    if resolved:
-        mast_login(resolved, required=True)
+    if prepare_mast_auth(token):
         public_only = False
     if radius is None:
         if use_galaxy_size:
             radius = galaxy_query_radius(coord)
         else:
             radius = 5 * u.arcmin
+    logger.info(
+        'MAST Observations.query_region center=%s radius=%s',
+        coord.to_string('decimal'),
+        radius,
+    )
     obs_table = query_region(coord, radius)
     return filter_hst_observations(
         obs_table, filters=filters, instruments=instruments, public_only=public_only
@@ -369,6 +456,7 @@ def query_jwst(
     If a MAST token is provided (argument or ``MAST_API_TOKEN`` / ``MAST_TOKEN``),
     authenticate first and include proprietary observations (``public_only`` is
     forced ``False``). Without a token, only public data are returned by default.
+    A missing or failed token never aborts the query.
 
     Parameters
     ----------
@@ -391,15 +479,18 @@ def query_jwst(
     Table
         Filtered JWST imaging observation table.
     """
-    resolved = resolve_mast_token(token)
-    if resolved:
-        mast_login(resolved, required=True)
+    if prepare_mast_auth(token):
         public_only = False
     if radius is None:
         if use_galaxy_size:
             radius = galaxy_query_radius(coord, floor=5 * u.arcmin)
         else:
             radius = 5 * u.arcmin
+    logger.info(
+        'MAST Observations.query_region center=%s radius=%s',
+        coord.to_string('decimal'),
+        radius,
+    )
     obs_table = query_region(coord, radius)
     return filter_jwst_observations(
         obs_table, instruments=instruments, public_only=public_only
@@ -594,6 +685,55 @@ def filter_jwst_products(
     return product_list[_combine_masks(masks)]
 
 
+def flatten_mast_download_dir(download_dir: str | os.PathLike) -> list[str]:
+    """
+    Move nested MAST products up to *download_dir* and prune empty folders.
+
+    ``Observations.download_products`` writes
+    ``<download_dir>/mastDownload/.../<filename>``. This relocates every
+    ``*.fits`` / ``*.fits.gz`` to ``<download_dir>/<filename>`` so the
+    on-disk path is
+    ``download/<telescope>/<instrument>/<filter>/<obsid>/<filename>``.
+    """
+    root = os.path.abspath(str(download_dir))
+    if not os.path.isdir(root):
+        return []
+    moved: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            lower = name.lower()
+            if not (lower.endswith('.fits') or lower.endswith('.fits.gz')):
+                continue
+            src = os.path.join(dirpath, name)
+            if os.path.dirname(src) == root:
+                continue
+            dest = os.path.join(root, name)
+            if os.path.exists(dest):
+                if os.path.samefile(src, dest):
+                    continue
+                # Prefer the already-flattened file; drop the nested copy.
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+                continue
+            os.rename(src, dest)
+            moved.append(dest)
+    # Drop the nested MAST staging tree (non-FITS leftovers and all).
+    mast_tree = os.path.join(root, 'mastDownload')
+    if os.path.isdir(mast_tree):
+        shutil.rmtree(mast_tree, ignore_errors=True)
+    # Remove any other empty nested directories.
+    for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+        if dirpath == root:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+    return moved
+
+
 def observation_download_subdir(
     filt: str,
     obsid: object,
@@ -658,6 +798,60 @@ def observation_download_subdir(
     )
 
 
+def prune_non_full_frame_miri(
+    root: str | os.PathLike,
+    *,
+    remove: bool = True,
+) -> list[str]:
+    """
+    Remove (or list) non-full-frame MIRI ``*mirimage*`` FITS under *root*.
+
+    Subarrays and cutouts are unsupported by alignment / ``mirimask``. Called
+    after MAST download so they never remain in the science tree.
+
+    Parameters
+    ----------
+    root : str or path-like
+        Directory to scan recursively.
+    remove : bool, optional
+        If True (default), delete matching files; otherwise only return paths.
+
+    Returns
+    -------
+    list of str
+        Paths that were non-full-frame (deleted when ``remove`` is True).
+    """
+    from pathlib import Path
+
+    from st123.utils.helpers import is_full_frame_miri
+
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return []
+    rejected: list[str] = []
+    for path in root_path.rglob('*mirimage*.fits'):
+        name = path.name.lower()
+        if name.endswith('.sky.fits'):
+            continue
+        if not any(name.endswith(suf) for suf in ('_cal.fits', '_rate.fits', '_jhat.fits')):
+            # Still check other mirimage products (e.g. calints) by shape.
+            if '_cal' not in name and '_rate' not in name and '_jhat' not in name:
+                continue
+        if is_full_frame_miri(path):
+            continue
+        rejected.append(str(path))
+        logger.warning(
+            'Rejecting non-full-frame MIRI product (unsupported subarray/cutout): %s',
+            path,
+        )
+        if remove:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning('could not remove %s: %s', path, exc)
+    return rejected
+
+
 def download_jwst_observations(
     obs_table: Table,
     outdir: str,
@@ -679,7 +873,7 @@ def download_jwst_observations(
     obs_table : Table
         JWST observation table (from :func:`query_jwst` or similar).
     outdir : str
-        Root download directory.
+        Download tree root (typically ``<base-dir>/download``).
     stage : int, optional
         Calibration stage to download: ``2`` for CAL, ``3`` for I2D (default 2).
     extension : str, optional
@@ -700,9 +894,8 @@ def download_jwst_observations(
     int
         Number of observation product sets downloaded (or listed in dry-run).
     """
-    resolved = resolve_mast_token(token)
-    if resolved:
-        mast_login(resolved, required=True)
+    # Auth is normally done in query_jwst; keep a cached no-op for standalone use.
+    prepare_mast_auth(token)
 
     if obs_table is None or len(obs_table) == 0:
         logger.error('observation table is empty. Cannot download files.')
@@ -784,6 +977,26 @@ def download_jwst_observations(
                 Observations.download_products(
                     product_list, download_dir=download_dir, extension=extension
                 )
+            flat = flatten_mast_download_dir(download_dir)
+            if flat:
+                logger.debug(
+                    '[%d/%d] %s: flattened %d nested MAST product(s)',
+                    i,
+                    n_obs,
+                    subdir,
+                    len(flat),
+                )
+            # Drop MIRI subarrays/cutouts immediately so they never enter
+            # alignment or DOLPHOT staging.
+            pruned = prune_non_full_frame_miri(download_dir, remove=True)
+            if pruned:
+                logger.info(
+                    '[%d/%d] %s: removed %d non-full-frame MIRI product(s)',
+                    i,
+                    n_obs,
+                    subdir,
+                    len(pruned),
+                )
             n_downloaded += 1
         except Exception as exc:
             logger.warning('download failed for obsid=%s: %s', obsid, exc)
@@ -794,6 +1007,309 @@ def download_jwst_observations(
         n_obs,
     )
     return n_downloaded
+
+
+def filter_hst_products(
+    product_list: Table,
+    instrument_name: object,
+) -> Table:
+    """Keep HST flt/flc/c0m/c1m SCIENCE products for *instrument*.
+
+    WFPC2 ``c1m`` DQ companions are always retained — they are required for
+    AstroDrizzle and ``wfpc2mask``.
+
+    Parameters
+    ----------
+    product_list : Table
+        Raw MAST product list.
+    instrument_name : object
+        MAST ``instrument_name`` for the parent observation.
+
+    Returns
+    -------
+    Table
+        Filtered product table.
+    """
+    inst = str(instrument_name)
+    mask = [
+        is_hst_science_product(str(row['productFilename']), inst)
+        for row in product_list
+    ]
+    return product_list[np.asarray(mask, dtype=bool)]
+
+
+def _existing_hst_basenames(outdir: str) -> set[str]:
+    """Basenames of FITS files already present under *outdir* (recursive)."""
+    found: set[str] = set()
+    root = os.path.abspath(outdir)
+    if not os.path.isdir(root):
+        return found
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            lower = name.lower()
+            if lower.endswith(('.fits', '.fits.gz')):
+                found.add(name)
+    return found
+
+
+def _local_hst_science_basenames(
+    download_dir: str,
+    instrument_name: object,
+) -> list[str]:
+    """Science FITS basenames already present directly under *download_dir*."""
+    if not os.path.isdir(download_dir):
+        return []
+    out: list[str] = []
+    for name in sorted(os.listdir(download_dir)):
+        lower = name.lower()
+        if not lower.endswith(('.fits', '.fits.gz')):
+            continue
+        if is_hst_science_product(name, str(instrument_name)):
+            out.append(name)
+    return out
+
+
+def _hst_obs_locally_complete(
+    download_dir: str,
+    instrument_name: object,
+) -> list[str]:
+    """
+    Return local science basenames when the obs subdir looks complete enough
+    to skip a MAST ``get_product_list`` round-trip.
+
+    ACS/WFC3: any matching flc/flt. WFPC2: both ``c0m`` and ``c1m`` present.
+    """
+    local = _local_hst_science_basenames(download_dir, instrument_name)
+    if not local:
+        return []
+    inst = str(instrument_name).upper()
+    if 'WFPC2' in inst or 'PC/WFC' in inst:
+        has_c0m = any(n.lower().endswith('c0m.fits') for n in local)
+        has_c1m = any(n.lower().endswith('c1m.fits') for n in local)
+        return local if (has_c0m and has_c1m) else []
+    return local
+
+
+def download_hst_observations(
+    obs_table: Table,
+    outdir: str,
+    token: Optional[str] = None,
+    *,
+    layout: str = DEFAULT_DOWNLOAD_LAYOUT,
+    dry_run: bool = False,
+    extension: str = 'fits',
+) -> int:
+    """Download filtered HST science products for each observation into ``outdir``.
+
+    Products are restricted to native pipeline science files (WFPC2 ``c0m``/
+    ``c1m``, ACS/WFC ``flc``, ACS/HRC+SBC ``flt``, WFC3/UVIS ``flc``,
+    WFC3/IR ``flt``) with product ``type == 'S'``. Each unique
+    ``productFilename`` is downloaded **once** (later obsids that re-list
+    the same file are skipped), and files already present under *outdir*
+    are not re-fetched. Observation directories that already contain local
+    science products skip the MAST product-list API call.
+
+    Parameters
+    ----------
+    obs_table : Table
+        HST observation table from :func:`query_hst`.
+    outdir : str
+        Download tree root (typically ``<base-dir>/download``).
+    token : str or None, optional
+        MAST API token.
+    layout : str, optional
+        Per-observation subdirectory layout.
+    dry_run : bool, optional
+        List products without downloading.
+    extension : str, optional
+        File extension for ``download_products``.
+
+    Returns
+    -------
+    int
+        Number of observations that are ready: newly downloaded (or listed in
+        dry-run), or already fully present / duplicated on disk. ``0`` only when
+        nothing usable was found (empty table, no science products, or all
+        downloads failed).
+    """
+    # Auth is normally done in query_hst; keep a cached no-op for standalone use.
+    prepare_mast_auth(token)
+
+    if obs_table is None or len(obs_table) == 0:
+        logger.error('observation table is empty. Cannot download files.')
+        return 0
+
+    os.makedirs(outdir, exist_ok=True)
+    n_obs = len(obs_table)
+    n_downloaded = 0
+    n_ready = 0
+    n_unique = 0
+    n_skipped_dup = 0
+    n_skipped_existing = 0
+    n_skipped_local = 0
+    seen_filenames: set[str] = set()
+    existing = _existing_hst_basenames(outdir)
+    logger.info(
+        'Downloading HST products for %d observation(s) into %s '
+        '(%d existing FITS basename(s) under tree)',
+        n_obs,
+        outdir,
+        len(existing),
+    )
+    if dry_run:
+        logger.info('Dry run: no files will be downloaded')
+
+    has_collection = 'obs_collection' in obs_table.colnames
+    has_instrument = 'instrument_name' in obs_table.colnames
+    for i, obs in enumerate(obs_table, start=1):
+        filt = obs['filters']
+        obsid = obs['obsid']
+        telescope = obs['obs_collection'] if has_collection else 'HST'
+        instrument = obs['instrument_name'] if has_instrument else None
+        subdir = observation_download_subdir(
+            filt,
+            obsid,
+            layout=layout,
+            telescope=telescope,
+            instrument=instrument,
+        )
+        download_dir = os.path.join(outdir, subdir)
+
+        # Fast path: avoid MAST get_product_list when the obs subdir already
+        # has local science products (dominant cost on re-runs).
+        if not dry_run:
+            local = _hst_obs_locally_complete(download_dir, instrument)
+            if local:
+                for name in local:
+                    seen_filenames.add(name)
+                n_ready += 1
+                n_skipped_local += 1
+                n_skipped_existing += len(local)
+                logger.info(
+                    '[%d/%d] %s: %d science product(s) already on disk — '
+                    'skipping MAST product list',
+                    i,
+                    n_obs,
+                    subdir,
+                    len(local),
+                )
+                continue
+
+        try:
+            logger.info(
+                '[%d/%d] %s: fetching MAST product list (obsid=%s)...',
+                i,
+                n_obs,
+                subdir,
+                obsid,
+            )
+            t0 = time.monotonic()
+            with capture_output():
+                raw_products = Observations.get_product_list(obs)
+            dt = time.monotonic() - t0
+            logger.info(
+                '[%d/%d] %s: product list returned %d row(s) in %.1fs',
+                i,
+                n_obs,
+                subdir,
+                len(raw_products) if raw_products is not None else 0,
+                dt,
+            )
+            # Simple exposures only (associations / HAP derived are type C/D).
+            if 'type' in raw_products.colnames:
+                raw_products = raw_products[raw_products['type'] == 'S']
+            product_list = filter_hst_products(raw_products, instrument)
+        except Exception as exc:
+            logger.warning('could not get products for obsid=%s: %s', obsid, exc)
+            continue
+        if len(product_list) == 0:
+            # Should be rare after filter_hst_observations drops unsupported
+            # detectors; keep as debug noise, not a failure.
+            logger.debug(
+                '[%d/%d] %s: no supported native HST products '
+                '(instrument=%s; expect flc/flt/c0m per HST_PRODUCT_RULES)',
+                i,
+                n_obs,
+                subdir,
+                instrument,
+            )
+            continue
+
+        # Dedupe across obsids; skip files already on disk under outdir.
+        keep_idx: list[int] = []
+        for j, row in enumerate(product_list):
+            fname = str(row['productFilename'])
+            if fname in seen_filenames:
+                n_skipped_dup += 1
+                continue
+            if fname in existing:
+                n_skipped_existing += 1
+                seen_filenames.add(fname)
+                continue
+            seen_filenames.add(fname)
+            keep_idx.append(j)
+        if not keep_idx:
+            # Already on disk (or duplicate of another obsid) — treat as success.
+            n_ready += 1
+            logger.info(
+                '[%d/%d] %s: all science products already downloaded or duplicated',
+                i,
+                n_obs,
+                subdir,
+            )
+            continue
+        product_list = product_list[np.asarray(keep_idx, dtype=int)]
+        n_unique += len(product_list)
+
+        os.makedirs(download_dir, exist_ok=True)
+        logger.info(
+            '[%d/%d] %s: %s %d unique product(s)...',
+            i,
+            n_obs,
+            subdir,
+            'listing' if dry_run else 'downloading',
+            len(product_list),
+        )
+        for row in product_list:
+            logger.info('    %s', row['productFilename'])
+        if dry_run:
+            n_downloaded += 1
+            n_ready += 1
+            continue
+        try:
+            with capture_output():
+                Observations.download_products(
+                    product_list, download_dir=download_dir, extension=extension
+                )
+            flat = flatten_mast_download_dir(download_dir)
+            if flat:
+                logger.debug(
+                    '[%d/%d] %s: flattened %d nested MAST product(s)',
+                    i,
+                    n_obs,
+                    subdir,
+                    len(flat),
+                )
+            n_downloaded += 1
+            n_ready += 1
+            for row in product_list:
+                existing.add(str(row['productFilename']))
+        except Exception as exc:
+            logger.warning('download failed for obsid=%s: %s', obsid, exc)
+
+    logger.info(
+        'Finished: downloaded HST products for %d/%d observation(s) '
+        '(%d unique file(s); skipped %d duplicate listing(s), '
+        '%d already on disk, %d local obs skip(s); %d observation(s) ready).',
+        n_downloaded,
+        n_obs,
+        n_unique,
+        n_skipped_dup,
+        n_skipped_existing,
+        n_skipped_local,
+        n_ready,
+    )
+    return n_ready
 
 
 def parse_s_region(region: str) -> shapely.Polygon:

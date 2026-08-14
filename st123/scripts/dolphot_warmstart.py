@@ -1,50 +1,145 @@
 #!/usr/bin/env python3
-"""Set up a NIRCam→MIRI DOLPHOT warm-start run (does not execute dolphot)."""
+"""Prepare NIRCam→MIRI/HST DOLPHOT warm-start runs (does not execute dolphot)."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from st123.photometry.warmstart import setup_miri_warmstart
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
     configure_logging_from_args,
     create_parser as build_parser,
     default_alignment_summary,
+    default_hst_warmstart_outdir,
     default_phot_dir,
     default_warmstart_outdir,
+    parse_instruments,
     resolve_project_root,
 )
 from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
 
+def resolve_warmstart_targets(
+    instruments: list[str] | None,
+    *,
+    legacy_target: str | None = None,
+) -> list[str]:
+    """
+    Map ``--instruments`` / legacy ``--target`` to warm-start target list.
+
+    ``MIRI`` → ``miri``; ``HST`` / ``ACS`` / ``WFC3`` / ``WFPC2`` → ``hst``.
+    NIRCam tokens are ignored (seed catalog, not a warm-start science target).
+    """
+    plan = resolve_warmstart_plan(instruments, legacy_target=legacy_target)
+    return [target for target, _ in plan]
+
+
+def resolve_warmstart_plan(
+    instruments: list[str] | None,
+    *,
+    legacy_target: str | None = None,
+) -> list[tuple[str, list[str] | None]]:
+    """
+    Return ``[(target, hst_instrument_filter), …]``.
+
+    For HST, *hst_instrument_filter* is ``None`` when the user asked for bare
+    ``HST`` (all cameras), or e.g. ``['ACS', 'WFC3']`` when those were named
+    explicitly so WFPC2 can be excluded.
+    """
+    if instruments:
+        want_miri = False
+        hst_named: list[str] = []
+        want_all_hst = False
+        for raw in instruments:
+            key = str(raw).strip().upper().split('/')[0]
+            if key == 'NRC':
+                key = 'NIRCAM'
+            if key == 'MIRI':
+                want_miri = True
+            elif key == 'HST':
+                want_all_hst = True
+            elif key in ('ACS', 'WFC3', 'WFPC2'):
+                if key not in hst_named:
+                    hst_named.append(key)
+            elif key == 'NIRCAM':
+                continue
+            else:
+                raise ValueError(
+                    f'Unsupported warm-start instrument {raw!r}; '
+                    'use MIRI and/or HST (ACS WFC3 WFPC2)'
+                )
+        plan: list[tuple[str, list[str] | None]] = []
+        if want_miri:
+            plan.append(('miri', None))
+        if want_all_hst or hst_named:
+            # Bare HST → all cameras; ACS WFC3 → those only (no WFPC2).
+            hst_filter = hst_named if hst_named else None
+            plan.append(('hst', hst_filter))
+        if not plan:
+            raise ValueError(
+                '--instruments must include MIRI and/or HST '
+                '(NIRCam alone is the seed catalog, not a warm-start target)'
+            )
+        return plan
+    target = (legacy_target or 'miri').lower()
+    if target not in ('miri', 'hst'):
+        raise ValueError(f'Unsupported --target {legacy_target!r}')
+    return [(target, None)]
+
 
 def create_parser():
     parser = build_parser(
         description=(
-            'Prepare a warm-start DOLPHOT directory that appends overlapping '
-            'MIRI JHAT frames to an existing NIRCam run (xytfile mode). '
-            'Prefer --base-dir; use --nircam-dir/--outdir only when those '
-            'paths must be set independently.'
+            'Prepare a warm-start DOLPHOT directory from an existing free '
+            'NIRCam (or phot_*) run (xytfile mode). Example:\n'
+            '  dolphot-warmstart-prep --instruments MIRI --base-dir "$PROJ" '
+            '--dolphot-dir "$PHOTDIR" --prune-xyt --ncores "$NCORES" -v\n'
+            'Stages overlapping MIRI or HST JHAT science against the NIRCam '
+            'reference. Does not execute dolphot (use run-dolphot afterward).'
         ),
     )
     add_base_dir(
         parser,
         required=False,
         help=(
-            'Project root (…/<object> containing JWST/, reduction/, dolphot/). '
-            'Defaults: reduction/phot_0_0 and dolphot/nircam_miri_0_0.'
+            'Project root (…/<object> containing JWST/ or HST/, reduction/, '
+            'dolphot/). Defaults: reduction/phot_0_0 seed and '
+            'dolphot/nircam_miri_0_0 or dolphot/nircam_hst_0_0 outdirs.'
         ),
     )
     parser.add_argument(
+        '--instruments',
+        nargs='+',
+        default=None,
+        help=(
+            'Warm-start science instrument(s): MIRI and/or HST. '
+            'ACS WFC3 (recommended) selects HST and stages only those '
+            'cameras (excludes WFPC2). Bare HST includes all HST JHAT. '
+            'Case-insensitive. Replaces --target.'
+        ),
+    )
+    parser.add_argument(
+        '--target',
+        choices=('miri', 'hst'),
+        default=None,
+        help=(
+            'Deprecated: use --instruments MIRI|HST. Warm-start science '
+            'instrument when --instruments is omitted (default: miri).'
+        ),
+    )
+    parser.add_argument(
+        '--dolphot-dir',
         '--nircam-dir',
+        dest='dolphot_dir',
         type=str,
         default=None,
         help=(
-            'Existing NIRCam DOLPHOT run directory (dolphot.param + .phot). '
+            'Existing free DOLPHOT run directory to seed from '
+            '(dolphot.param + .phot). Typically $PHOTDIR from dolphot-prep / '
+            'run-dolphot. Alias: --nircam-dir. '
             'Default: <base-dir>/reduction/phot_0_0.'
         ),
     )
@@ -54,14 +149,15 @@ def create_parser():
         default=None,
         help=(
             'Warm-start run directory to create. '
-            'Default: <base-dir>/dolphot/nircam_miri_0_0.'
+            'Default: <base-dir>/dolphot/nircam_miri_0_0 or nircam_hst_0_0. '
+            'With multiple --instruments, omit --outdir to use each default.'
         ),
     )
     parser.add_argument(
         '--alignment-summary',
         type=str,
         default=None,
-        help='Alignment summary listing SUCCESS MIRI JHAT paths.',
+        help='Alignment summary listing SUCCESS MIRI JHAT paths (MIRI target).',
     )
     parser.add_argument(
         '--miri-jhat',
@@ -70,24 +166,30 @@ def create_parser():
         help='Explicit MIRI *_jhat.fits paths (overrides discovery).',
     )
     parser.add_argument(
+        '--hst-jhat',
+        nargs='+',
+        default=None,
+        help='Explicit HST *_jhat.fits paths (overrides discovery).',
+    )
+    parser.add_argument(
         '--photfile',
         '--phot-file',
         dest='photfile',
         type=str,
         default=None,
-        help='NIRCam .phot catalog for warmstart.xyt (default: auto-detect).',
+        help='Seed .phot catalog for warmstart.xyt (default: auto-detect).',
     )
     parser.add_argument(
         '--min-overlap',
         type=float,
         default=0.0,
-        help='Minimum ref_overlap_frac when reading an alignment summary.',
+        help='Minimum ref_overlap_frac when reading an alignment summary (MIRI).',
     )
     parser.add_argument(
         '--phot-out',
         type=str,
         default=None,
-        help='DOLPHOT output catalog name (default: <seed>_nircam_miri.phot).',
+        help='DOLPHOT output catalog name (default depends on target).',
     )
     parser.add_argument(
         '--dolphot-bin',
@@ -104,85 +206,300 @@ def create_parser():
         help='Do not run mirimask/calcsky (frames already prepared).',
     )
     parser.add_argument(
+        '--skip-hst-prep',
+        action='store_true',
+        help='Do not run HST mask/split/calcsky.',
+    )
+    parser.add_argument(
+        '--include-nircam-science',
+        action='store_true',
+        help='Also stage NIRCam science frames (HST target; default: HST only).',
+    )
+    parser.add_argument(
         '--copy',
         action='store_true',
-        help='Copy NIRCam products instead of hardlinking.',
+        help='Copy seed products instead of hardlinking.',
+    )
+    parser.add_argument(
+        '--prune-xyt',
+        action='store_true',
+        help=(
+            'Thin warmstart.xyt with instrument defaults: MIRI type=1, '
+            'SNR>=10, crowd<=0.5, sharp^2<=0.01, minsep=0.30"; HST type=1, '
+            'SNR>=5, crowd<=0.5, sharp^2<=0.01, minsep=0.15" '
+            '(overridable with --xyt-* flags).'
+        ),
+    )
+    parser.add_argument(
+        '--prune-xyt-for-miri',
+        action='store_true',
+        help='Deprecated alias for MIRI --prune-xyt defaults.',
+    )
+    parser.add_argument(
+        '--prune-xyt-for-hst',
+        action='store_true',
+        help='Deprecated alias for HST --prune-xyt defaults.',
+    )
+    parser.add_argument(
+        '--xyt-types',
+        type=int,
+        nargs='+',
+        default=None,
+        help='DOLPHOT object types to keep in warmstart.xyt (e.g. 1).',
+    )
+    parser.add_argument(
+        '--xyt-snr-min',
+        type=float,
+        default=None,
+        help='Minimum seed SNR for warmstart.xyt.',
+    )
+    parser.add_argument(
+        '--xyt-crowd-max',
+        type=float,
+        default=None,
+        help='Maximum crowding for warmstart.xyt seeds.',
+    )
+    parser.add_argument(
+        '--xyt-sharp2-max',
+        type=float,
+        default=None,
+        help='Maximum sharpness^2 for warmstart.xyt seeds.',
+    )
+    parser.add_argument(
+        '--xyt-min-sep-arcsec',
+        type=float,
+        default=None,
+        help='Minimum seed separation on the reference (arcsec).',
+    )
+    parser.add_argument(
+        '--xyt-force-xy',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated reference X,Y to always keep in warmstart.xyt '
+            '(e.g. 1584.25,2793.24).'
+        ),
+    )
+    parser.add_argument(
+        '--xyt-max-radius-arcsec',
+        type=float,
+        default=None,
+        help=(
+            'Keep only warmstart.xyt seeds within this radius of '
+            '--xyt-force-xy / --xyt-center-xy.'
+        ),
+    )
+    parser.add_argument(
+        '--xyt-center-xy',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated reference X,Y center for --xyt-max-radius-arcsec '
+            '(defaults to --xyt-force-xy when set).'
+        ),
     )
     add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
 
 
-def _resolve_warmstart_paths(args) -> tuple[str, str, str | None, str | None]:
-    """Return nircam_dir, outdir, data_root, alignment_summary."""
-    if args.nircam_dir and args.outdir:
+def _resolve_warmstart_paths(
+    args,
+    *,
+    target: str | None = None,
+) -> tuple[str, str, str | None, str | None]:
+    """Return seed_dir, outdir, data_root, alignment_summary for one target."""
+    target = (target or getattr(args, 'target', None) or 'miri').lower()
+    seed = getattr(args, 'dolphot_dir', None) or getattr(args, 'nircam_dir', None)
+    if seed and args.outdir:
         data_root = (
             str(resolve_project_root(args.base_dir))
             if args.base_dir
             else None
         )
         summary = args.alignment_summary
-        if summary is None and args.base_dir:
+        if summary is None and args.base_dir and target == 'miri':
             summary = str(default_alignment_summary(args.base_dir))
-        return args.nircam_dir, args.outdir, data_root, summary
+        return seed, args.outdir, data_root, summary
+
+    if args.base_dir is None and not seed:
+        raise ValueError(
+            'provide --base-dir or both --dolphot-dir and --outdir'
+        )
 
     if args.base_dir is None:
         raise ValueError(
-            'provide --base-dir or both --nircam-dir and --outdir'
+            'provide --base-dir when --outdir is omitted '
+            '(needed for default warm-start output path)'
         )
 
     base = Path(args.base_dir)
-    nircam = args.nircam_dir or str(default_phot_dir(base))
-    outdir = args.outdir or str(default_warmstart_outdir(base))
+    seed_dir = seed or str(default_phot_dir(base))
+    if args.outdir:
+        outdir = args.outdir
+    elif target == 'hst':
+        outdir = str(default_hst_warmstart_outdir(base))
+    else:
+        outdir = str(default_warmstart_outdir(base))
     data_root = str(resolve_project_root(base))
     summary = args.alignment_summary
-    if summary is None:
+    if summary is None and target == 'miri':
         summary = str(default_alignment_summary(base))
-    return nircam, outdir, data_root, summary
+    return seed_dir, outdir, data_root, summary
+
+
+def _parse_xy(flag: str, value: str | None) -> tuple[float, float] | None:
+    if not value:
+        return None
+    parts = [float(x) for x in str(value).split(',')]
+    if len(parts) != 2:
+        raise ValueError(f'{flag} must be X,Y')
+    return (parts[0], parts[1])
+
+
+def _prune_flags_for_target(args, target: str) -> bool:
+    if target == 'hst':
+        return bool(args.prune_xyt or args.prune_xyt_for_hst)
+    return bool(args.prune_xyt or args.prune_xyt_for_miri)
+
+
+def _run_one_target(
+    args,
+    target: str,
+    *,
+    hst_instruments: list[str] | None = None,
+) -> int:
+    seed_dir, outdir, data_root, summary = _resolve_warmstart_paths(
+        args, target=target
+    )
+    prune = _prune_flags_for_target(args, target)
+
+    if args.verbose:
+        logger.info('Target:     %s', target)
+        logger.info('Seed dir:   %s', seed_dir)
+        logger.info('Outdir:     %s', outdir)
+        logger.info('Data root:  %s', data_root)
+        if target == 'hst' and hst_instruments:
+            logger.info('HST inst:   %s', ', '.join(hst_instruments))
+        if target == 'miri':
+            logger.info('Summary:    %s', summary)
+        if prune:
+            logger.info('Prune xyt:  yes (%s defaults)', target)
+
+    force_xy_pt = _parse_xy('--xyt-force-xy', args.xyt_force_xy)
+    center_xy = _parse_xy('--xyt-center-xy', args.xyt_center_xy)
+    force_xy = [force_xy_pt] if force_xy_pt is not None else None
+
+    if target == 'hst':
+        from st123.photometry.warmstart import setup_hst_warmstart
+
+        result = setup_hst_warmstart(
+            seed_dir,
+            outdir,
+            hst_jhat=args.hst_jhat,
+            data_root=data_root,
+            instruments=hst_instruments,
+            photfile=args.photfile,
+            dolphot_bin=args.dolphot_bin,
+            phot_out=args.phot_out,
+            prepare_hst=not args.skip_hst_prep,
+            include_nircam_science=args.include_nircam_science,
+            use_hardlink=not args.copy,
+            xyt_types=args.xyt_types,
+            xyt_snr_min=args.xyt_snr_min,
+            xyt_crowd_max=args.xyt_crowd_max,
+            xyt_sharp2_max=args.xyt_sharp2_max,
+            xyt_min_sep_arcsec=args.xyt_min_sep_arcsec,
+            xyt_force_xy=force_xy,
+            xyt_max_radius_arcsec=args.xyt_max_radius_arcsec,
+            xyt_center_xy=center_xy,
+            prune_xyt_for_hst=prune,
+            ncores=args.ncores,
+        )
+    else:
+        from st123.photometry.warmstart import setup_miri_warmstart
+
+        result = setup_miri_warmstart(
+            seed_dir,
+            outdir,
+            miri_jhat=args.miri_jhat,
+            data_root=data_root,
+            alignment_summary=summary,
+            photfile=args.photfile,
+            min_overlap=args.min_overlap,
+            dolphot_bin=args.dolphot_bin,
+            phot_out=args.phot_out,
+            prepare_miri=not args.skip_miri_prep,
+            use_hardlink=not args.copy,
+            xyt_types=args.xyt_types,
+            xyt_snr_min=args.xyt_snr_min,
+            xyt_crowd_max=args.xyt_crowd_max,
+            xyt_sharp2_max=args.xyt_sharp2_max,
+            xyt_min_sep_arcsec=args.xyt_min_sep_arcsec,
+            xyt_force_xy=force_xy,
+            xyt_max_radius_arcsec=args.xyt_max_radius_arcsec,
+            xyt_center_xy=center_xy,
+            prune_xyt_for_miri=prune,
+            ncores=args.ncores,
+        )
+
+    logger.info('Warm-start directory: %s', result.outdir)
+    logger.info('  Seed frames:  %d', len(result.nircam_images))
+    if target == 'hst':
+        logger.info('  HST frames:   %d', len(result.hst_images))
+    else:
+        logger.info('  MIRI frames:  %d', len(result.miri_images))
+    logger.info('  Param file:   %s', result.param_file)
+    logger.info('  xyt file:     %s', result.xyt_file)
+    logger.info('  Phot output:  %s', result.phot_out)
+    if result.plan is not None:
+        logger.info('  Split parts:  %d', len(result.plan.parts))
+    logger.info('Run DOLPHOT with:')
+    for cmd in result.commands or ([result.command] if result.command else []):
+        logger.info('  %s', cmd)
+    return 0
 
 
 def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
-    configure_logging_from_args(args, 'dolphot-warmstart')
+    configure_logging_from_args(args, 'dolphot-warmstart-prep')
     try:
+        instruments = parse_instruments(getattr(args, 'instruments', None))
         try:
-            nircam_dir, outdir, data_root, summary = _resolve_warmstart_paths(args)
+            plan = resolve_warmstart_plan(
+                instruments, legacy_target=args.target
+            )
         except ValueError as exc:
             logger.error('%s', exc)
-            return 1
+            return 2
 
-        if args.verbose:
-            logger.info('NIRCam dir: %s', nircam_dir)
-            logger.info('Outdir:     %s', outdir)
-            logger.info('Data root:  %s', data_root)
-            logger.info('Summary:    %s', summary)
-
-        try:
-            result = setup_miri_warmstart(
-                nircam_dir,
-                outdir,
-                miri_jhat=args.miri_jhat,
-                data_root=data_root,
-                alignment_summary=summary,
-                photfile=args.photfile,
-                min_overlap=args.min_overlap,
-                dolphot_bin=args.dolphot_bin,
-                phot_out=args.phot_out,
-                prepare_miri=not args.skip_miri_prep,
-                use_hardlink=not args.copy,
-                ncores=args.ncores,
+        if args.outdir is not None and len(plan) > 1:
+            logger.error(
+                '--outdir cannot be combined with multiple --instruments; '
+                'omit --outdir to use each target default, or prep one at a time'
             )
-        except FileNotFoundError as exc:
-            logger.error('%s', exc)
-            return 1
-        logger.info('Warm-start directory: %s', result.outdir)
-        logger.info('  NIRCam frames: %d', len(result.nircam_images))
-        logger.info('  MIRI frames:   %d', len(result.miri_images))
-        logger.info('  Param file:    %s', result.param_file)
-        logger.info('  xyt file:      %s', result.xyt_file)
-        logger.info('  Phot output:   %s', result.phot_out)
-        logger.info('Run DOLPHOT with:')
-        logger.info('  %s', result.command)
-        return 0
+            return 2
+
+        # Expose resolved seed path under both names for path helper / tests.
+        if getattr(args, 'dolphot_dir', None):
+            args.nircam_dir = args.dolphot_dir
+
+        rc = 0
+        for target, hst_instruments in plan:
+            # Stash for helpers that still read args.target
+            args.target = target
+            try:
+                target_rc = _run_one_target(
+                    args, target, hst_instruments=hst_instruments
+                )
+            except ValueError as exc:
+                logger.error('%s', exc)
+                return 1
+            except FileNotFoundError as exc:
+                logger.error('%s', exc)
+                return 1
+            if target_rc != 0:
+                rc = target_rc
+        return rc
     finally:
         shutdown_logging()
 

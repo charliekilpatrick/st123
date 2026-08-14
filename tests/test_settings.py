@@ -52,14 +52,15 @@ def test_acceptable_filters_unique_and_uppercase():
 
 
 def test_best_reference_filters_are_lowercase_subset():
-    assert settings.BEST_REFERENCE_FILTERS[0] == 'f606w'
+    assert settings.BEST_REFERENCE_FILTERS[0] == 'f625w'
     for filt in settings.BEST_REFERENCE_FILTERS:
         assert filt == filt.lower()
         assert filt.upper() in settings.acceptable_filters
 
 
 def test_mast_and_alignment_defaults():
-    assert settings.DEFAULT_HST_FILTERS == ('F275W', 'F555W', 'F814W')
+    assert settings.DEFAULT_HST_FILTERS is None
+    assert 'WFC3' in settings.DEFAULT_HST_INSTRUMENTS
     assert 'NIRCAM' in settings.DEFAULT_JWST_INSTRUMENTS
     assert settings.DEFAULT_DOWNLOAD_LAYOUT == 'telescope/instrument/filter/obsid'
     assert settings.DEFAULT_MAX_REFERENCE_DISPERSION_MAS == 70.0

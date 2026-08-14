@@ -67,8 +67,80 @@ def test_query_mast_jwst_empty_table(tmp_path):
         mock_q.return_value = Table()
         n = query_mast_jwst(coord, outdir=str(outdir), radius=1 * u.arcmin)
     assert n == 0
+    assert n.skipped_miri_only is False
     mock_dl.assert_not_called()
     assert outdir.is_dir()
+
+
+def test_query_mast_jwst_skips_miri_only_by_default(tmp_path):
+    from astropy.table import Table
+
+    from st123.mast.download import MastDownloadResult
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    outdir = tmp_path / 'dl'
+    obs = Table(
+        {
+            'instrument_name': ['MIRI/IMAGE', 'MIRI/IMAGE'],
+            'filters': ['F560W', 'F1000W'],
+            'calib_level': [2, 2],
+        }
+    )
+    with (
+        patch('st123.mast.download.query_jwst', return_value=obs),
+        patch(
+            'st123.mast.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
+        patch('st123.mast.download.download_jwst_observations') as mock_dl,
+    ):
+        result = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+            instruments=['NIRCAM', 'MIRI'],
+        )
+    assert isinstance(result, MastDownloadResult)
+    assert result.n_observations == 0
+    assert result.skipped_miri_only is True
+    mock_dl.assert_not_called()
+
+    with (
+        patch('st123.mast.download.query_jwst', return_value=obs),
+        patch(
+            'st123.mast.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
+        patch(
+            'st123.mast.download.download_jwst_observations', return_value=2
+        ) as mock_dl,
+    ):
+        forced = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+            instruments=['NIRCAM', 'MIRI'],
+            force_miri=True,
+        )
+    assert forced.n_observations == 2
+    assert forced.skipped_miri_only is False
+    mock_dl.assert_called_once()
+
+
+def test_download_parser_accepts_force_miri():
+    parser = download_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--ra',
+            '150.0',
+            '--dec',
+            '2.0',
+            '--base-dir',
+            '/tmp/out',
+            '--force-miri',
+        ]
+    )
+    assert args.force_miri is True
 
 
 def test_download_parser_requires_core_args():
@@ -139,19 +211,183 @@ def test_download_parser_accepts_download_dir_and_layout():
 
 
 def test_parse_instruments_comma_and_space():
-    assert download_script.parse_instruments(None) is None
-    assert download_script.parse_instruments(['NIRCAM,MIRI']) == ['NIRCAM', 'MIRI']
-    assert download_script.parse_instruments(['NIRCAM', 'MIRI']) == ['NIRCAM', 'MIRI']
-    assert download_script.parse_instruments(['NIRCAM, MIRI', 'NIRISS']) == [
+    from st123.scripts.utils.options import parse_instruments, resolve_instruments
+
+    assert parse_instruments(None) is None
+    assert parse_instruments(['NIRCAM,MIRI']) == ['NIRCAM', 'MIRI']
+    assert parse_instruments(['NIRCAM', 'MIRI']) == ['NIRCAM', 'MIRI']
+    assert parse_instruments(['NIRCAM, MIRI', 'NIRISS']) == [
         'NIRCAM',
         'MIRI',
         'NIRISS',
     ]
+    assert resolve_instruments(['hst']) == ['ACS', 'WFC3', 'WFPC2']
+    assert resolve_instruments(['jwst']) == ['NIRCAM', 'MIRI']
+
+
+def test_parse_telescopes_multi_and_comma():
+    assert download_script.parse_telescopes(None) == ['jwst']
+    assert download_script.parse_telescopes(['jwst']) == ['jwst']
+    assert download_script.parse_telescopes(['hst', 'jwst']) == ['hst', 'jwst']
+    assert download_script.parse_telescopes(['hst,jwst']) == ['hst', 'jwst']
+    assert download_script.parse_telescopes(['JWST', 'hst', 'jwst']) == [
+        'jwst',
+        'hst',
+    ]
+    with pytest.raises(ValueError, match='Unsupported telescope'):
+        download_script.parse_telescopes(['roman'])
+
+
+def test_infer_and_resolve_telescopes_from_instruments():
+    assert download_script.infer_telescopes_from_instruments(
+        ['NIRCAM', 'MIRI', 'ACS', 'WFC3']
+    ) == ['jwst', 'hst']
+    assert download_script.infer_telescopes_from_instruments(['ACS']) == ['hst']
+    assert download_script.infer_telescopes_from_instruments(['MIRI']) == ['jwst']
+    assert download_script.resolve_telescopes(
+        None, ['NIRCAM', 'ACS', 'WFC3']
+    ) == ['jwst', 'hst']
+    assert download_script.resolve_telescopes(None, None) == ['jwst']
+    assert download_script.resolve_telescopes(['hst'], ['NIRCAM', 'ACS']) == [
+        'hst'
+    ]
+    with pytest.raises(ValueError, match='Cannot infer'):
+        download_script.infer_telescopes_from_instruments(['NOTAREAL'])
+
+
+def test_partition_instruments_by_telescope_mixed():
+    by_tel = download_script.partition_instruments_by_telescope(
+        ['NIRCAM', 'MIRI', 'ACS', 'WFC3'],
+        ['hst', 'jwst'],
+    )
+    assert by_tel['jwst'] == ['NIRCAM', 'MIRI']
+    assert by_tel['hst'] == ['ACS', 'WFC3']
+
+
+def test_partition_instruments_defaults_per_telescope():
+    by_tel = download_script.partition_instruments_by_telescope(
+        None, ['hst', 'jwst']
+    )
+    assert by_tel['jwst'] == ['NIRCAM', 'MIRI']
+    assert by_tel['hst'] == ['ACS', 'WFC3', 'WFPC2']
+
+
+def test_download_parser_accepts_multi_telescope():
+    parser = download_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--telescope',
+            'hst',
+            'jwst',
+            '--ra',
+            '150.0',
+            '--dec',
+            '2.0',
+            '--base-dir',
+            '/tmp/out',
+            '--instruments',
+            'NIRCAM',
+            'MIRI',
+            'ACS',
+            'WFC3',
+        ]
+    )
+    assert args.telescope == ['hst', 'jwst']
+    assert args.instruments == ['NIRCAM', 'MIRI', 'ACS', 'WFC3']
 
 
 def test_download_main_success(monkeypatch, tmp_path):
+    from st123.mast.download import MastDownloadResult
+
     monkeypatch.chdir(tmp_path)
-    with patch('st123.scripts.download.query_mast_jwst', return_value=3) as mock_q:
+    project = tmp_path / 'o'
+    with (
+        patch(
+            'st123.mast.download.query_mast_jwst',
+            return_value=MastDownloadResult(3),
+        ) as mock_q,
+        patch('st123.scripts.link_raw.link_raw_tree', return_value=2) as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--outdir',
+                str(project),
+            ]
+        )
+    assert rc == 0
+    mock_q.assert_called_once()
+    assert mock_q.call_args.kwargs['outdir'] == str(project / 'download')
+    assert mock_q.call_args.kwargs['force_miri'] is False
+    # Default JWST instruments are linked individually (never instrument=ALL).
+    assert mock_link.call_count == 2
+    linked = {(c.kwargs['telescope'], c.kwargs['instrument']) for c in mock_link.call_args_list}
+    assert linked == {('JWST', 'NIRCAM'), ('JWST', 'MIRI')}
+    assert all(c.kwargs['base_dir'] == str(project) for c in mock_link.call_args_list)
+
+
+def test_download_main_miri_only_skip_is_success(monkeypatch, tmp_path):
+    from st123.mast.download import MastDownloadResult
+
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / 'o'
+    with (
+        patch(
+            'st123.mast.download.query_mast_jwst',
+            return_value=MastDownloadResult(0, skipped_miri_only=True),
+        ),
+        patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--outdir',
+                str(project),
+            ]
+        )
+    assert rc == 0
+    mock_link.assert_not_called()
+
+
+def test_download_main_links_single_instrument(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch('st123.mast.download.query_mast_hst', return_value=1),
+        patch('st123.scripts.link_raw.link_raw_tree', return_value=4) as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--telescope',
+                'hst',
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--base-dir',
+                str(tmp_path / 'o'),
+                '--instruments',
+                'ACS',
+                '--radius',
+                '5',
+            ]
+        )
+    assert rc == 0
+    assert mock_link.call_args.kwargs['telescope'] == 'HST'
+    assert mock_link.call_args.kwargs['instrument'] == 'ACS'
+
+
+def test_download_main_skip_link_raw(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch('st123.mast.download.query_mast_jwst', return_value=1),
+        patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
+    ):
         rc = download_script.main(
             [
                 '--ra',
@@ -160,10 +396,11 @@ def test_download_main_success(monkeypatch, tmp_path):
                 '2.0',
                 '--outdir',
                 str(tmp_path / 'o'),
+                '--skip-link-raw',
             ]
         )
     assert rc == 0
-    mock_q.assert_called_once()
+    mock_link.assert_not_called()
 
 
 def test_download_main_bad_coords():
@@ -175,8 +412,86 @@ def test_download_main_bad_coords():
 
 def test_download_main_zero_products(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    with patch('st123.scripts.download.query_mast_jwst', return_value=0):
+    with (
+        patch('st123.mast.download.query_mast_jwst', return_value=0),
+        patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
+    ):
         rc = download_script.main(
             ['--ra', '150.0', '--dec', '2.0', '--outdir', str(tmp_path)]
         )
     assert rc == 1
+    mock_link.assert_not_called()
+
+
+def test_download_main_hst_already_on_disk_is_success(monkeypatch, tmp_path):
+    """Re-running download when products exist should exit 0 and still link-raw."""
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / 'o'
+    with (
+        patch('st123.mast.download.query_mast_hst', return_value=2) as mock_q,
+        patch('st123.scripts.link_raw.link_raw_tree', return_value=4) as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--telescope',
+                'hst',
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--base-dir',
+                str(project),
+                '--instruments',
+                'ACS',
+                '--radius',
+                '5',
+            ]
+        )
+    assert rc == 0
+    mock_q.assert_called_once()
+    mock_link.assert_called_once()
+
+
+def test_download_main_multi_telescope_combined(monkeypatch, tmp_path):
+    """Instruments alone imply HST+JWST; --telescope is not required."""
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / 'o'
+    with (
+        patch('st123.mast.download.query_mast_hst', return_value=2) as mock_hst,
+        patch('st123.mast.download.query_mast_jwst', return_value=5) as mock_jwst,
+        patch('st123.scripts.link_raw.link_raw_tree', return_value=3) as mock_link,
+    ):
+        rc = download_script.main(
+            [
+                '--ra',
+                '150.0',
+                '--dec',
+                '2.0',
+                '--base-dir',
+                str(project),
+                '--instruments',
+                'NIRCAM',
+                'MIRI',
+                'ACS',
+                'WFC3',
+                '--radius',
+                '3',
+            ]
+        )
+    assert rc == 0
+    mock_hst.assert_called_once()
+    mock_jwst.assert_called_once()
+    assert mock_hst.call_args.kwargs['instruments'] == ['ACS', 'WFC3']
+    assert mock_jwst.call_args.kwargs['instruments'] == ['NIRCAM', 'MIRI']
+    # One link-raw call per requested instrument (not ALL under each telescope).
+    assert mock_link.call_count == 4
+    linked = {
+        (c.kwargs['telescope'], c.kwargs['instrument'])
+        for c in mock_link.call_args_list
+    }
+    assert linked == {
+        ('JWST', 'NIRCAM'),
+        ('JWST', 'MIRI'),
+        ('HST', 'ACS'),
+        ('HST', 'WFC3'),
+    }

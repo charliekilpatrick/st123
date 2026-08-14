@@ -8,6 +8,12 @@ Canonical path / runtime flags
     of this path (e.g. ``.../NGC3310``). There is no separate ``--obj``.
 ``--ncores``
     Parallel worker count (alias: ``--workers``).
+``--instruments`` / ``--instrument``
+    Shared instrument list. Mission aliases: ``hst`` → ACS WFC3 WFPC2,
+    ``jwst`` → NIRCAM MIRI, ``all`` → NIRCAM MIRI ACS WFC3 WFPC2.
+``--ra`` / ``--dec`` / ``--radius``
+    Shared sky coordinates (required by download; accepted elsewhere so
+    the same argv works across pipeline stages).
 ``--plot`` / ``--verbose`` / ``--version`` / ``--dry-run``
     Shared runtime switches.
 
@@ -24,16 +30,24 @@ path flags such as ``--miri`` or ``--align`` for that role.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
 from st123 import __version__ as ST123_VERSION
+from st123.utils.settings import (
+    ALL_PIPELINE_INSTRUMENTS,
+    DEFAULT_HST_INSTRUMENTS,
+    DEFAULT_JWST_INSTRUMENTS,
+    DOWNLOAD_DIR_NAME,
+)
 
 # ---------------------------------------------------------------------------
 # Path layout helpers (project root vs reduction workdir)
 # ---------------------------------------------------------------------------
 
 _REDUCTION_MARKERS = ('raw', 'jhat', 'align', 'reference')
+_PROJECT_SUBDIRS = (DOWNLOAD_DIR_NAME, 'reduction', 'logs')
 
 
 def as_path(value: object | None) -> Path | None:
@@ -83,6 +97,86 @@ def resolve_base_dir(value: object | None, *, default: str | Path | None = None)
     return Path(str(value)).expanduser().resolve()
 
 
+def ensure_writable_dir(path: Path | str, *, label: str | None = None) -> Path:
+    """
+    Create *path* (and parents) if missing; raise on permission / OS errors.
+
+    Parameters
+    ----------
+    path : pathlib.Path or str
+        Directory to create.
+    label : str or None, optional
+        Short name used in the error message (e.g. ``'download'``).
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path to the directory.
+
+    Raises
+    ------
+    PermissionError
+        If the directory cannot be created (permissions or other ``OSError``).
+    """
+    dest = Path(path).expanduser()
+    kind = label or 'directory'
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PermissionError(
+            f'Cannot create {kind} directory {dest}: {exc}. '
+            'Check that you have write permission for this path '
+            '(and its parents).'
+        ) from exc
+    return dest.resolve()
+
+
+def ensure_project_layout(base_dir: Path | str) -> Path:
+    """
+    Ensure the standard project directories exist under ``--base-dir``.
+
+    Creates ``download/``, ``reduction/``, and ``logs/`` (and the project
+    root itself when missing). Callers should not require a manual
+    ``mkdir -p``.
+
+    When *base_dir* is already a legacy reduction workdir (contains
+    ``raw/`` / ``jhat/`` / … and is not named ``reduction``), only
+    ``logs/`` is created there so we do not nest a second layout.
+
+    Parameters
+    ----------
+    base_dir : pathlib.Path or str
+        Project root or reduction workdir from ``--base-dir``.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute project root (or legacy workdir root).
+
+    Raises
+    ------
+    PermissionError
+        If any required directory cannot be created.
+    """
+    base = Path(base_dir).expanduser()
+    # resolve() without requiring the path to exist yet.
+    try:
+        base_res = base.resolve(strict=False)
+    except TypeError:
+        base_res = base.resolve()
+    root = resolve_project_root(base_res)
+
+    # Legacy workdir passed as --base-dir: keep products in-place.
+    if looks_like_reduction_dir(base_res) and base_res.name != 'reduction':
+        ensure_writable_dir(base_res / 'logs', label='logs')
+        return root
+
+    ensure_writable_dir(root, label='project')
+    for name in _PROJECT_SUBDIRS:
+        ensure_writable_dir(root / name, label=name)
+    return root
+
+
 def looks_like_reduction_dir(path: Path) -> bool:
     """
     Return True if *path* already looks like a reduction/workdir root.
@@ -103,13 +197,14 @@ def looks_like_reduction_dir(path: Path) -> bool:
 
 def resolve_reduction_dir(base_dir: Path) -> Path:
     """
-    Map ``--base-dir`` to the NIRCam reduction workdir.
+    Map ``--base-dir`` to the reduction workdir.
 
-    * If ``base_dir`` looks like a project root (``JWST/`` and/or
-      ``reduction/`` present), return ``base_dir / 'reduction'``. This is
-      checked before workdir markers so a project-level ``reference/``
-      symlink (from :func:`ensure_dataset_reference_link`) does not make
-      the project root look like the reduction workdir.
+    * If ``base_dir`` looks like a project root (``download/``, ``JWST/``,
+      ``HST/``, and/or ``reduction/`` present), return
+      ``base_dir / 'reduction'``. This is checked before workdir markers so a
+      project-level ``reference/`` symlink (from
+      :func:`ensure_dataset_reference_link`) does not make the project root
+      look like the reduction workdir.
     * Else if ``base_dir`` already contains ``raw/``, ``jhat/``, ``align/``,
       or ``reference/``, it is the reduction root (legacy ``--workdir``).
     * Otherwise treat ``base_dir`` itself as the reduction workdir.
@@ -125,19 +220,86 @@ def resolve_reduction_dir(base_dir: Path) -> Path:
         Absolute reduction workdir path.
     """
     base = Path(base_dir).expanduser().resolve()
-    if (base / 'JWST').is_dir() or (base / 'reduction').is_dir():
+    if (
+        (base / DOWNLOAD_DIR_NAME).is_dir()
+        or (base / 'JWST').is_dir()
+        or (base / 'HST').is_dir()
+        or (base / 'reduction').is_dir()
+    ):
         return (base / 'reduction').resolve()
     if looks_like_reduction_dir(base):
         return base
     return base
 
 
+def resolve_jhat_dir(
+    work_dir: Path,
+    telescope: str,
+    *,
+    create: bool = False,
+) -> Path:
+    """
+    Resolve the JHAT output/input directory for *telescope*.
+
+    Dual-mode (JWST+HST) campaigns prefer separate trees so HST mosaic globs
+    do not pick up ``jw*_jhat.fits`` (and vice versa):
+
+    * HST → ``reduction/jhat_hst`` (falls back to legacy ``reduction/jhat``)
+    * JWST → ``reduction/jhat_jwst`` (falls back to legacy ``reduction/jhat``)
+
+    When *create* is True, ensure the preferred directory exists and, if legacy
+    ``jhat/`` is absent, add a ``jhat`` → preferred symlink for older tooling.
+    """
+    work = Path(work_dir).expanduser().resolve()
+    tel = str(telescope).strip().lower()
+    is_hst = tel in {'hst', 'hubble'}
+    preferred_name = 'jhat_hst' if is_hst else 'jhat_jwst'
+    preferred = work / preferred_name
+    legacy = work / 'jhat'
+
+    def _has_jhat(d: Path) -> bool:
+        return d.is_dir() and any(d.glob('*_jhat.fits'))
+
+    def _legacy_matches_telescope(d: Path) -> bool:
+        if not d.is_dir():
+            return False
+        names = [p.name.lower() for p in d.glob('*_jhat.fits')]
+        if not names:
+            return False
+        if is_hst:
+            return any(not n.startswith('jw') for n in names)
+        return any(n.startswith('jw') for n in names)
+
+    if create:
+        # Prefer dedicated tree when already populated; otherwise keep writing
+        # into a mid-campaign mixed/legacy jhat/ so we do not orphan products.
+        if _has_jhat(preferred):
+            return preferred
+        if _legacy_matches_telescope(legacy):
+            return legacy
+        preferred.mkdir(parents=True, exist_ok=True)
+        if not legacy.exists():
+            try:
+                legacy.symlink_to(preferred_name)
+            except OSError:
+                pass
+        return preferred
+
+    if _has_jhat(preferred):
+        return preferred
+    if legacy.is_dir():
+        return legacy
+    return preferred
+
+
 def resolve_project_root(base_dir: Path) -> Path:
     """
-    Map ``--base-dir`` to the dataset / project root (parent of ``JWST/``).
+    Map ``--base-dir`` to the dataset / project root (parent of ``download/``,
+    ``JWST/``, ``HST/``).
 
-    If ``base_dir`` is a reduction workdir named ``reduction``, return its
-    parent; otherwise return ``base_dir`` itself.
+    If ``base_dir`` is a reduction workdir named ``reduction``, or the
+    download tree named ``download``, return its parent; otherwise return
+    ``base_dir`` itself.
 
     Parameters
     ----------
@@ -151,39 +313,84 @@ def resolve_project_root(base_dir: Path) -> Path:
     """
     base = Path(base_dir).expanduser().resolve()
     if base.name == 'reduction' and (
-        looks_like_reduction_dir(base) or not (base / 'JWST').is_dir()
+        looks_like_reduction_dir(base)
+        or not (
+            (base / DOWNLOAD_DIR_NAME).is_dir()
+            or (base / 'JWST').is_dir()
+            or (base / 'HST').is_dir()
+        )
+    ):
+        return base.parent
+    if base.name == DOWNLOAD_DIR_NAME and (
+        (base.parent / 'reduction').is_dir()
+        or (base / 'JWST').is_dir()
+        or (base / 'HST').is_dir()
+        or (base.parent / 'JWST').is_dir()
+        or (base.parent / 'HST').is_dir()
     ):
         return base.parent
     return base
 
 
-def instrument_raw_dir(base_dir: Path, instrument: str) -> Path:
+def instrument_raw_dir(
+    base_dir: Path,
+    instrument: str,
+    *,
+    telescope: str | None = None,
+) -> Path:
     """
-    Return ``{project}/JWST/{Instrument}`` for symlink sources.
+    Return MAST product root for an instrument under the project.
+
+    Prefer ``{project}/download/{Telescope}/{Instrument}`` (canonical). Fall
+    back to legacy ``{project}/{Telescope}/{Instrument}`` when only that tree
+    exists.
 
     Parameters
     ----------
     base_dir : pathlib.Path
         Project root or reduction workdir from ``--base-dir``.
     instrument : str
-        Instrument name (e.g. ``NIRCAM``, ``MIRI``).
+        Instrument name (e.g. ``NIRCAM``, ``MIRI``, ``WFC3``, ``ACS``).
+    telescope : str or None, optional
+        ``JWST`` or ``HST``. When ``None``, inferred from *instrument*
+        (HST for ACS/WFC3/WFPC2; JWST otherwise).
 
     Returns
     -------
     pathlib.Path
-        Absolute ``JWST/<Instrument>`` directory under the project root.
+        Absolute ``…/<Telescope>/<Instrument>`` directory under the project.
     """
     root = resolve_project_root(base_dir)
     key = str(instrument).strip().upper()
+    tel = (telescope or '').strip().upper() or None
     if key in ('NIRCAM', 'NRC'):
         name = 'NIRCam'
+        tel = tel or 'JWST'
     elif key == 'MIRI':
         name = 'MIRI'
+        tel = tel or 'JWST'
     elif key == 'NIRISS':
         name = 'NIRISS'
+        tel = tel or 'JWST'
+    elif key in ('ACS',):
+        name = 'ACS'
+        tel = tel or 'HST'
+    elif key in ('WFC3',):
+        name = 'WFC3'
+        tel = tel or 'HST'
+    elif key in ('WFPC2',):
+        name = 'WFPC2'
+        tel = tel or 'HST'
     else:
         name = instrument
-    return root / 'JWST' / name
+        tel = tel or 'JWST'
+    preferred = root / DOWNLOAD_DIR_NAME / tel / name
+    legacy = root / tel / name
+    if preferred.is_dir():
+        return preferred
+    if legacy.is_dir():
+        return legacy
+    return preferred
 
 
 def dataset_label(base_dir: Path | str) -> str:
@@ -240,9 +447,53 @@ def default_warmstart_outdir(base_dir: Path, *, group: int = 0, box: int = 0) ->
     Returns
     -------
     pathlib.Path
-        Default warm-start DOLPHOT output directory.
+        Default NIRCam→MIRI warm-start DOLPHOT output directory.
     """
     return resolve_project_root(base_dir) / 'dolphot' / f'nircam_miri_{group}_{box}'
+
+
+def default_hst_warmstart_outdir(
+    base_dir: Path, *, group: int = 0, box: int = 0
+) -> Path:
+    """
+    Return ``{project}/dolphot/nircam_hst_{group}_{box}``.
+
+    Parameters
+    ----------
+    base_dir : pathlib.Path
+        Project root or reduction workdir from ``--base-dir``.
+    group : int, optional
+        Mosaic overlap group index.
+    box : int, optional
+        Mosaic box index within the group.
+
+    Returns
+    -------
+    pathlib.Path
+        Default NIRCam→HST warm-start DOLPHOT output directory.
+    """
+    return resolve_project_root(base_dir) / 'dolphot' / f'nircam_hst_{group}_{box}'
+
+
+def default_miri_outdir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
+    """
+    Return ``{project}/dolphot/miri_{group}_{box}``.
+
+    Parameters
+    ----------
+    base_dir : pathlib.Path
+        Project root or reduction workdir from ``--base-dir``.
+    group : int, optional
+        Mosaic overlap group index.
+    box : int, optional
+        Mosaic box index within the group.
+
+    Returns
+    -------
+    pathlib.Path
+        Default MIRI-only DOLPHOT output directory.
+    """
+    return resolve_project_root(base_dir) / 'dolphot' / f'miri_{group}_{box}'
 
 
 def default_alignment_summary(base_dir: Path) -> Path:
@@ -302,20 +553,32 @@ def add_common_runtime(
     verbose: bool = True,
     dry_run: bool = False,
 ) -> argparse.ArgumentParser:
-    """Attach shared runtime flags (``--ncores``, ``--plot``, ``--verbose``, …)."""
+    """
+    Attach shared runtime flags (``--ncores``, ``--plot``, ``--verbose``, …).
+
+    ``--ncores`` is always accepted so pipelines can pass a uniform
+    ``--ncores "$NCORES"`` across entry points, even when a command is not
+    yet parallelized (*ncores* is kept for API compatibility and ignored
+    when False would previously have omitted the flag).
+    """
     group = parser.add_argument_group('common runtime')
-    if ncores:
-        group.add_argument(
-            '--ncores',
-            '--workers',
-            dest='ncores',
-            type=int,
-            default=ncores_default,
-            help=(
-                'Number of parallel workers / CPU cores (alias: --workers). '
-                'For DOLPHOT launch commands this sets MaxThreads.'
-            ),
-        )
+    # Always expose --ncores (ncores=False is a no-op for backward compat).
+    _ = ncores
+    group.add_argument(
+        '--ncores',
+        '--workers',
+        dest='ncores',
+        type=int,
+        default=ncores_default,
+        help=(
+            'Number of parallel workers / CPU cores (alias: --workers). '
+            'Accepted by all entry points for uniform scripting; unused '
+            'when a command is not parallelized. For dolphot-prep: pool '
+            'size for independent splitgroups / *mask / calcsky '
+            'subprocesses (stages stay ordered). For DOLPHOT launch '
+            'commands this sets MaxThreads.'
+        ),
+    )
     if plot:
         group.add_argument(
             '--plot',
@@ -490,6 +753,222 @@ def parse_instruments(raw: Sequence[str] | None) -> list[str] | None:
     return out or None
 
 
+def expand_mission_instruments(
+    tokens: Sequence[str] | None,
+) -> list[str] | None:
+    """
+    Expand mission aliases in an instrument token list.
+
+    * ``hst`` → ACS, WFC3, WFPC2
+    * ``jwst`` → NIRCAM, MIRI
+    * ``all`` → NIRCAM, MIRI, ACS, WFC3, WFPC2
+    * ``nrc`` → NIRCAM
+
+    Other tokens are upper-cased and de-duplicated (order preserved).
+    """
+    if tokens is None:
+        return None
+    out: list[str] = []
+
+    def _add(name: str) -> None:
+        key = str(name).strip().upper()
+        if key and key not in out:
+            out.append(key)
+
+    for token in tokens:
+        key = str(token).strip().upper()
+        if not key:
+            continue
+        if key == 'HST':
+            for name in DEFAULT_HST_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'JWST':
+            for name in DEFAULT_JWST_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'ALL':
+            for name in ALL_PIPELINE_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'NRC':
+            _add('NIRCAM')
+            continue
+        _add(key)
+    return out or None
+
+
+def resolve_instruments(raw: Sequence[str] | None) -> list[str] | None:
+    """Parse ``--instruments`` and expand mission aliases (``hst`` / ``jwst`` / ``all``)."""
+    return expand_mission_instruments(parse_instruments(raw))
+
+
+def resolve_photometry_instrument(
+    raw: Sequence[str] | None,
+    *,
+    default: str = 'nircam',
+) -> str:
+    """
+    Map ``--instruments`` to a dolphot-prep / run-dolphot mode string.
+
+    Mission aliases are preserved as modes when given alone (``hst``, ``jwst``).
+    A multi-camera HST list (``ACS WFC3`` or expanded ``hst``) becomes ``hst``.
+    ``jwst`` alone maps to ``nircam`` (primary JWST phot discovery tree).
+    """
+    tokens = parse_instruments(raw)
+    if not tokens:
+        return default
+    if len(tokens) == 1:
+        key = tokens[0].strip().lower()
+        if key == 'nrc':
+            return 'nircam'
+        if key == 'jwst':
+            return 'nircam'
+        if key in {'hst', 'nircam', 'miri', 'acs', 'wfc3', 'wfpc2'}:
+            return key
+    expanded = expand_mission_instruments(tokens) or []
+    hst = [u for u in expanded if u in {'ACS', 'WFC3', 'WFPC2', 'WFC'}]
+    jwst = [u for u in expanded if u in {'NIRCAM', 'MIRI'}]
+    if hst and not jwst:
+        return 'hst' if len(hst) > 1 else hst[0].lower()
+    if jwst and not hst:
+        return jwst[0].lower() if len(jwst) == 1 else 'nircam'
+    raise ValueError(
+        'Cannot mix HST and JWST in one dolphot-prep / run-dolphot call; '
+        f'got {expanded}. Run each mission separately.'
+    )
+
+
+def add_instruments_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    help: str | None = None,
+    default: object | None = None,
+) -> argparse.ArgumentParser:
+    """
+    Attach canonical ``--instruments`` (alias ``--instrument``).
+
+    Mission aliases: ``hst`` (= ACS WFC3 WFPC2), ``jwst`` (= NIRCAM MIRI),
+    ``all`` (= NIRCAM MIRI ACS WFC3 WFPC2).
+    """
+    parser.add_argument(
+        '--instruments',
+        '--instrument',
+        nargs='+',
+        dest='instruments',
+        default=default,
+        metavar='INSTR',
+        help=help
+        or (
+            'Instruments or mission aliases: hst (= ACS WFC3 WFPC2), '
+            'jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 WFPC2), '
+            'or explicit names (ACS, WFC3, NIRCAM, …). '
+            'Alias: --instrument. Space- or comma-separated.'
+        ),
+    )
+    return parser
+
+
+def add_sky_coord_args(
+    parser: argparse.ArgumentParser,
+    *,
+    required: bool = False,
+    ra_default: object | None = None,
+    dec_default: object | None = None,
+    radius_default: float = 3.0,
+) -> argparse.ArgumentParser:
+    """
+    Attach ``--ra`` / ``--dec`` / ``--radius``.
+
+    Always available on pipeline CLIs for uniform scripting; commands that do
+    not perform a cone search ignore them.
+    """
+    group = parser.add_argument_group('sky coordinates')
+    group.add_argument(
+        '--ra',
+        type=str,
+        default=ra_default,
+        required=required and ra_default is None,
+        help='Target ICRS right ascension (degrees or sexagesimal).',
+    )
+    group.add_argument(
+        '--dec',
+        type=str,
+        default=dec_default,
+        required=required and dec_default is None,
+        help='Target ICRS declination (degrees or sexagesimal).',
+    )
+    group.add_argument(
+        '--radius',
+        type=float,
+        default=radius_default,
+        help=(
+            'MAST cone-search radius in arcminutes (default: '
+            f'{radius_default}). Used by download; accepted elsewhere for '
+            'uniform scripting.'
+        ),
+    )
+    return parser
+
+
+def default_instruments_for_telescope(
+    telescope: str | None,
+) -> list[str] | None:
+    """
+    Mission default instrument list for ``--telescope``.
+
+    These are treated as identical to the matching ``--instruments`` lists:
+
+    * ``hst`` → ACS, WFC3, WFPC2 (:data:`DEFAULT_HST_INSTRUMENTS`)
+    * ``jwst`` → NIRCAM, MIRI (:data:`DEFAULT_JWST_INSTRUMENTS`)
+
+    Parameters
+    ----------
+    telescope : str or None
+        ``hst``, ``jwst``, or ``None`` when the flag was omitted.
+
+    Returns
+    -------
+    list of str or None
+        Upper-case instrument names, or ``None`` when *telescope* is unset.
+
+    Raises
+    ------
+    ValueError
+        If *telescope* is set but not ``hst`` / ``jwst``.
+    """
+    if telescope is None:
+        return None
+    key = str(telescope).strip().lower()
+    if not key:
+        return None
+    if key == 'hst':
+        return list(DEFAULT_HST_INSTRUMENTS)
+    if key == 'jwst':
+        return list(DEFAULT_JWST_INSTRUMENTS)
+    raise ValueError(
+        f'Unsupported telescope {telescope!r}; choose from hst, jwst'
+    )
+
+
+def resolve_instruments_with_telescope(
+    instruments_raw: Sequence[str] | None,
+    telescope: str | None,
+    *,
+    resolve_instruments_fn,
+) -> list[str] | None:
+    """
+    Resolve CLI instruments, expanding ``--telescope`` when instruments omitted.
+
+    Explicit ``--instruments`` wins. Otherwise ``--telescope hst|jwst`` expands
+    to the mission default set (same as passing that instrument list).
+    """
+    multi = resolve_instruments_fn(instruments_raw)
+    if multi is not None:
+        return multi
+    return default_instruments_for_telescope(telescope)
+
+
 def parse_filter_list(raw: str | None) -> list[str] | None:
     if not raw:
         return None
@@ -526,6 +1005,10 @@ def configure_logging_from_args(
     Uses ``args.base_dir`` when set (project-root ``logs/``); otherwise
     ``./logs``. Honors ``args.verbose`` when present.
 
+    When ``args.base_dir`` is set, also ensures the standard project layout
+    (``download/``, ``reduction/``, ``logs/``) exists. Permission errors
+    exit with code 1 and a clear message (no stack trace).
+
     Parameters
     ----------
     args : argparse.Namespace
@@ -542,7 +1025,17 @@ def configure_logging_from_args(
 
     base = getattr(args, 'base_dir', None)
     verbose = bool(getattr(args, 'verbose', False))
-    return setup_script_logging(base, script_name, verbose=verbose)
+    if base is not None:
+        try:
+            ensure_project_layout(base)
+        except PermissionError as exc:
+            print(f'ERROR: {exc}', file=sys.stderr)
+            raise SystemExit(1) from exc
+    try:
+        return setup_script_logging(base, script_name, verbose=verbose)
+    except PermissionError as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def sync_legacy_ncores(args: argparse.Namespace) -> argparse.Namespace:

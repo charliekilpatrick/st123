@@ -113,10 +113,11 @@ download \
 ```
 
 - `--base-dir` — Dataset / project root. The object name is the directory
-basename (e.g. `NGC3310`). Prefer an absolute path. Products are organized
-under layouts such as
-`<base-dir>/JWST/<Instrument>/<FILTER>/<obsid>/...` for downloads and
-`<base-dir>/reduction/` for visit alignment / mosaics.
+basename (e.g. `NGC3310`). Prefer an absolute path. MAST products are
+organized as
+`<base-dir>/download/<telescope>/<instrument>/<filter>/<obsid>/<filename>`
+(e.g. `…/download/HST/ACS/F814W/102617486/jey335ehq_flc.fits`). Visit
+alignment / mosaics use `<base-dir>/reduction/`.
 - `--token` — MAST API token for proprietary data
 ([create one here](https://auth.mast.stsci.edu/info)). Also read from
 `MAST_API_TOKEN` / `MAST_TOKEN`.
@@ -162,16 +163,118 @@ align \
 ```bash
 link-raw --base-dir /path/to/NGC4536 --instrument NIRCAM
 mosaic --base-dir /path/to/NGC4536 --ncores 8
-dolphot-prep --from-mosaic --base-dir /path/to/NGC4536 --instrument nircam
+dolphot-prep --from-mosaic --base-dir /path/to/NGC4536 --instruments nircam
 ```
 
-`mosaic` builds a shared `FITSImagingWCSTransform` output WCS, drizzles each
-filter, writes the coadd, and leaves a `dolphot_frames.txt` manifest per box.
-DOLPHOT staging (`dolphot.param`, `nircammask` / `mirimask`, `calcsky`) is a
-separate `dolphot-prep` step.
+`mosaic` builds a shared sky stamp per `reference/group_*/ref_*` box
+(`stamp_wcs.fits`), mosaics every JWST filter onto that footprint (with
+pre-mosaic NIRCam harmonize + coadd unify), and AstroDrizzles HST onto the
+same stamp WCS. Box ids are matched to existing stamps by sky center so
+replans do not renumber regions. For a target near a stamp edge, use
+`--center-ra/--center-dec` (optional `--stamp-size`, `--stamp-ref`,
+`--stamp-id`) to build a custom cutout centered on those coordinates.
+Each box gets a `dolphot_frames.txt` manifest. DOLPHOT staging
+(`dolphot.param`, `nircammask` / `mirimask`, `calcsky`) is a separate
+`dolphot-prep` step.
 
 Interactive notebooks: `st123/notebooks/download.ipynb`, `align.ipynb`,
 `mosaic.ipynb`.
+
+### HST one-target end-to-end (mixed DOLPHOT)
+
+One project directory per target. Flow: **download → link-raw → align (JHAT) →
+mosaic (drizzle) → dolphot-prep → dolphot → scrape `.phot`**.
+
+After mosaic, `dolphot-prep --instruments hst` stages **all** ACS/WFC3/WFPC2
+JHAT frames against the best coadd reference (prefer **WFC3 → ACS → WFPC2**,
+then `BEST_REFERENCE_FILTERS` with **F625W** first). That ranking matches the
+bands that usually give the cleanest HST PSF photometry (e.g. WFC3/F625W and
+WFPC2/F606W). Shallower or awkward coverage (e.g. WFPC2 F450W / F814W on sparse
+PC or short stacks) often yields only ~1–1.5σ **forced** photometry at an
+F625W/F606W position — treat those as limits, not independent detections.
+
+Globals written into `dolphot.param` (`hst_base_params`) are intentional
+departures from NIRCam defaults for JHAT-aligned multi-instrument HST:
+
+| Knob | Value | Why |
+|------|-------|-----|
+| `UseWCS` | `2` | JHAT L2 is TAN-SIP; drizzle L3 is TAN. `UseWCS=1` seeds tens of px off. |
+| `Align` | `0` | Trust the JHAT SIP seed. `Align=1` can refine ~0.2 px but has hit DOLPHOT NaN asserts on mixed full phot. |
+| `Rotate` | `0` | Do not fight the WCS seed. |
+| `Force1` | `1` | Point-source shape (SN / compact counterparts). |
+| `FlagMask` | `7` | HST DQ bits. |
+| CTE | ACS/WFC3 off, WFPC2 on | Matches typical pipeline products. |
+
+```bash
+# Make sure you have up to date dolphot in your path
+conda activate st123
+BASE=/path/to/YourTarget
+NCORES=8
+RA=177.66
+DEC=55.36
+# optional: export MAST_API_TOKEN=...
+
+# download -> align -> mosaic -> DOLPHOT
+# --instruments hst ≡ ACS WFC3 WFPC2 (same flag on every stage)
+download     --base-dir "$BASE" --instruments hst --ra="$RA" --dec="$DEC" -v
+align        --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+mosaic       --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+dolphot-prep --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+run-dolphot  --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+```
+
+**QA checklist** (before trusting photometry):
+
+1. In `dolphot.param`: `UseWCS = 2`, `Align = 0`, `Force1 = 1`.
+2. Reference is the expected deep coadd under the shared mosaic box layout
+   (typically `reduction/reference/group_*/ref_*/coadd_*_wfc3_f625w_drc.fits`).
+3. Inspect `*.phot.info` / per-image quality flags; chips with `flag=9/10` are off-detector or bad.
+4. For a target RA/Dec, compare per-band SNR: secure detections (F625W/F606W) vs forced limits.
+
+**Scrape nearest source** after `dolphot` finishes:
+
+```bash
+python - <<'PY'
+from st123.photometry.dolphot import nearest_phot_source
+rows = nearest_phot_source(
+    '/path/to/hst_0_5/hst_0_5.phot',
+    '/path/to/hst_0_5/coadd_0_5_wfc3_f625w_drc.fits',
+    ra=177.65590, dec=55.35357, n=3,
+)
+for r in rows:
+    print(r)
+PY
+```
+
+Layout: `$PROJ/download/HST/…/<obsid>/<filename>`,
+`$PROJ/reduction/{raw,jhat_hst,reference/group_*/ref_*}/`, `$PROJ/dolphot/hst_G_B/`.
+HST and JWST mosaics share the same `group_*/ref_*` boxes; each box may hold
+both `coadd_*_i2d.fits` (JWST) and `coadd_*_{acs|wfc3}_*_{drc|drz}.fits` (HST).
+
+### HST warmstart from NIRCam
+
+When the same field has a finished NIRCam DOLPHOT run, seed HST photometry from
+that catalog (`xytfile`) with the **NIRCam coadd as `img0`** and the same
+`hst_base_params` as the free HST path. Align HST with JHAT to Gaia (or the
+NIRCam WCS) first so chip WCS matches the NIRCam reference pixel grid.
+
+```bash
+# NIRCam mosaic + dolphot already done (e.g. $PROJ/reduction/phot_0_0)
+# HST download → align → mosaic so reduction/jhat_hst + reference/group_*/ref_* exist
+
+dolphot-warmstart \
+  --target hst \
+  --base-dir "$PROJ" \
+  --ncores "$NCORES"
+# optional: --nircam-dir ... --hst-jhat path1_jhat.fits ...
+# optional seed cuts: --prune-xyt-for-hst (type=1, SNR>=5, …)
+
+cd "$PROJ/dolphot/nircam_hst_0_0" && \
+  dolphot nircam_hst_0_0.phot -pdolphot.param MaxThreads="$NCORES"
+# (use the exact phot name printed by dolphot-warmstart)
+```
+
+`--target miri` (default) remains NIRCam→MIRI warmstart into `dolphot/nircam_miri_0_0`.
 
 ---
 
@@ -182,7 +285,7 @@ Interactive notebooks: `st123/notebooks/download.ipynb`, `align.ipynb`,
 
 | Facility | Instruments / products (typical)                                                                                                 |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| HST      | WFPC2 (`c0m`/`c1m`), ACS/WFC (`flc`), ACS/HRC (`flt`), WFC3/UVIS (`flc`), WFC3/IR (`flt`) — MAST helpers and reference selection |
+| HST      | WFPC2 (`c0m`/`c1m`), ACS/WFC (`flc`), WFC3/UVIS (`flc`), WFC3/IR (`flt`) — MAST helpers download `project=HST` pipeline products once |
 | JWST     | NIRCam, MIRI (download, JHAT align, mosaic, DOLPHOT prep / warm-start)                                                           |
 | Roman    | WFI filter catalog and path helpers (pipeline growth)                                                                            |
 | Euclid   | VIS / NISP filter catalog helpers (pipeline growth)                                                                              |
@@ -204,12 +307,15 @@ set `CRDS_PATH` / `CRDS_SERVER_URL` as recommended by STScI.
 
 - **Paths / runtime:** `--base-dir` (aliases `--workdir`, `--basedir`, …),
 `--ncores` / `--workers`, `--plot`, `--verbose`, `--dry-run`, `--version`
+- **Shared pipeline flags:** `--instruments` (alias `--instrument`; mission
+  aliases `hst`→ACS WFC3 WFPC2, `jwst`→NIRCAM MIRI, `all`), plus optional
+  `--ra` / `--dec` / `--radius` on download/align/mosaic/dolphot-prep/run-dolphot
 - **Download:** `--ra`, `--dec`, `--radius`, `--stage`, `--instruments`,
 `--filters`, `--token`
-- **Alignment:** `--mode visit|reference|pair`, `--instrument`, `--ref`,
+- **Alignment:** `--mode visit|reference|pair`, `--instruments`, `--ref`,
 `--image`, `--photfile`
 - **Mosaic / DOLPHOT:** `--from-mosaic`, `--files`, `--refimage`,
-`--dolphot-bin`, `--instrument`, `--skip-sky` / related prep flags
+`--dolphot-bin`, `--instruments`, `--skip-sky` / related prep flags
 - **Link:** `--instrument` (with `--base-dir`) for `link-raw`
 
 Canonical naming conventions used across CLIs and library APIs:
@@ -218,7 +324,7 @@ Canonical naming conventions used across CLIs and library APIs:
 | Concept                 | Prefer                    | Notes                                                    |
 | ----------------------- | ------------------------- | -------------------------------------------------------- |
 | Project / dataset root  | `base_dir` / `--base-dir` | Legacy `--workdir`, `--outdir`, … alias here             |
-| Parallelism             | `ncores` / `--ncores`     | Alias `--workers`; DOLPHOT `MaxThreads`                  |
+| Parallelism             | `ncores` / `--ncores`     | Alias `--workers`; prep pool for splitgroups/*mask/calcsky; DOLPHOT `MaxThreads` |
 | Science FITS path(s)    | `--image`                 | Prefer over inventing `--miri` / `--align` for that role |
 | Photometry catalog path | `photfile` / `--photfile` | JHAT APIs keep upstream `photfilename`                   |
 

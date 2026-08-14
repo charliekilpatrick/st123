@@ -16,7 +16,6 @@ from astropy.io import fits
 from astropy.table import Column, Table
 from astropy.time import Time
 
-from st123.mast import parse_s_region
 from st123.utils.settings import (
     BEST_FILTER_TYPES,
     BEST_REFERENCE_FILTERS,
@@ -82,6 +81,27 @@ def parse_coord(ra: str | float, dec: str | float) -> SkyCoord | None:
         return None
 
 
+def _looks_like_filter_name(value: object) -> bool:
+    """Return True for bandpass-like strings (reject numeric wheel positions)."""
+    text = str(value).strip()
+    if not text or text.lower() in {'none', 'n/a', 'clear', 'clear1', 'clear2'}:
+        return False
+    try:
+        float(text)
+        return False
+    except ValueError:
+        return True
+
+
+def _filter_from_photmode(photmode: object) -> str | None:
+    """Extract ``F###…`` from ACS/WFC3/WFPC2 ``PHOTMODE`` strings."""
+    import re
+
+    text = str(photmode or '')
+    match = re.search(r'\b(F\d{3,}[A-Z0-9]*)\b', text, flags=re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
 def get_filter(image: str | Path) -> str:
     """
     Read the filter name from a FITS header.
@@ -94,20 +114,53 @@ def get_filter(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase filter name (``FILTER``, or ``FILTER1``/``FILTER2``).
+        Lowercase filter name (``FILTNAM1``, ``FILTER``, or ``FILTER1``/``FILTER2``;
+        ``PHOTMODE`` as a last resort for stripped JHAT products).
     """
+    # WFPC2 uses FILTNAM1; FILTER1 is often a numeric wheel position.
     try:
-        f = str(fits.getval(image, 'FILTER'))
+        f = fits.getval(image, 'FILTNAM1')
+        if _looks_like_filter_name(f):
+            return str(f).strip().lower()
     except Exception:
+        pass
+
+    try:
+        f = fits.getval(image, 'FILTER')
+        if _looks_like_filter_name(f):
+            return str(f).strip().lower()
+    except Exception:
+        pass
+
+    try:
         f = str(fits.getval(image, 'FILTER1'))
         if 'clear' in f.lower():
             f = str(fits.getval(image, 'FILTER2'))
-    return f.lower()
+        if _looks_like_filter_name(f):
+            return f.strip().lower()
+    except Exception:
+        pass
+
+    # JHAT can strip FILTER/INSTRUME; SCI PHOTMODE still encodes the band.
+    try:
+        with fits.open(image, memmap=True) as hdul:
+            for hdu in hdul:
+                filt = _filter_from_photmode(hdu.header.get('PHOTMODE'))
+                if filt:
+                    return filt
+    except Exception:
+        pass
+
+    raise KeyError(f'No filter keyword found in {image}')
 
 
 def get_module(image: str | Path) -> str:
     """
-    Read the JWST module or NIRCam letter from a FITS header.
+    Read the JWST module identifier from a FITS header.
+
+    NIRCam exposures use ``MODULE`` (``A`` / ``B``) or the letter embedded in
+    ``DETECTOR`` (``NRCB1`` → ``b``). MIRI has no module keyword and is
+    returned as ``miri``.
 
     Parameters
     ----------
@@ -117,19 +170,49 @@ def get_module(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase module identifier (``MODULE`` or first NRC detector letter).
+        Lowercase module identifier (``a``, ``b``, ``miri``, …).
     """
     try:
-        f = str(fits.getval(image, 'MODULE'))
+        module = str(fits.getval(image, 'MODULE')).strip()
+        if module:
+            return module.lower()
     except Exception:
-        f = str(fits.getval(image, 'DETECTOR'))
-        f = f.split('NRC')[1][0]
-    return f.lower()
+        pass
+
+    detector = ''
+    try:
+        detector = str(fits.getval(image, 'DETECTOR')).strip().upper()
+    except Exception:
+        detector = ''
+
+    # NIRCam: NRCA1 / NRCBLONG → module letter.
+    if detector.startswith('NRC') and len(detector) > 3:
+        return detector[3].lower()
+
+    instrument = ''
+    try:
+        instrument = str(fits.getval(image, 'INSTRUME')).strip().lower()
+    except Exception:
+        pass
+
+    if 'miri' in instrument or detector.startswith('MIR'):
+        return 'miri'
+
+    # Last resort: parse detector token from the file name.
+    chip = get_detector_chip(str(image))
+    if chip:
+        chip_l = chip.lower()
+        if chip_l.startswith('nrc') and len(chip_l) > 3:
+            return chip_l[3]
+        if 'mir' in chip_l:
+            return 'miri'
+
+    return 'unknown'
 
 
 def get_instrument(image: str | Path) -> str:
     """
-    Read the instrument name from a FITS primary header.
+    Read the instrument name from a FITS header.
 
     Parameters
     ----------
@@ -139,8 +222,27 @@ def get_instrument(image: str | Path) -> str:
     Returns
     -------
     str
-        Lowercase ``INSTRUME`` value.
+        Lowercase ``INSTRUME`` value (or ``PHOTMODE`` / ``APERTURE`` fallback).
     """
+    try:
+        with fits.open(image, memmap=True) as hdul:
+            for hdu in hdul:
+                inst = hdu.header.get('INSTRUME')
+                if inst is not None and str(inst).strip():
+                    return str(inst).strip().lower()
+            for hdu in hdul:
+                photmode = str(hdu.header.get('PHOTMODE') or '').strip()
+                if photmode:
+                    token = photmode.replace(',', ' ').split()[0]
+                    if token:
+                        return token.lower()
+            aperture = str(hdul[0].header.get('APERTURE') or '').strip().upper()
+            if aperture.startswith('UVIS') or aperture.startswith('IR'):
+                return 'wfc3'
+            if aperture.startswith('WFC') or aperture.startswith('HRC'):
+                return 'acs'
+    except Exception:
+        pass
     return str(fits.getval(image, 'INSTRUME')).lower()
 
 
@@ -193,6 +295,75 @@ def get_detector_chip(filename: str) -> str | None:
         if 'mirimage' in token.lower():
             return token
     return None
+
+
+# Full-frame MIRI imager SCI size (ny, nx). Subarrays / cutouts are unsupported
+# by ``mirimask`` and by the alignment→DOLPHOT path.
+MIRI_FULL_FRAME_SCI_SHAPE = (1024, 1032)
+
+
+def is_full_frame_miri(path: str | Path) -> bool:
+    """
+    Return whether a FITS file is a full-frame MIRI imager product.
+
+    Accepts SCI arrays of shape ``(1024, 1032)`` or ``(1, 1024, 1032)``.
+    Explicit non-``FULL`` ``SUBARRAY`` header values are rejected even when
+    dimensions are ambiguous. Non-MIRI files return ``False``.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a CAL / JHAT / rate FITS file.
+
+    Returns
+    -------
+    bool
+        ``True`` when the file is usable as a full-frame MIRI imager frame.
+    """
+    try:
+        with fits.open(path, memmap=True) as hdul:
+            subarray = None
+            instrument = None
+            detector = None
+            for hdu in hdul:
+                hdr = hdu.header
+                if instrument is None and 'INSTRUME' in hdr:
+                    instrument = str(hdr['INSTRUME']).strip().upper()
+                if detector is None and 'DETECTOR' in hdr:
+                    detector = str(hdr['DETECTOR']).strip().upper()
+                if subarray is None and 'SUBARRAY' in hdr:
+                    subarray = str(hdr['SUBARRAY']).strip().upper()
+
+            name = os.path.basename(str(path)).lower()
+            is_miri = (
+                (instrument == 'MIRI')
+                or (detector is not None and 'MIR' in detector)
+                or ('mirimage' in name)
+            )
+            if not is_miri:
+                return False
+
+            if subarray is not None and subarray not in ('FULL', 'N/A', 'NONE', ''):
+                return False
+
+            sci = hdul['SCI'] if 'SCI' in hdul else hdul[0]
+            data = sci.data
+            if data is not None:
+                shape = tuple(int(x) for x in data.shape)
+            else:
+                naxis1 = int(sci.header.get('NAXIS1') or 0)
+                naxis2 = int(sci.header.get('NAXIS2') or 0)
+                shape = (naxis2, naxis1) if naxis1 and naxis2 else ()
+            if len(shape) == 3 and shape[0] == 1:
+                shape = shape[1:]
+            return shape == MIRI_FULL_FRAME_SCI_SHAPE
+    except Exception:
+        return False
+
+
+def is_mirimask_compatible(path: str | Path) -> bool:
+    """Alias for :func:`is_full_frame_miri` (DOLPHOT ``mirimask`` requirement)."""
+    return is_full_frame_miri(path)
 
 
 def get_zpt(
@@ -408,6 +579,9 @@ def get_sky_pgons(table: Table) -> np.ndarray:
     """
     Parse ``S_REGION`` sky polygons from images listed in a table.
 
+    When ``S_REGION`` is missing, fall back to the SCI WCS footprint
+    (``WCS.calc_footprint``) so mixed JWST/HST planning still works.
+
     Parameters
     ----------
     table : astropy.table.Table
@@ -418,11 +592,39 @@ def get_sky_pgons(table: Table) -> np.ndarray:
     numpy.ndarray
         Object-dtype array of Shapely polygons (one per row).
     """
+    # Lazy: avoid utils.helpers ↔ mast.mast import cycles at package load.
+    from shapely.geometry import Polygon
+    from st123.mast.mast import parse_s_region
+
     pgons = []
     for im in table['image']:
         with fits.open(im) as hdul:
-            region = hdul['SCI'].header['S_REGION']
-        pgons.append(parse_s_region(region))
+            region = None
+            sci = None
+            for hdu in hdul:
+                name = str(getattr(hdu, 'name', '') or '').upper()
+                if name == 'SCI' or (sci is None and getattr(hdu, 'data', None) is not None):
+                    if name == 'SCI' or sci is None:
+                        sci = hdu
+                    if hdu.header.get('S_REGION'):
+                        region = hdu.header['S_REGION']
+                        break
+            if region is None and 'SCI' in hdul:
+                region = hdul['SCI'].header.get('S_REGION')
+                sci = hdul['SCI']
+            if region:
+                pgons.append(parse_s_region(region))
+                continue
+            if sci is None:
+                raise KeyError(f'No SCI / S_REGION in {im}')
+            from astropy.wcs import WCS
+
+            try:
+                wcs = WCS(sci.header, fobj=hdul, naxis=2)
+            except Exception:
+                wcs = WCS(sci.header, naxis=2, relax=True)
+            corners = np.asarray(wcs.calc_footprint(center=False), dtype=float)
+            pgons.append(Polygon(corners))
     return np.array(pgons, dtype=object)
 
 
@@ -507,7 +709,30 @@ def input_list(input_images: list[str | Path]) -> Table:
     with fits.open(img[0]) as hdu:
         primary = hdu[0].header
 
-    exp = [fits.getval(image, 'EFFEXPTM') for image in img]
+    def _exptime(path: str) -> float:
+        hdr = fits.getheader(path, ext=0)
+        for key in ('EFFEXPTM', 'EXPTIME', 'TEXPTIME'):
+            if key in hdr and hdr[key] is not None:
+                try:
+                    return float(hdr[key])
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    def _visit_id(path: str) -> str:
+        hdr = fits.getheader(path, ext=0)
+        # JWST: VISIT_ID. HST: ROOTNAME[:6] (ipppssoot visit stem), else ASN_ID.
+        for key in ('VISIT_ID', 'ROOTNAME', 'ASN_ID'):
+            val = hdr.get(key)
+            if val is None or str(val).strip() == '':
+                continue
+            token = str(val).strip()
+            if key == 'ROOTNAME' and len(token) >= 6:
+                return token[:6].lower()
+            return token
+        return os.path.basename(path)[:6].lower()
+
+    exp = [_exptime(image) for image in img]
     if 'DATE-OBS' in primary and 'TIME-OBS' in primary:
         dat = [
             f"{fits.getval(image, 'DATE-OBS')}T{fits.getval(image, 'TIME-OBS')}"
@@ -521,17 +746,36 @@ def input_list(input_images: list[str | Path]) -> Table:
             for image in img
         ]
     else:
-        raise ValueError(
-            f'Cannot determine observation time from headers of {img[0]}'
-        )
+        # Mixed JWST/HST tables: probe each file for a usable time keyword.
+        dat = []
+        for image in img:
+            hdr = fits.getheader(image, ext=0)
+            if 'DATE-OBS' in hdr and 'TIME-OBS' in hdr:
+                dat.append(f"{hdr['DATE-OBS']}T{hdr['TIME-OBS']}")
+            elif 'EXPSTART' in hdr:
+                dat.append(
+                    Time(hdr['EXPSTART'], format='mjd').datetime.strftime(
+                        '%Y-%m-%dT%H:%M:%S'
+                    )
+                )
+            else:
+                raise ValueError(
+                    f'Cannot determine observation time from headers of {image}'
+                )
 
     fil = [get_filter(image) for image in img]
     ins = [get_instrument(image) for image in img]
     module = [get_module(image) for image in img]
     chip = [get_chip(image) for image in img]
     zpt = [get_zpt(i, ccdchip=c, zptype='abmag') for i, c in zip(img, chip)]
-    visit = [fits.getval(i, 'VISIT_ID', ext=0) for i in img]
-    pupil = [fits.getval(i, 'PUPIL', ext=0) for i in img]
+    visit = [_visit_id(i) for i in img]
+    # MIRI (and some HST) products omit PUPIL; treat as clear / unused.
+    pupil = []
+    for path in img:
+        try:
+            pupil.append(str(fits.getval(path, 'PUPIL', ext=0)))
+        except Exception:
+            pupil.append('CLEAR')
     image_number = [0] * len(img)
 
     obstable = Table(

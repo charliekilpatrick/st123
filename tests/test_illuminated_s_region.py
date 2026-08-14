@@ -63,8 +63,8 @@ def test_illuminated_s_region_from_fits(tmp_path: Path):
 def test_illuminated_script_main(tmp_path: Path, monkeypatch):
     path = write_illuminated_fits(tmp_path / 'science.fits')
     out = tmp_path / 'plot.png'
-    monkeypatch.setattr(illum_script.plt, 'close', lambda *a, **k: None)
-    with patch('st123.scripts.region.save_illuminated_region_plot') as mock_plot:
+    monkeypatch.setattr('matplotlib.pyplot.close', lambda *a, **k: None)
+    with patch('st123.mosaic.region.save_illuminated_region_plot') as mock_plot:
         rc = illum_script.main(
             [str(path), '--output', str(out), '--simplify', '1.0', '--adjacency', '5']
         )

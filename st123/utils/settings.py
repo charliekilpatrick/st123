@@ -172,6 +172,7 @@ acceptable_filters: tuple[str, ...] = tuple(
 # Preferred bands for a DOLPHOT / drizzle reference, in roughly decreasing
 # preference. Stored lowercase to match :func:`~st123.utils.helpers.get_filter`.
 BEST_REFERENCE_FILTERS: tuple[str, ...] = (
+    'f625w',
     'f606w',
     'f555w',
     'f814w',
@@ -191,6 +192,8 @@ BEST_FILTER_TYPES: tuple[str, ...] = ('lp', 'w', 'x', 'm', 'n')
 
 # Default HST science products used by download helpers / notebooks.
 # Each entry is ``(filename_suffix, instrument_tag_substring)``.
+# Native pipeline only: WFPC2 c0m/c1m, ACS/WFC flc, ACS/HRC+SBC flt,
+# WFC3/UVIS flc, WFC3/IR flt. Bare ``ACS`` matches all ACS detectors.
 HST_PRODUCT_RULES: tuple[tuple[str, str], ...] = (
     ('c0m.fits', 'WFPC2'),
     ('c1m.fits', 'WFPC2'),
@@ -198,16 +201,55 @@ HST_PRODUCT_RULES: tuple[tuple[str, str], ...] = (
     ('c1m.fits', 'PC/WFC'),
     ('flc.fits', 'ACS/WFC'),
     ('flt.fits', 'ACS/HRC'),
+    ('flt.fits', 'ACS/SBC'),
     ('flc.fits', 'WFC3/UVIS'),
     ('flt.fits', 'WFC3/IR'),
 )
 
-DEFAULT_HST_FILTERS: tuple[str, ...] = ('F275W', 'F555W', 'F814W')
-DEFAULT_HST_INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC', 'WFPC2')
+# Default HST imaging filters for MAST queries. ``None`` at call sites means
+# no filter restriction (recommended for SN fields with mixed legacy bands).
+DEFAULT_HST_FILTERS: tuple[str, ...] | None = None
+DEFAULT_HST_INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC3', 'WFPC2')
 DEFAULT_JWST_INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI')
+
+# Default filter lists for multi-instrument ``mosaic --instruments …`` finals.
+DEFAULT_NIRCAM_MOSAIC_FILTERS: tuple[str, ...] = (
+    'F150W',
+    'F150W2',
+    'F187N',
+    'F200W',
+    'F300M',
+    'F335M',
+    'F360M',
+    'F430M',
+    'F444W',
+)
+DEFAULT_MIRI_MOSAIC_FILTERS: tuple[str, ...] = (
+    'F770W',
+    'F1000W',
+    'F1130W',
+    'F2100W',
+)
+DEFAULT_MOSAIC_INSTRUMENTS: tuple[str, ...] = (
+    'NIRCAM',
+    'MIRI',
+    'ACS',
+    'WFC3',
+    'WFPC2',
+)
+# ``--instruments all`` / orchestrated defaults (JWST + full HST set).
+ALL_PIPELINE_INSTRUMENTS: tuple[str, ...] = (
+    'NIRCAM',
+    'MIRI',
+    'ACS',
+    'WFC3',
+    'WFPC2',
+)
 
 # Relative subdirectory pattern under the download root.
 DEFAULT_DOWNLOAD_LAYOUT: str = 'telescope/instrument/filter/obsid'
+# MAST products land under ``<base-dir>/<DOWNLOAD_DIR_NAME>/…``.
+DOWNLOAD_DIR_NAME: str = 'download'
 
 # =============================================================================
 # Alignment quality-hold defaults (REFERENCE → MIRI_REL)
@@ -317,6 +359,33 @@ relaxed_jwst_params = {
     'savephottable': 0,
 }
 
+# Bright / crowded MIRI fields (e.g. M82 nucleus in F770W): prefer fewer,
+# brighter, high-SNR calibrators before falling back to relaxed cuts.
+crowded_jwst_params = {
+    'telescope': 'jwst',
+    'refcat_racol': 'ra',
+    'refcat_deccol': 'dec',
+    'refcat_magcol': 'mag',
+    'refcat_magerrcol': 'dmag',
+    'overwrite': True,
+    'd2d_max': 0.35,
+    'showplots': 0,
+    'find_stars_threshold': 8,
+    'iterate_with_xyshifts': True,
+    'histocut_order': 'dxdy',
+    'sharpness_lim': (0.35, 0.90),
+    'roundness1_lim': (-0.55, 0.55),
+    'SNR_min': 8,
+    'dmag_max': 0.08,
+    'objmag_lim': (12, 20),
+    'slope_min': -20 / 2048,
+    'binsize_px': 1.0,
+    'savephottable': 0,
+}
+
+# Cap on Nbright during the crowded/bright JHAT retry.
+CROWDED_JHAT_NBRIGHT: int = 100
+
 # =============================================================================
 # DOLPHOT parameter dictionaries
 # =============================================================================
@@ -412,3 +481,192 @@ miri_calcsky_params = {
     'sigma_low': 2.25,
     'sigma_high': 2.00,
 }
+
+# -----------------------------------------------------------------------------
+# HST DOLPHOT (ACS / WFC3 / WFPC2) — ported from hst123 detector_defaults
+# -----------------------------------------------------------------------------
+
+# Global DOLPHOT knobs for HST runs (JHAT-aligned FLT/FLC + drizzle img0).
+#
+# JHAT L2 chips are TAN-SIP; drizzle L3 img0 is plain TAN. UseWCS=2 makes
+# DOLPHOT parse both via headerWCS (full SIP). UseWCS=1 collapses to IDC +
+# rigid shift/scale/rot and seeds tens of px off for JHAT SIP.
+# prepare_hst_frames sanitizes orphaned Lookup/D2IM cards so headers match
+# what headerWCS reads. Default Align=0 trusts the JHAT SIP seed (Align=1
+# can refine to ~0.2 px but hit a DOLPHOT NaN assert on 2026dix full phot).
+# PSFres=0: empirical PSF-residual fitting (fixpsf) hits
+# ``Uncaught m=nan`` / ``assert(!isnan(M))`` on mixed ACS+WFC3+WFPC2
+# warmstarts with a dense xytfile (NGC3310 / 2026sqf). Library PSFs +
+# Force1=1 are enough for forced photometry and upper limits.
+hst_base_params = {
+    **base_params,
+    'UseWCS': '2',
+    'Align': '0',
+    'aligntol': '0',
+    'AlignStep': '1',
+    'AlignIter': '2',
+    'Rotate': '0',
+    'ACSuseCTE': '0',
+    'WFC3useCTE': '0',
+    'WFPC2useCTE': '1',
+    'FlagMask': '7',
+    'RCentroid': '2',
+    'Force1': '1',
+    'PSFres': '0',
+}
+
+# Per-image geometry (img_*_raper / img_*_rpsf, …). Keys match write_paramfile.
+acs_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '2',
+    'rchi': '1.5',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '3 6',
+    'rpsf': '10',
+    'apsky': '15 25',
+}
+
+wfc3_uvis_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '3',
+    'rchi': '2.0',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '4 10',
+    'rpsf': '13',
+    'apsky': '15 25',
+}
+
+wfc3_ir_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '2',
+    'rchi': '1.5',
+    'rsky0': '8',
+    'rsky1': '20',
+    'rsky2': '3 10',
+    'rpsf': '15',
+    'apsky': '8 20',
+}
+
+# Default WFC3 per-image params (UVIS); IR frames override via classify_image_kind.
+wfc3_params = dict(wfc3_uvis_params)
+
+wfpc2_params = {
+    'shift': '0 0',
+    'xform': '1 0 0',
+    'raper': '3',
+    'rchi': '2.0',
+    'rsky0': '15',
+    'rsky1': '35',
+    'rsky2': '4 10',
+    'rpsf': '13',
+    'apsky': '15 25',
+}
+
+# calcsky annulus defaults (hst123 detector_defaults dolphot_sky).
+acs_calcsky_params = {
+    'rin': 15,
+    'rout': 35,
+    'step': 4,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+wfc3_calcsky_params = {
+    'rin': 15,
+    'rout': 35,
+    'step': 4,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+wfpc2_calcsky_params = {
+    'rin': 10,
+    'rout': 25,
+    'step': 2,
+    'sigma_low': 2.25,
+    'sigma_high': 2.00,
+}
+
+# AstroDrizzle defaults (subset of hst123.drizzle_defaults).
+hst_drizzle_defaults = {
+    'final_pixfrac': 0.8,
+    'driz_sep_pixfrac': 0.8,
+    'combine_maskpt': 0.2,
+    'combine_nsigma': '4 3',
+    'driz_cr_snr': '3.5 3.0',
+    'driz_cr_grow': 1,
+    'driz_cr_scale': '1.2 0.7',
+    'num_cores': 4,
+}
+
+# DQ bits treated as good by AstroDrizzle (driz_sep_bits / final_bits).
+# Matches hst123.detector_defaults.
+hst_driz_bits = {
+    'acs': 96,
+    'wfc3': 96,  # UVIS
+    'wfc3_uvis': 96,
+    'wfc3_ir': 576,
+    'wfpc2': 1032,
+}
+
+# LAcosmic / astroscrappy defaults (hst123.instrument_defaults crpars).
+hst_crpars = {
+    'wfc3': {
+        'rdnoise': 6.5,
+        'gain': 1.0,
+        'saturate': 70000.0,
+        'sig_clip': 4.0,
+        'sig_frac': 0.2,
+        'obj_lim': 6.0,
+    },
+    'acs': {
+        'rdnoise': 6.5,
+        'gain': 1.0,
+        'saturate': 70000.0,
+        'sig_clip': 3.0,
+        'sig_frac': 0.1,
+        'obj_lim': 5.0,
+    },
+    'wfpc2': {
+        'rdnoise': 10.0,
+        'gain': 7.0,
+        'saturate': 27000.0,
+        'sig_clip': 4.0,
+        'sig_frac': 0.3,
+        'obj_lim': 6.0,
+    },
+}
+
+# Bit value written into DQ / WFPC2 c1m for astroscrappy CR pixels.
+HST_CR_DQ_BIT = 4096
+
+# WFPC2 calibrated c0m chips retain bad overscan / pyramid-edge sectors.
+# Mask these in c1m before AstroDrizzle (bit must NOT be in
+# hst_driz_bits['wfpc2'] = 1032). Left edge is worst (A/D overscan bleed);
+# all four chip borders project into the coadd near the pyramid intersection.
+# Tuned on SN2026dix F606W at the four-chip intersection to keep ~70%+ of
+# science pixels while cutting median local scatter (~10%) vs an unmasked
+# coadd — less aggressive than a max-S/N edge mask that dropped to ~34%.
+WFPC2_OVERSCAN_EDGE_PIX = 32
+WFPC2_OVERSCAN_LEFT_EXTRA = 20  # total left mask width = EDGE + LEFT_EXTRA
+WFPC2_OVERSCAN_DQ_BIT = 256
+# Blank extreme negative SCI before drizzle (overscan bleed / fill values).
+WFPC2_SCI_FLOOR = -20.0
+# Grow negative / edge mask by this many pixels (binary dilation).
+WFPC2_BAD_GROW_PIX = 2
+# Kill entire columns in the left half when this fraction of pixels are < floor.
+WFPC2_BAD_COL_FRAC = 0.50
+# Within this outer band, mask rows/columns whose adjacent-pixel noise exceeds
+# VAR_SIGMA × the inner-chip noise (scene-resistant; see hst_drizzle).
+WFPC2_VAR_EDGE_PIX = 48
+WFPC2_VAR_SIGMA = 5.0
+# After AstroDrizzle, drop only *edge* single-bit CTX pixels (exactly one
+# contributing input) within this many pixels of the uncovered footprint.
+# Targets noisy F814W chip-edge overhangs without zeroing interior
+# single-coverage science. Set to 0 to disable.
+WFPC2_DROP_SINGLE_CTX_EDGE_PIX = 16

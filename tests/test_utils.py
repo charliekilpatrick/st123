@@ -50,6 +50,37 @@ def _write_jwst_cal(
     return path
 
 
+def test_is_full_frame_miri(tmp_path: Path):
+    good = tmp_path / 'full_mirimage_cal.fits'
+    data = np.ones((1024, 1032), dtype=np.float32)
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'MIRI'
+    primary.header['DETECTOR'] = 'MIRIMAGE'
+    primary.header['SUBARRAY'] = 'FULL'
+    primary.header['FILTER'] = 'F770W'
+    fits.HDUList(
+        [primary, fits.ImageHDU(data=data, name='SCI')]
+    ).writeto(good)
+
+    bad = tmp_path / 'cutout_mirimage_cal.fits'
+    primary2 = fits.PrimaryHDU()
+    primary2.header['INSTRUME'] = 'MIRI'
+    primary2.header['DETECTOR'] = 'MIRIMAGE'
+    primary2.header['SUBARRAY'] = 'SUB64'
+    primary2.header['FILTER'] = 'F770W'
+    fits.HDUList(
+        [
+            primary2,
+            fits.ImageHDU(data=np.ones((128, 136), dtype=np.float32), name='SCI'),
+        ]
+    ).writeto(bad)
+
+    assert helpers.is_full_frame_miri(good)
+    assert helpers.is_mirimask_compatible(good)
+    assert not helpers.is_full_frame_miri(bad)
+    assert not helpers.is_full_frame_miri(tmp_path / 'missing.fits')
+
+
 # --- settings -----------------------------------------------------------------
 
 
@@ -118,6 +149,30 @@ def test_get_filter_module_instrument_chip(tmp_path: Path):
     assert helpers.get_instrument(str(path)) == 'nircam'
     # JWST files expose DETECTOR rather than CCDCHIP.
     assert helpers.get_chip(str(path)) == 'NRCA1'
+
+
+def test_get_module_miri_and_nircam_without_module(tmp_path: Path):
+    """MIRI has no MODULE keyword; NIRCam can fall back to DETECTOR letter."""
+    miri = tmp_path / 'jw03295006001_02101_00001_mirimage_jhat.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'MIRI'
+    primary.header['DETECTOR'] = 'MIRIMAGE'
+    primary.header['FILTER'] = 'F560W'
+    fits.HDUList(
+        [primary, fits.ImageHDU(np.ones((5, 5), dtype=np.float32), name='SCI')]
+    ).writeto(miri)
+    assert helpers.get_module(str(miri)) == 'miri'
+
+    nrc = tmp_path / 'jw09246001001_02101_00001_nrcb1_jhat.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'NIRCAM'
+    primary.header['DETECTOR'] = 'NRCB1'
+    primary.header['FILTER'] = 'F150W'
+    # Intentionally omit MODULE.
+    fits.HDUList(
+        [primary, fits.ImageHDU(np.ones((5, 5), dtype=np.float32), name='SCI')]
+    ).writeto(nrc)
+    assert helpers.get_module(str(nrc)) == 'b'
 
 
 def test_get_filter_falls_back_to_filter2(tmp_path: Path):

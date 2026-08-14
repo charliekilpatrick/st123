@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -215,3 +216,30 @@ def test_generate_level3_mosaic_applies_photutils3_compat(tmp_path: Path):
     mock_patch.assert_called_once()
     pipe.run.assert_called_once()
     assert out.endswith('f200w_i2d.fits')
+
+
+def test_ensure_local_crds_context_pins_newest_available(tmp_path, monkeypatch):
+    mappings = tmp_path / 'mappings' / 'jwst'
+    mappings.mkdir(parents=True)
+    (mappings / 'jwst_1000.pmap').write_text('x')
+    (mappings / 'jwst_1200.pmap').write_text('x')
+    monkeypatch.setenv('CRDS_PATH', str(tmp_path))
+    monkeypatch.delenv('CRDS_CONTEXT', raising=False)
+
+    # Force default lookup to request a missing context.
+    with patch('crds.get_default_context', return_value='jwst_1584.pmap'):
+        ctx = compatibility.ensure_local_crds_context(preferred='jwst_9999.pmap')
+    assert ctx == 'jwst_1200.pmap'
+    assert os.environ['CRDS_CONTEXT'] == 'jwst_1200.pmap'
+
+
+def test_ensure_local_crds_context_honors_preferred(tmp_path, monkeypatch):
+    mappings = tmp_path / 'mappings' / 'jwst'
+    mappings.mkdir(parents=True)
+    (mappings / 'jwst_1464.pmap').write_text('x')
+    (mappings / 'jwst_1535.pmap').write_text('x')
+    monkeypatch.setenv('CRDS_PATH', str(tmp_path))
+    monkeypatch.delenv('CRDS_CONTEXT', raising=False)
+    ctx = compatibility.ensure_local_crds_context(preferred='jwst_1464.pmap')
+    assert ctx == 'jwst_1464.pmap'
+    assert os.environ['CRDS_CONTEXT'] == 'jwst_1464.pmap'

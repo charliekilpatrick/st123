@@ -79,8 +79,12 @@ frb.ipynb
 .DS_STORE
 Thumbs.db
 
-# Local Cursor rules/hooks — agent-local conventions, not shared via git
+# Local Cursor state (project rules stay machine-local; never push)
 .cursor/
+
+# Local analysis / scratch scripts (not part of the package).
+examples/
+
 
 # -----------------------------------------------------------------------------
 # Secrets / local env (never commit credentials)
