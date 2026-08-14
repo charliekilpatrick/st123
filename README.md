@@ -96,7 +96,8 @@ There is no machine-specific default install path. See
 
 Console scripts from `pyproject.toml` after install: `download`, `align`,  
 `mosaic`, `link-raw`, `image-overlap`, `region`, `catalog`, `dolphot-prep`,  
-`dolphot-warmstart`.
+`run-dolphot`, `dolphot-hdf5`, `dolphot-warmstart-prep`, `dolphot-warmstart`,
+`coadd-phot`.
 
 ---
 
@@ -183,7 +184,7 @@ Interactive notebooks: `st123/notebooks/download.ipynb`, `align.ipynb`,
 ### HST one-target end-to-end (mixed DOLPHOT)
 
 One project directory per target. Flow: **download → link-raw → align (JHAT) →
-mosaic (drizzle) → dolphot-prep → dolphot → scrape `.phot`**.
+mosaic (drizzle) → dolphot-prep → dolphot → HDF5 catalog (``.h5``)**.
 
 After mosaic, `dolphot-prep --instruments hst` stages **all** ACS/WFC3/WFPC2
 JHAT frames against the best coadd reference (prefer **WFC3 → ACS → WFPC2**,
@@ -221,6 +222,8 @@ align        --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
 mosaic       --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
 dolphot-prep --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
 run-dolphot  --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+# Optional: (re)build compressed <run>.h5 catalogs if missing
+dolphot-hdf5 --base-dir "$BASE" -v
 ```
 
 **QA checklist** (before trusting photometry):
@@ -230,6 +233,8 @@ run-dolphot  --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
    (typically `reduction/reference/group_*/ref_*/coadd_*_wfc3_f625w_drc.fits`).
 3. Inspect `*.phot.info` / per-image quality flags; chips with `flag=9/10` are off-detector or bad.
 4. For a target RA/Dec, compare per-band SNR: secure detections (F625W/F606W) vs forced limits.
+5. Confirm each finished photometry directory has a compressed ``<run>.h5`` sidecar
+   (written by ``run-dolphot`` wait mode by default, or via ``dolphot-hdf5``).
 
 **Scrape nearest source** after `dolphot` finishes:
 
