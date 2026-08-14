@@ -8,6 +8,12 @@ Canonical path / runtime flags
     of this path (e.g. ``.../NGC3310``). There is no separate ``--obj``.
 ``--ncores``
     Parallel worker count (alias: ``--workers``).
+``--instruments`` / ``--instrument``
+    Shared instrument list. Mission aliases: ``hst`` → ACS WFC3 WFPC2,
+    ``jwst`` → NIRCAM MIRI, ``all`` → NIRCAM MIRI ACS WFC3 WFPC2.
+``--ra`` / ``--dec`` / ``--radius``
+    Shared sky coordinates (required by download; accepted elsewhere so
+    the same argv works across pipeline stages).
 ``--plot`` / ``--verbose`` / ``--version`` / ``--dry-run``
     Shared runtime switches.
 
@@ -30,6 +36,7 @@ from typing import Any, Sequence
 
 from st123 import __version__ as ST123_VERSION
 from st123.utils.settings import (
+    ALL_PIPELINE_INSTRUMENTS,
     DEFAULT_HST_INSTRUMENTS,
     DEFAULT_JWST_INSTRUMENTS,
     DOWNLOAD_DIR_NAME,
@@ -744,6 +751,164 @@ def parse_instruments(raw: Sequence[str] | None) -> list[str] | None:
             if name:
                 out.append(name)
     return out or None
+
+
+def expand_mission_instruments(
+    tokens: Sequence[str] | None,
+) -> list[str] | None:
+    """
+    Expand mission aliases in an instrument token list.
+
+    * ``hst`` → ACS, WFC3, WFPC2
+    * ``jwst`` → NIRCAM, MIRI
+    * ``all`` → NIRCAM, MIRI, ACS, WFC3, WFPC2
+    * ``nrc`` → NIRCAM
+
+    Other tokens are upper-cased and de-duplicated (order preserved).
+    """
+    if tokens is None:
+        return None
+    out: list[str] = []
+
+    def _add(name: str) -> None:
+        key = str(name).strip().upper()
+        if key and key not in out:
+            out.append(key)
+
+    for token in tokens:
+        key = str(token).strip().upper()
+        if not key:
+            continue
+        if key == 'HST':
+            for name in DEFAULT_HST_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'JWST':
+            for name in DEFAULT_JWST_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'ALL':
+            for name in ALL_PIPELINE_INSTRUMENTS:
+                _add(name)
+            continue
+        if key == 'NRC':
+            _add('NIRCAM')
+            continue
+        _add(key)
+    return out or None
+
+
+def resolve_instruments(raw: Sequence[str] | None) -> list[str] | None:
+    """Parse ``--instruments`` and expand mission aliases (``hst`` / ``jwst`` / ``all``)."""
+    return expand_mission_instruments(parse_instruments(raw))
+
+
+def resolve_photometry_instrument(
+    raw: Sequence[str] | None,
+    *,
+    default: str = 'nircam',
+) -> str:
+    """
+    Map ``--instruments`` to a dolphot-prep / run-dolphot mode string.
+
+    Mission aliases are preserved as modes when given alone (``hst``, ``jwst``).
+    A multi-camera HST list (``ACS WFC3`` or expanded ``hst``) becomes ``hst``.
+    ``jwst`` alone maps to ``nircam`` (primary JWST phot discovery tree).
+    """
+    tokens = parse_instruments(raw)
+    if not tokens:
+        return default
+    if len(tokens) == 1:
+        key = tokens[0].strip().lower()
+        if key == 'nrc':
+            return 'nircam'
+        if key == 'jwst':
+            return 'nircam'
+        if key in {'hst', 'nircam', 'miri', 'acs', 'wfc3', 'wfpc2'}:
+            return key
+    expanded = expand_mission_instruments(tokens) or []
+    hst = [u for u in expanded if u in {'ACS', 'WFC3', 'WFPC2', 'WFC'}]
+    jwst = [u for u in expanded if u in {'NIRCAM', 'MIRI'}]
+    if hst and not jwst:
+        return 'hst' if len(hst) > 1 else hst[0].lower()
+    if jwst and not hst:
+        return jwst[0].lower() if len(jwst) == 1 else 'nircam'
+    raise ValueError(
+        'Cannot mix HST and JWST in one dolphot-prep / run-dolphot call; '
+        f'got {expanded}. Run each mission separately.'
+    )
+
+
+def add_instruments_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    help: str | None = None,
+    default: object | None = None,
+) -> argparse.ArgumentParser:
+    """
+    Attach canonical ``--instruments`` (alias ``--instrument``).
+
+    Mission aliases: ``hst`` (= ACS WFC3 WFPC2), ``jwst`` (= NIRCAM MIRI),
+    ``all`` (= NIRCAM MIRI ACS WFC3 WFPC2).
+    """
+    parser.add_argument(
+        '--instruments',
+        '--instrument',
+        nargs='+',
+        dest='instruments',
+        default=default,
+        metavar='INSTR',
+        help=help
+        or (
+            'Instruments or mission aliases: hst (= ACS WFC3 WFPC2), '
+            'jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 WFPC2), '
+            'or explicit names (ACS, WFC3, NIRCAM, …). '
+            'Alias: --instrument. Space- or comma-separated.'
+        ),
+    )
+    return parser
+
+
+def add_sky_coord_args(
+    parser: argparse.ArgumentParser,
+    *,
+    required: bool = False,
+    ra_default: object | None = None,
+    dec_default: object | None = None,
+    radius_default: float = 3.0,
+) -> argparse.ArgumentParser:
+    """
+    Attach ``--ra`` / ``--dec`` / ``--radius``.
+
+    Always available on pipeline CLIs for uniform scripting; commands that do
+    not perform a cone search ignore them.
+    """
+    group = parser.add_argument_group('sky coordinates')
+    group.add_argument(
+        '--ra',
+        type=str,
+        default=ra_default,
+        required=required and ra_default is None,
+        help='Target ICRS right ascension (degrees or sexagesimal).',
+    )
+    group.add_argument(
+        '--dec',
+        type=str,
+        default=dec_default,
+        required=required and dec_default is None,
+        help='Target ICRS declination (degrees or sexagesimal).',
+    )
+    group.add_argument(
+        '--radius',
+        type=float,
+        default=radius_default,
+        help=(
+            'MAST cone-search radius in arcminutes (default: '
+            f'{radius_default}). Used by download; accepted elsewhere for '
+            'uniform scripting.'
+        ),
+    )
+    return parser
 
 
 def default_instruments_for_telescope(

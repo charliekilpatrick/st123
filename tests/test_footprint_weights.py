@@ -104,6 +104,12 @@ def test_mosaic_resolve_instruments_all():
         'MIRI',
         'ACS',
         'WFC3',
+        'WFPC2',
+    ]
+    assert mosaic_script.resolve_mosaic_instruments(['hst']) == [
+        'ACS',
+        'WFC3',
+        'WFPC2',
     ]
     assert mosaic_script.default_jwst_filters_for_instruments(
         ['NIRCAM', 'MIRI']

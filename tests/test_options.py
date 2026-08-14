@@ -317,3 +317,65 @@ def test_link_raw_legacy_datadir_symlinkdir():
     args = parser.parse_args(['--datadir', '/d', '--symlinkdir', '/s'])
     assert args.source_dir == '/d'
     assert args.symlink_dir == '/s'
+
+
+def test_expand_mission_instruments_aliases():
+    from st123.scripts.utils.options import (
+        expand_mission_instruments,
+        resolve_instruments,
+        resolve_photometry_instrument,
+    )
+
+    assert expand_mission_instruments(['hst']) == ['ACS', 'WFC3', 'WFPC2']
+    assert expand_mission_instruments(['jwst']) == ['NIRCAM', 'MIRI']
+    assert expand_mission_instruments(['all']) == [
+        'NIRCAM',
+        'MIRI',
+        'ACS',
+        'WFC3',
+        'WFPC2',
+    ]
+    assert resolve_instruments(['hst', 'NIRCAM']) == [
+        'ACS',
+        'WFC3',
+        'WFPC2',
+        'NIRCAM',
+    ]
+    assert resolve_photometry_instrument(['hst']) == 'hst'
+    assert resolve_photometry_instrument(['ACS', 'WFC3', 'WFPC2']) == 'hst'
+    assert resolve_photometry_instrument(['jwst']) == 'nircam'
+
+
+def test_pipeline_parsers_accept_shared_instruments_hst_and_sky():
+    """download/align/mosaic/dolphot-prep/run-dolphot share --instruments hst."""
+    from st123.scripts import dolphot as dolphot_script
+    from st123.scripts import run_dolphot as run_dolphot_script
+
+    shared = [
+        '--base-dir',
+        '/tmp/2011ja',
+        '--instruments',
+        'hst',
+        '--ncores',
+        '8',
+        '-v',
+        '--ra',
+        '196.296329',
+        '--dec',
+        '-49.524169',
+    ]
+    dl = download_script.create_parser().parse_args(shared)
+    assert dl.instruments == ['hst']
+    assert dl.ra == '196.296329'
+    al = align_script.create_parser().parse_args(shared)
+    assert al.instruments == ['hst']
+    assert al.ra == '196.296329'
+    mo = mosaic_script.create_parser().parse_args(shared)
+    assert mo.instruments == ['hst']
+    assert mo.ra == '196.296329'
+    prep = dolphot_script.create_parser().parse_args(shared)
+    assert prep.instruments == ['hst']
+    assert prep.ra == '196.296329'
+    run = run_dolphot_script.create_parser().parse_args(shared)
+    assert run.instruments == ['hst']
+    assert run.ra == '196.296329'

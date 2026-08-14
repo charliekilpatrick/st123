@@ -163,7 +163,7 @@ align \
 ```bash
 link-raw --base-dir /path/to/NGC4536 --instrument NIRCAM
 mosaic --base-dir /path/to/NGC4536 --ncores 8
-dolphot-prep --from-mosaic --base-dir /path/to/NGC4536 --instrument nircam
+dolphot-prep --from-mosaic --base-dir /path/to/NGC4536 --instruments nircam
 ```
 
 `mosaic` builds a shared sky stamp per `reference/group_*/ref_*` box
@@ -185,7 +185,7 @@ Interactive notebooks: `st123/notebooks/download.ipynb`, `align.ipynb`,
 One project directory per target. Flow: **download → link-raw → align (JHAT) →
 mosaic (drizzle) → dolphot-prep → dolphot → scrape `.phot`**.
 
-After mosaic, `dolphot-prep --instrument hst` stages **all** ACS/WFC3/WFPC2
+After mosaic, `dolphot-prep --instruments hst` stages **all** ACS/WFC3/WFPC2
 JHAT frames against the best coadd reference (prefer **WFC3 → ACS → WFPC2**,
 then `BEST_REFERENCE_FILTERS` with **F625W** first). That ranking matches the
 bands that usually give the cleanest HST PSF photometry (e.g. WFC3/F625W and
@@ -206,40 +206,21 @@ departures from NIRCam defaults for JHAT-aligned multi-instrument HST:
 | CTE | ACS/WFC3 off, WFPC2 on | Matches typical pipeline products. |
 
 ```bash
-export PROJ=/path/to/YourTarget
-# Prefer decimal degrees (paste often injects curly quotes into sexagesimal).
-export RA=177.66
-export DEC=55.36
-export NCORES=8
+# Make sure you have up to date dolphot in your path
+conda activate st123
+BASE=/path/to/YourTarget
+NCORES=8
+RA=177.66
+DEC=55.36
 # optional: export MAST_API_TOKEN=...
 
-download \
-  --telescope hst \
-  --ra "$RA" --dec "$DEC" \
-  --radius 3 \
-  --base-dir "$PROJ" \
-  --instruments ACS WFC3 WFPC2
-# download also runs link-raw → $PROJ/reduction/raw
-# WFPC2 needs c1m DQ companions (included by default product rules)
-
-align \
-  --telescope hst \
-  --base-dir "$PROJ" \
-  --ncores "$NCORES"
-
-mosaic \
-  --telescope hst \
-  --base-dir "$PROJ" \
-  --ncores "$NCORES"
-
-dolphot-prep \
-  --instrument hst \
-  --base-dir "$PROJ" \
-  --ncores "$NCORES"
-
-# No space after -p. Cap MaxThreads to $NCORES (do not launch N×96-thread jobs).
-cd "$PROJ/dolphot/hst_0_0" && \
-  dolphot hst_0_0.phot -pdolphot.param MaxThreads="$NCORES"
+# download -> align -> mosaic -> DOLPHOT
+# --instruments hst ≡ ACS WFC3 WFPC2 (same flag on every stage)
+download     --base-dir "$BASE" --instruments hst --ra="$RA" --dec="$DEC" -v
+align        --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+mosaic       --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+dolphot-prep --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
+run-dolphot  --base-dir "$BASE" --instruments hst --ncores "$NCORES" -v
 ```
 
 **QA checklist** (before trusting photometry):
@@ -326,12 +307,15 @@ set `CRDS_PATH` / `CRDS_SERVER_URL` as recommended by STScI.
 
 - **Paths / runtime:** `--base-dir` (aliases `--workdir`, `--basedir`, …),
 `--ncores` / `--workers`, `--plot`, `--verbose`, `--dry-run`, `--version`
+- **Shared pipeline flags:** `--instruments` (alias `--instrument`; mission
+  aliases `hst`→ACS WFC3 WFPC2, `jwst`→NIRCAM MIRI, `all`), plus optional
+  `--ra` / `--dec` / `--radius` on download/align/mosaic/dolphot-prep/run-dolphot
 - **Download:** `--ra`, `--dec`, `--radius`, `--stage`, `--instruments`,
 `--filters`, `--token`
-- **Alignment:** `--mode visit|reference|pair`, `--instrument`, `--ref`,
+- **Alignment:** `--mode visit|reference|pair`, `--instruments`, `--ref`,
 `--image`, `--photfile`
 - **Mosaic / DOLPHOT:** `--from-mosaic`, `--files`, `--refimage`,
-`--dolphot-bin`, `--instrument`, `--skip-sky` / related prep flags
+`--dolphot-bin`, `--instruments`, `--skip-sky` / related prep flags
 - **Link:** `--instrument` (with `--base-dir`) for `link-raw`
 
 Canonical naming conventions used across CLIs and library APIs:

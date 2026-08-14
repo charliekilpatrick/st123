@@ -17,9 +17,12 @@ from pathlib import Path
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    add_instruments_arg,
+    add_sky_coord_args,
     configure_logging_from_args,
     create_parser as build_parser,
     dataset_label,
+    resolve_photometry_instrument,
     resolve_project_root,
     resolve_reduction_dir,
 )
@@ -27,7 +30,6 @@ from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
 
-_CLI_INSTRUMENTS = ('nircam', 'miri', 'acs', 'wfc3', 'wfpc2', 'hst')
 _PHOT_DIR_RE = re.compile(
     r'^(?:phot|nircam|miri|acs|wfc3|wfpc2|hst|nircam_miri|nircam_hst)_(\d+)_(.+)$',
     re.IGNORECASE,
@@ -47,18 +49,6 @@ class DolphotRun:
     @property
     def label(self) -> str:
         return self.outdir.name
-
-
-def _parse_instrument(value: str) -> str:
-    key = str(value).strip().lower()
-    if key == 'nrc':
-        key = 'nircam'
-    if key not in _CLI_INSTRUMENTS:
-        raise argparse.ArgumentTypeError(
-            f'invalid instrument {value!r}; choose from '
-            f'{", ".join(_CLI_INSTRUMENTS)}'
-        )
-    return key
 
 
 def _parse_box_token(token: str) -> int | str:
@@ -198,20 +188,16 @@ def create_parser() -> argparse.ArgumentParser:
             'under reduction/ and dolphot/.'
         ),
     )
-    parser.add_argument(
-        '--instrument',
-        type=_parse_instrument,
-        default='nircam',
-        metavar='INSTRUMENT',
+    add_instruments_arg(
+        parser,
+        default=['nircam'],
         help=(
-            'Which prepared runs to execute (case-insensitive). '
-            'nircam → reduction/phot_* and dolphot/nircam_* (free runs; not '
-            'warmstarts). miri → every dolphot/nircam_miri_* (+ miri_*). '
-            'hst / acs / wfc3 → every dolphot/nircam_hst_G_B warmstart '
-            '(dolphot nircam_hst_G_B.phot -pdolphot.param MaxThreads=…) '
-            'plus matching dolphot/{hst,acs,wfc3,wfpc2}_* if present.'
+            'Which prepared runs to execute. Mission aliases: hst (mixed HST '
+            'dirs), jwst (→ nircam), or explicit nircam|miri|acs|wfc3|wfpc2. '
+            'Alias: --instrument.'
         ),
     )
+    add_sky_coord_args(parser, required=False)
     parser.add_argument(
         '--group',
         type=int,
@@ -290,9 +276,12 @@ def _runs_from_args(args: argparse.Namespace) -> list[DolphotRun]:
         return runs
 
     box = None if args.box is None else _parse_box_token(str(args.box))
+    instrument = getattr(args, 'instrument', None) or resolve_photometry_instrument(
+        args.instruments
+    )
     return discover_dolphot_runs(
         args.base_dir,
-        instrument=args.instrument,
+        instrument=instrument,
         group=args.group,
         box=box,
     )
@@ -361,6 +350,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     configure_logging_from_args(args, 'run-dolphot')
     try:
+        try:
+            args.instrument = resolve_photometry_instrument(args.instruments)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
         wait = bool(args.wait) and not bool(args.background)
         parallel = max(1, int(args.parallel))
         ncores = max(1, int(args.ncores))

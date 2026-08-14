@@ -7,14 +7,13 @@ use an explicit frame list instead.
 
 HST one-target mixed run (all cameras, best coadd as ``img0``)::
 
-    dolphot-prep --instrument hst --base-dir /path/to/Target --ncores 8
+    dolphot-prep --instruments hst --base-dir /path/to/Target --ncores 8
 
 See README "HST one-target end-to-end" for the full download→dolphot recipe.
 """
 
 from __future__ import annotations
 
-import argparse
 import glob
 import logging
 import shutil
@@ -23,9 +22,12 @@ from pathlib import Path
 from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
+    add_instruments_arg,
+    add_sky_coord_args,
     configure_logging_from_args,
     create_parser as build_parser,
     dataset_label,
+    resolve_photometry_instrument,
     resolve_project_root,
     resolve_reduction_dir,
 )
@@ -40,19 +42,6 @@ _HST_CLI_INSTRUMENTS = frozenset({*_HST_INSTRUMENTS, _HST_MIXED})
 _CLI_INSTRUMENTS = ('nircam', 'miri', 'acs', 'wfc3', 'wfpc2', 'hst')
 
 
-def _parse_instrument(value: str) -> str:
-    """Normalize ``--instrument`` to a lowercase CLI choice (accepts NIRCAM)."""
-    key = str(value).strip().lower()
-    if key == 'nrc':
-        key = 'nircam'
-    if key not in _CLI_INSTRUMENTS:
-        raise argparse.ArgumentTypeError(
-            f'invalid instrument {value!r}; choose from '
-            f'{", ".join(_CLI_INSTRUMENTS)}'
-        )
-    return key
-
-
 def create_parser():
     parser = build_parser(
         description=(
@@ -62,25 +51,23 @@ def create_parser():
             'reference/group_*/ref_*/ (and dolphot_frames.txt) and prep every '
             'mosaic box for the requested instrument. Override with '
             '--files and/or --refimage for an explicit frame list. '
-            'HST: --instrument wfc3|wfpc2|acs --base-dir … stages under '
+            'HST: --instruments wfc3|wfpc2|acs --base-dir … stages under '
             '<project>/dolphot/<instrument>_0_0/. '
-            'Mixed (option C): --instrument hst uses all JHAT frames and the '
+            'Mixed: --instruments hst uses all JHAT frames and the '
             'best coadd reference under dolphot/hst_0_0/.'
         ),
     )
-    parser.add_argument(
-        '--instrument',
-        type=_parse_instrument,
-        default='nircam',
-        metavar='INSTRUMENT',
+    add_instruments_arg(
+        parser,
+        default=['nircam'],
         help=(
-            'Instrument module (case-insensitive): nircam, miri, acs, wfc3, '
-            'wfpc2, or hst. Selects mask binary, calcsky defaults, and frame '
-            'filtering. In mosaic mode, preps all group_*/ref_* boxes for '
-            'that instrument. Use hst for a mixed ACS+WFC3+WFPC2 run against '
-            'the best coadd reference.'
+            'Instrument / mission for DOLPHOT prep (case-insensitive). '
+            'Aliases: hst (mixed ACS+WFC3+WFPC2), jwst (→ nircam), or '
+            'explicit nircam|miri|acs|wfc3|wfpc2. Selects mask binary, '
+            'calcsky defaults, and frame filtering. Alias: --instrument.'
         ),
     )
+    add_sky_coord_args(parser, required=False)
     parser.add_argument(
         '--from-mosaic',
         action='store_true',
@@ -136,7 +123,7 @@ def create_parser():
         help=(
             'In mosaic mode, prefer coadd_*_<filter>_*.fits (JWST i2d or '
             'HST drc/drz) as the reference. Default: F560W when '
-            '--instrument miri, else the manifest # ref line.'
+            '--instruments miri, else the manifest # ref line.'
         ),
     )
     parser.add_argument(
@@ -598,6 +585,11 @@ def main(argv=None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'dolphot-prep')
     try:
+        try:
+            args.instrument = resolve_photometry_instrument(args.instruments)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
         try:
             if use_mosaic_discovery(args):
                 return _run_from_mosaic(args)

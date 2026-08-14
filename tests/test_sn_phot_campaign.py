@@ -71,7 +71,7 @@ def test_hst_dolphot_prep_omits_outdir(campaign, tmp_path, monkeypatch):
     ns = type('NS', (), {'ncores': 4, 'dry_run': True})()
     out_dirs = campaign.step_dolphot_prep_hst(tmp_path, ns)
     assert recorded
-    assert recorded[0][:3] == ['dolphot-prep', '--instrument', 'hst']
+    assert recorded[0][:3] == ['dolphot-prep', '--instruments', 'hst']
     assert '--outdir' not in recorded[0]
     assert out_dirs == [tmp_path / 'dolphot' / 'hst_0_0']
 
@@ -92,7 +92,7 @@ def test_hst_dolphot_run_uses_run_dolphot(campaign, tmp_path, monkeypatch):
             'run-dolphot',
             '--base-dir',
             str(tmp_path),
-            '--instrument',
+            '--instruments',
             'hst',
             '--ncores',
             '8',

@@ -105,7 +105,7 @@ def test_parser_background_and_dry_run():
             '--dry-run',
         ]
     )
-    assert args.instrument == 'nircam'
+    assert args.instruments == ['NIRCAM']
     assert args.ncores == 8
     assert args.parallel == 4
     assert args.background is True

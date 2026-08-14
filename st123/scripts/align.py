@@ -45,12 +45,15 @@ from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
     add_filters,
+    add_instruments_arg,
     add_pair_align_args,
+    add_sky_coord_args,
     configure_logging_from_args,
     as_path,
     create_parser as build_parser,
     dataset_label,
     default_instruments_for_telescope,
+    expand_mission_instruments,
     parse_filter_list,
     parse_instruments,
     resolve_instruments_with_telescope,
@@ -68,7 +71,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_REFERENCE_DATA_DIR = Path('/data/rwisenbaker/jwst_data/M51')
 
 # Default multi-mission set for ``--instruments ALL``.
-ALL_ALIGN_INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI', 'ACS', 'WFC3')
+ALL_ALIGN_INSTRUMENTS: tuple[str, ...] = (
+    'NIRCAM',
+    'MIRI',
+    'ACS',
+    'WFC3',
+    'WFPC2',
+)
 _JWST_ALIGN_INSTRUMENTS = frozenset({'nircam', 'nrc', 'miri'})
 _HST_ALIGN_INSTRUMENTS = frozenset({'acs', 'wfc3', 'wfpc2', 'wfc'})
 
@@ -128,30 +137,18 @@ def create_parser(default_data_dir: Path | None = None):
             'pair: align --image to --ref (auto if both flags are set).'
         ),
     )
-    parser.add_argument(
-        '--instrument',
-        type=str,
-        default=None,
+    add_instruments_arg(
+        parser,
         help=(
-            'Science instrument to align (singular). Defaults: NIRCAM for '
-            '--mode visit, MIRI for --mode reference (unused in pair mode). '
-            'Prefer --instruments for multi-mission orchestration.'
+            'One or more instruments to align. Mission aliases: hst (= ACS '
+            'WFC3 WFPC2), jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 '
+            'WFPC2). Multi-instrument lists run an orchestrated pipeline: '
+            'NIRCam visit → HST visit → intermediate NIRCam mosaic → MIRI '
+            'reference. NIRCAM alone keeps the legacy visit-only path. '
+            'Overrides --telescope defaults when set. Alias: --instrument.'
         ),
     )
-    parser.add_argument(
-        '--instruments',
-        nargs='+',
-        default=None,
-        help=(
-            'One or more instruments to align. Equivalent mission shorthands: '
-            '--telescope hst (= ACS WFC3 WFPC2), --telescope jwst (= NIRCAM '
-            'MIRI). ALL → NIRCAM MIRI ACS WFC3. Multi-instrument lists run an '
-            'orchestrated pipeline: NIRCam visit → HST visit → intermediate '
-            'NIRCam mosaic → MIRI reference. NIRCAM alone keeps the legacy '
-            'visit-only path. Overrides --instrument / --telescope defaults '
-            'when set. Space- or comma-separated.'
-        ),
-    )
+    add_sky_coord_args(parser, required=False)
     parser.add_argument(
         '--force-miri',
         action='store_true',
@@ -324,29 +321,13 @@ def resolve_align_instruments(
     """
     Normalize ``--instruments`` / ``--instrument`` into an upper-case list.
 
-    Returns ``None`` when neither flag was set (caller uses mode defaults).
-    ``ALL`` expands to :data:`ALL_ALIGN_INSTRUMENTS`.
+    Mission aliases ``hst`` / ``jwst`` / ``all`` are expanded. Returns ``None``
+    when neither flag was set (caller uses mode defaults).
     """
     if instruments_raw:
-        parsed = parse_instruments(instruments_raw) or []
-        out: list[str] = []
-        for token in parsed:
-            key = str(token).strip().upper()
-            if not key:
-                continue
-            if key == 'ALL':
-                for name in ALL_ALIGN_INSTRUMENTS:
-                    if name not in out:
-                        out.append(name)
-                continue
-            if key == 'NRC':
-                key = 'NIRCAM'
-            if key not in out:
-                out.append(key)
-        return out or None
+        return expand_mission_instruments(parse_instruments(instruments_raw))
     if instrument and str(instrument).strip():
-        key = str(instrument).strip().upper()
-        return ['NIRCAM'] if key == 'NRC' else [key]
+        return expand_mission_instruments([str(instrument).strip()])
     return None
 
 
@@ -1400,16 +1381,8 @@ def main(argv=None) -> int:
         multi = resolve_instruments_with_telescope(
             getattr(args, 'instruments', None),
             getattr(args, 'telescope', None),
-            resolve_instruments_fn=lambda raw: resolve_align_instruments(
-                raw, instrument=None
-            ),
+            resolve_instruments_fn=resolve_align_instruments,
         )
-        if (
-            multi is None
-            and getattr(args, 'instruments', None) is None
-            and getattr(args, 'instrument', None)
-        ):
-            multi = resolve_align_instruments(None, instrument=args.instrument)
 
         # Orchestrate when the resolved list is more than NIRCam-only.
         if multi is not None and needs_orchestration(multi):
@@ -1425,9 +1398,11 @@ def main(argv=None) -> int:
                     args.telescope = 'jwst'
             return run_orchestrated_alignment(args, multi)
 
-        # Singular path: --instruments NIRCAM → visit NIRCam; else --instrument.
+        # Singular path: --instruments NIRCAM → visit NIRCam.
         if multi is not None and len(multi) == 1:
             args.instrument = multi[0]
+        else:
+            args.instrument = None
         args.instrument = _resolve_instrument(args.mode, args.instrument)
 
         if args.mode == 'pair':

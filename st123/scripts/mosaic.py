@@ -13,9 +13,12 @@ from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
     add_filters,
+    add_instruments_arg,
+    add_sky_coord_args,
     configure_logging_from_args,
     create_parser as build_parser,
     dataset_label,
+    expand_mission_instruments,
     parse_filter_list,
     parse_instruments,
     resolve_instruments_with_telescope,
@@ -24,7 +27,6 @@ from st123.scripts.utils.options import (
 from st123.utils.logging import shutdown_logging
 from st123.utils.settings import (
     DEFAULT_MIRI_MOSAIC_FILTERS,
-    DEFAULT_MOSAIC_INSTRUMENTS,
     DEFAULT_NIRCAM_MOSAIC_FILTERS,
 )
 
@@ -101,19 +103,17 @@ def create_parser():
             'toward --nmax. none: science JHAT only.'
         ),
     )
-    parser.add_argument(
-        '--instruments',
-        nargs='+',
-        default=None,
+    add_instruments_arg(
+        parser,
         help=(
-            'Instruments to mosaic. Equivalent mission shorthands: '
-            '--telescope hst (= ACS WFC3 WFPC2), --telescope jwst (= NIRCAM '
-            'MIRI). ALL → NIRCAM MIRI ACS WFC3. Mixed JWST+HST lists share one '
-            'group_*/ref_* plan then mosaic each mission into those boxes. '
-            'Explicit --instruments overrides --telescope. Space- or '
-            'comma-separated.'
+            'Instruments to mosaic. Mission aliases: hst (= ACS WFC3 WFPC2), '
+            'jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 WFPC2). Mixed '
+            'JWST+HST lists share one group_*/ref_* plan then mosaic each '
+            'mission into those boxes. Explicit --instruments overrides '
+            '--telescope. Alias: --instrument.'
         ),
     )
+    add_sky_coord_args(parser, required=False)
     parser.add_argument(
         '--force-miri',
         action='store_true',
@@ -308,25 +308,10 @@ def _filter_plan_boxes(plan, args):
 def resolve_mosaic_instruments(
     instruments_raw: list[str] | None,
 ) -> list[str] | None:
-    """Normalize ``--instruments``; ``ALL`` → default dual-mode set."""
+    """Normalize ``--instruments``; expand ``hst`` / ``jwst`` / ``all``."""
     if not instruments_raw:
         return None
-    parsed = parse_instruments(instruments_raw) or []
-    out: list[str] = []
-    for token in parsed:
-        key = str(token).strip().upper()
-        if not key:
-            continue
-        if key == 'ALL':
-            for name in DEFAULT_MOSAIC_INSTRUMENTS:
-                if name not in out:
-                    out.append(name)
-            continue
-        if key == 'NRC':
-            key = 'NIRCAM'
-        if key not in out:
-            out.append(key)
-    return out or None
+    return expand_mission_instruments(parse_instruments(instruments_raw))
 
 
 def partition_mosaic_instruments(

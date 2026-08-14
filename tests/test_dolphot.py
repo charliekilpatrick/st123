@@ -651,12 +651,14 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
 
 def test_dolphot_prep_parser_miri_defaults():
     from st123.scripts import dolphot as prep_script
+    from st123.scripts.utils.options import resolve_photometry_instrument
 
     parser = prep_script.create_parser()
     args = parser.parse_args(
         ['--instrument', 'miri', '--base-dir', '/tmp/x', '--ncores', '32']
     )
-    assert args.instrument == 'miri'
+    assert args.instruments == ['miri']
+    assert resolve_photometry_instrument(args.instruments) == 'miri'
     assert args.from_mosaic is False  # flag unused; discovery is default
     assert prep_script.use_mosaic_discovery(args) is True
     assert args.ncores == 32
@@ -683,6 +685,7 @@ def test_use_mosaic_discovery_opt_out_with_refimage_or_files():
 
 def test_dolphot_prep_instrument_case_insensitive():
     from st123.scripts import dolphot as prep_script
+    from st123.scripts.utils.options import resolve_photometry_instrument
 
     parser = prep_script.create_parser()
     args = parser.parse_args(
@@ -696,7 +699,8 @@ def test_dolphot_prep_instrument_case_insensitive():
             '8',
         ]
     )
-    assert args.instrument == 'nircam'
+    assert args.instruments == ['NIRCAM']
+    assert resolve_photometry_instrument(args.instruments) == 'nircam'
     assert prep_script.use_mosaic_discovery(args) is True
     assert args.ncores == 8
 

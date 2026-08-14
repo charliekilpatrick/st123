@@ -211,14 +211,18 @@ def test_download_parser_accepts_download_dir_and_layout():
 
 
 def test_parse_instruments_comma_and_space():
-    assert download_script.parse_instruments(None) is None
-    assert download_script.parse_instruments(['NIRCAM,MIRI']) == ['NIRCAM', 'MIRI']
-    assert download_script.parse_instruments(['NIRCAM', 'MIRI']) == ['NIRCAM', 'MIRI']
-    assert download_script.parse_instruments(['NIRCAM, MIRI', 'NIRISS']) == [
+    from st123.scripts.utils.options import parse_instruments, resolve_instruments
+
+    assert parse_instruments(None) is None
+    assert parse_instruments(['NIRCAM,MIRI']) == ['NIRCAM', 'MIRI']
+    assert parse_instruments(['NIRCAM', 'MIRI']) == ['NIRCAM', 'MIRI']
+    assert parse_instruments(['NIRCAM, MIRI', 'NIRISS']) == [
         'NIRCAM',
         'MIRI',
         'NIRISS',
     ]
+    assert resolve_instruments(['hst']) == ['ACS', 'WFC3', 'WFPC2']
+    assert resolve_instruments(['jwst']) == ['NIRCAM', 'MIRI']
 
 
 def test_parse_telescopes_multi_and_comma():

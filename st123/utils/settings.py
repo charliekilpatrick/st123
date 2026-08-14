@@ -235,6 +235,15 @@ DEFAULT_MOSAIC_INSTRUMENTS: tuple[str, ...] = (
     'MIRI',
     'ACS',
     'WFC3',
+    'WFPC2',
+)
+# ``--instruments all`` / orchestrated defaults (JWST + full HST set).
+ALL_PIPELINE_INSTRUMENTS: tuple[str, ...] = (
+    'NIRCAM',
+    'MIRI',
+    'ACS',
+    'WFC3',
+    'WFPC2',
 )
 
 # Relative subdirectory pattern under the download root.

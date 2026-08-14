@@ -11,11 +11,13 @@ from st123.scripts.utils.options import (
     add_base_dir,
     add_common_runtime,
     add_filters,
+    add_instruments_arg,
     add_mast_token,
+    add_sky_coord_args,
     configure_logging_from_args,
     create_parser as build_parser,
     parse_filter_list,
-    parse_instruments,
+    resolve_instruments,
 )
 from st123.utils.logging import shutdown_logging
 from st123.utils.settings import (
@@ -183,17 +185,7 @@ def create_parser():
             '--data-dir, --download-dir, --outdir.'
         ),
     )
-    parser.add_argument('--ra', type=str, required=True, help='RA of the target')
-    parser.add_argument('--dec', type=str, required=True, help='DEC of the target')
-    parser.add_argument(
-        '--radius',
-        type=float,
-        default=3.0,
-        help=(
-            'MAST cone-search radius in arcminutes (default: 3.0). '
-            'Passed through unchanged for both HST and JWST.'
-        ),
-    )
+    add_sky_coord_args(parser, required=True)
     parser.add_argument(
         '--telescope',
         nargs='+',
@@ -202,22 +194,20 @@ def create_parser():
         help=(
             'Optional mission filter: hst and/or jwst. Omit when '
             '--instruments already imply the mission(s) '
-            '(NIRCAM/MIRI → JWST; ACS/WFC3/WFPC2 → HST). '
+            '(hst / ACS/WFC3/WFPC2 → HST; jwst / NIRCAM/MIRI → JWST). '
             'With neither --telescope nor --instruments, defaults to jwst.'
         ),
     )
     parser.add_argument(
         '--stage', type=int, default=2, help='JWST calibration stage (2=CAL, 3=I2D)'
     )
-    parser.add_argument(
-        '--instruments',
-        nargs='+',
-        default=None,
+    add_instruments_arg(
+        parser,
         help=(
-            'Instruments to include (also selects telescope when '
-            '--telescope is omitted). Defaults: JWST→NIRCAM MIRI; '
-            'HST→ACS WFC3 WFPC2. Space- or comma-separated mixed lists '
-            'are fine (e.g. NIRCAM MIRI ACS WFC3).'
+            'Instruments or mission aliases (also selects telescope when '
+            '--telescope is omitted): hst (= ACS WFC3 WFPC2), jwst (= NIRCAM '
+            'MIRI), all, or explicit names. Defaults: JWST→NIRCAM MIRI; '
+            'HST→ACS WFC3 WFPC2. Alias: --instrument.'
         ),
     )
     parser.add_argument(
@@ -358,7 +348,7 @@ def main(argv=None) -> int:
             logger.error('%s', exc)
             return 1
 
-        instruments = parse_instruments(args.instruments)
+        instruments = resolve_instruments(args.instruments)
         try:
             telescopes = resolve_telescopes(args.telescope, instruments)
             inst_by_tel = partition_instruments_by_telescope(

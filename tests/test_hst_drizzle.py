@@ -120,12 +120,15 @@ def test_mosaic_parser_telescope_default_none():
 
 
 def test_dolphot_prep_parser_accepts_hst_instruments():
+    from st123.scripts.utils.options import resolve_photometry_instrument
+
     parser = dolphot_script.create_parser()
-    for inst in ('acs', 'wfc3', 'wfpc2'):
+    for inst in ('acs', 'wfc3', 'wfpc2', 'hst'):
         args = parser.parse_args(
-            ['--instrument', inst, '--base-dir', '/data/HST/SN', '-v']
+            ['--instruments', inst, '--base-dir', '/data/HST/SN', '-v']
         )
-        assert args.instrument == inst
+        assert args.instruments == [inst]
+        assert resolve_photometry_instrument(args.instruments) == inst
         assert args.base_dir == '/data/HST/SN'
 
 

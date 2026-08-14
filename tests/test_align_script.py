@@ -106,7 +106,7 @@ def test_align_parser():
     assert args.base_dir == '/tmp/w'
     assert args.ncores == 2
     assert args.mode == 'visit'
-    assert args.instrument is None
+    assert args.instruments is None
 
     ref = parser.parse_args(
         [
@@ -121,7 +121,7 @@ def test_align_parser():
         ]
     )
     assert ref.mode == 'reference'
-    assert ref.instrument == 'MIRI'
+    assert ref.instruments == ['MIRI']
     assert ref.ncores == 4
     # Removed from the unified CLI.
     with pytest.raises(SystemExit):
@@ -205,6 +205,12 @@ def test_resolve_align_instruments_all_and_nircam():
         'MIRI',
         'ACS',
         'WFC3',
+        'WFPC2',
+    ]
+    assert align_script.resolve_align_instruments(['hst']) == [
+        'ACS',
+        'WFC3',
+        'WFPC2',
     ]
     assert align_script.resolve_align_instruments(
         ['NIRCAM', 'MIRI', 'ACS', 'WFC3']
