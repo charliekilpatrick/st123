@@ -1,0 +1,1696 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>st123.mast.mast &mdash; st123 0.1.1.dev25+gb984091e0</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" href="../../../_static/st123-docs.css" type="text/css" />
+
+  
+      <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../_static/documentation_options.js?v=840d7aea"></script>
+      <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            st123
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../user_guide.html">User guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api.html">API</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">st123</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">st123.mast.mast</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for st123.mast.mast</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;MAST query, filter, and download helpers for HST and JWST imaging.&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shapely</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy</span><span class="w"> </span><span class="kn">import</span> <span class="n">units</span> <span class="k">as</span> <span class="n">u</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.coordinates</span><span class="w"> </span><span class="kn">import</span> <span class="n">SkyCoord</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.table</span><span class="w"> </span><span class="kn">import</span> <span class="n">Column</span><span class="p">,</span> <span class="n">Table</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astroquery.mast</span><span class="w"> </span><span class="kn">import</span> <span class="n">Observations</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astroquery.vizier</span><span class="w"> </span><span class="kn">import</span> <span class="n">Vizier</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.logging</span><span class="w"> </span><span class="kn">import</span> <span class="n">capture_output</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.settings</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">DEFAULT_DOWNLOAD_LAYOUT</span><span class="p">,</span>
+    <span class="n">DEFAULT_HST_FILTERS</span><span class="p">,</span>
+    <span class="n">DEFAULT_HST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">DEFAULT_JWST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">HST_PRODUCT_RULES</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="c1"># Token successfully passed to ``Observations.login`` in this process.</span>
+<span class="c1"># Avoids re-authing on every query/download stage in one ``download`` CLI run.</span>
+<span class="n">_MAST_SESSION_TOKEN</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="n">_MAST_PUBLIC_NOTICE</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+
+<span class="c1"># MAST product-list / download retries (issue #4: silent partial inventory).</span>
+<span class="n">_HST_MAST_MAX_ATTEMPTS</span> <span class="o">=</span> <span class="mi">3</span>
+<span class="n">_HST_MAST_RETRY_DELAY_SEC</span> <span class="o">=</span> <span class="mf">5.0</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_is_transient_mast_error</span><span class="p">(</span><span class="n">exc</span><span class="p">:</span> <span class="ne">BaseException</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;True for timeouts / connection failures worth retrying against MAST.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span>
+        <span class="n">exc</span><span class="p">,</span>
+        <span class="p">(</span>
+            <span class="ne">TimeoutError</span><span class="p">,</span>
+            <span class="ne">ConnectionError</span><span class="p">,</span>
+            <span class="ne">ConnectionResetError</span><span class="p">,</span>
+            <span class="ne">BrokenPipeError</span><span class="p">,</span>
+            <span class="ne">OSError</span><span class="p">,</span>
+        <span class="p">),</span>
+    <span class="p">):</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s1">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="n">needles</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="s1">&#39;timeout&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;timed out&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;time out&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;connection reset&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;connection aborted&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;connection refused&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;temporarily unavailable&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;503&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;502&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;504&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;429&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;remote end closed&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;broken pipe&#39;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="nb">any</span><span class="p">(</span><span class="n">n</span> <span class="ow">in</span> <span class="n">text</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">needles</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_mast_call_with_retries</span><span class="p">(</span><span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">fn</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Call ``fn`` with retries on transient MAST errors.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    tuple</span>
+<span class="sd">        ``(result, None)`` on success, or ``(None, last_exc)`` after exhausting</span>
+<span class="sd">        attempts (non-transient errors fail immediately).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">last_exc</span><span class="p">:</span> <span class="ne">Exception</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">_HST_MAST_MAX_ATTEMPTS</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">fn</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">),</span> <span class="kc">None</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">last_exc</span> <span class="o">=</span> <span class="n">exc</span>
+            <span class="k">if</span> <span class="n">attempt</span> <span class="o">&lt;</span> <span class="n">_HST_MAST_MAX_ATTEMPTS</span> <span class="ow">and</span> <span class="n">_is_transient_mast_error</span><span class="p">(</span><span class="n">exc</span><span class="p">):</span>
+                <span class="n">delay</span> <span class="o">=</span> <span class="n">_HST_MAST_RETRY_DELAY_SEC</span> <span class="o">*</span> <span class="n">attempt</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                    <span class="s1">&#39;Transient MAST error for </span><span class="si">%s</span><span class="s1"> (attempt </span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">): </span><span class="si">%s</span><span class="s1">; &#39;</span>
+                    <span class="s1">&#39;retrying in </span><span class="si">%.1f</span><span class="s1">s&#39;</span><span class="p">,</span>
+                    <span class="n">label</span><span class="p">,</span>
+                    <span class="n">attempt</span><span class="p">,</span>
+                    <span class="n">_HST_MAST_MAX_ATTEMPTS</span><span class="p">,</span>
+                    <span class="n">exc</span><span class="p">,</span>
+                    <span class="n">delay</span><span class="p">,</span>
+                <span class="p">)</span>
+                <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">delay</span><span class="p">)</span>
+                <span class="k">continue</span>
+            <span class="k">break</span>
+    <span class="k">return</span> <span class="kc">None</span><span class="p">,</span> <span class="n">last_exc</span>
+
+
+<div class="viewcode-block" id="resolve_mast_token">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.resolve_mast_token">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">resolve_mast_token</span><span class="p">(</span><span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve a MAST API token from an explicit value or the environment.</span>
+
+<span class="sd">    Checks ``token``, then ``MAST_API_TOKEN``, then ``MAST_TOKEN``.</span>
+<span class="sd">    Create a token at https://auth.mast.stsci.edu/info</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    token : str or None, optional</span>
+<span class="sd">        Explicit API token. When ``None`` or empty, environment variables are</span>
+<span class="sd">        consulted.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str or None</span>
+<span class="sd">        Resolved token string, or ``None`` when no token is available.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">for</span> <span class="n">candidate</span> <span class="ow">in</span> <span class="p">(</span><span class="n">token</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;MAST_API_TOKEN&#39;</span><span class="p">),</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;MAST_TOKEN&#39;</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">candidate</span> <span class="ow">and</span> <span class="nb">str</span><span class="p">(</span><span class="n">candidate</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">():</span>
+            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">candidate</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">return</span> <span class="kc">None</span></div>
+
+
+
+<div class="viewcode-block" id="reset_mast_login_state">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.reset_mast_login_state">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">reset_mast_login_state</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Clear the in-process MAST login cache (tests / rare re-auth).&quot;&quot;&quot;</span>
+    <span class="k">global</span> <span class="n">_MAST_SESSION_TOKEN</span><span class="p">,</span> <span class="n">_MAST_PUBLIC_NOTICE</span>
+    <span class="n">_MAST_SESSION_TOKEN</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">_MAST_PUBLIC_NOTICE</span> <span class="o">=</span> <span class="kc">False</span></div>
+
+
+
+<div class="viewcode-block" id="prepare_mast_auth">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.prepare_mast_auth">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">prepare_mast_auth</span><span class="p">(</span><span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Optionally authenticate to MAST; never abort a public-data download.</span>
+
+<span class="sd">    * No token → log once that only public data will be queried; return False.</span>
+<span class="sd">    * Token present → login once per process (cached). Login failure warns and</span>
+<span class="sd">      continues with public data only (return False).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        True when authenticated for proprietary access.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">global</span> <span class="n">_MAST_PUBLIC_NOTICE</span>
+    <span class="n">resolved</span> <span class="o">=</span> <span class="n">resolve_mast_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">resolved</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">_MAST_PUBLIC_NOTICE</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                <span class="s1">&#39;No MAST token set (MAST_API_TOKEN / --token); &#39;</span>
+                <span class="s1">&#39;continuing with public data only&#39;</span>
+            <span class="p">)</span>
+            <span class="n">_MAST_PUBLIC_NOTICE</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">if</span> <span class="n">mast_login</span><span class="p">(</span><span class="n">resolved</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+        <span class="s1">&#39;MAST token was provided but login failed; &#39;</span>
+        <span class="s1">&#39;continuing with public data only&#39;</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="kc">False</span></div>
+
+
+
+<div class="viewcode-block" id="mast_login">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.mast_login">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">mast_login</span><span class="p">(</span><span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">required</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Authenticate to MAST with an authorization token.</span>
+
+<span class="sd">    Uses ``Observations.login(token=...)`` so proprietary products available to</span>
+<span class="sd">    the token holder can be queried and downloaded (same pattern as hst123).</span>
+<span class="sd">    See https://auth.mast.stsci.edu/info</span>
+
+<span class="sd">    Successful logins are cached for this process so query + download stages</span>
+<span class="sd">    do not call ``Observations.login`` twice.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    token : str or None</span>
+<span class="sd">        MAST API token. If None/empty, no login is attempted unless</span>
+<span class="sd">        ``MAST_API_TOKEN`` / ``MAST_TOKEN`` is set in the environment.</span>
+<span class="sd">    required : bool</span>
+<span class="sd">        If True, raise ``RuntimeError`` when a token is expected but login fails.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        True if login was attempted and succeeded (or already cached), else False.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">global</span> <span class="n">_MAST_SESSION_TOKEN</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">resolve_mast_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">token</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">required</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s1">&#39;A MAST token is required but none was provided. &#39;</span>
+                <span class="s1">&#39;Pass token=... / --token, or set MAST_API_TOKEN.&#39;</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">if</span> <span class="n">_MAST_SESSION_TOKEN</span> <span class="o">==</span> <span class="n">token</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s1">&#39;MAST session already authenticated; skipping re-login&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;Logging in to MAST with token...&#39;</span><span class="p">)</span>
+        <span class="n">Observations</span><span class="o">.</span><span class="n">login</span><span class="p">(</span><span class="n">token</span><span class="o">=</span><span class="n">token</span><span class="p">)</span>
+        <span class="n">_MAST_SESSION_TOKEN</span> <span class="o">=</span> <span class="n">token</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;MAST login successful.&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="n">message</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;could not log in to MAST with input token: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s1">&#39;</span>
+        <span class="k">if</span> <span class="n">required</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="n">message</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s1">&#39;could not log in to MAST with input token: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_combine_masks</span><span class="p">(</span><span class="n">masks</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">bool</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">[</span><span class="nb">all</span><span class="p">(</span><span class="n">row</span><span class="p">)</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="o">*</span><span class="n">masks</span><span class="p">)]</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_instrument_contains</span><span class="p">(</span><span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span> <span class="n">detectors</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">bool</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="nb">any</span><span class="p">(</span><span class="n">det</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">inst</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="k">for</span> <span class="n">det</span> <span class="ow">in</span> <span class="n">detectors</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">inst</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">]</span>
+    <span class="p">]</span>
+
+
+<div class="viewcode-block" id="has_supported_hst_science_products">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.has_supported_hst_science_products">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">has_supported_hst_science_products</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Return True when *instrument_name* has a native product rule.</span>
+
+<span class="sd">    Used to drop MAST detectors with no downloadable science files under</span>
+<span class="sd">    :data:`HST_PRODUCT_RULES` (e.g. unsupported instruments).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">any</span><span class="p">(</span><span class="n">tag</span> <span class="ow">in</span> <span class="n">text</span> <span class="k">for</span> <span class="n">_suffix</span><span class="p">,</span> <span class="n">tag</span> <span class="ow">in</span> <span class="n">HST_PRODUCT_RULES</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="galaxy_query_radius">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.galaxy_query_radius">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">galaxy_query_radius</span><span class="p">(</span>
+    <span class="n">coord</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span>
+    <span class="n">vizier_radius</span><span class="p">:</span> <span class="n">u</span><span class="o">.</span><span class="n">Quantity</span> <span class="o">=</span> <span class="mi">5</span> <span class="o">*</span> <span class="n">u</span><span class="o">.</span><span class="n">arcsec</span><span class="p">,</span>
+    <span class="n">vizier_cat</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;VII/237/pgc&#39;</span><span class="p">,</span>
+    <span class="n">floor</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">u</span><span class="o">.</span><span class="n">Quantity</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">u</span><span class="o">.</span><span class="n">Quantity</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Estimate a search radius from the PGC logD25 size, with an optional floor.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    coord : SkyCoord</span>
+<span class="sd">        Target sky position used for the VizieR lookup.</span>
+<span class="sd">    vizier_radius : Quantity, optional</span>
+<span class="sd">        Cone-search radius for the PGC catalog query (default 5 arcsec).</span>
+<span class="sd">    vizier_cat : str, optional</span>
+<span class="sd">        VizieR catalog identifier (default ``&#39;VII/237/pgc&#39;``).</span>
+<span class="sd">    floor : Quantity or None, optional</span>
+<span class="sd">        Minimum returned radius. When ``None``, no floor is applied.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Quantity</span>
+<span class="sd">        Estimated search radius as an angular :class:`~astropy.units.Quantity`.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">vizier</span> <span class="o">=</span> <span class="n">Vizier</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;logD25&#39;</span><span class="p">])</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">vizier</span><span class="o">.</span><span class="n">query_region</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">radius</span><span class="o">=</span><span class="n">vizier_radius</span><span class="p">,</span> <span class="n">catalog</span><span class="o">=</span><span class="n">vizier_cat</span><span class="p">)</span>
+    <span class="n">logd</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s1">&#39;logD25&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">radius</span> <span class="o">=</span> <span class="p">(</span><span class="mi">10</span> <span class="o">**</span> <span class="n">logd</span> <span class="o">*</span> <span class="mf">0.1</span> <span class="o">*</span> <span class="n">u</span><span class="o">.</span><span class="n">arcmin</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">floor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">max</span><span class="p">(</span><span class="n">floor</span><span class="p">,</span> <span class="n">radius</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">radius</span></div>
+
+
+
+<div class="viewcode-block" id="query_region">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.query_region">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">query_region</span><span class="p">(</span><span class="n">coord</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span> <span class="n">radius</span><span class="p">:</span> <span class="n">u</span><span class="o">.</span><span class="n">Quantity</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Query MAST Observations around ``coord`` and fill masked values.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    coord : SkyCoord</span>
+<span class="sd">        Center of the cone search.</span>
+<span class="sd">    radius : Quantity</span>
+<span class="sd">        Search radius (angular :class:`~astropy.units.Quantity`).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        MAST observation table with masked cells filled.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">with</span> <span class="n">capture_output</span><span class="p">():</span>
+        <span class="n">obs_table</span> <span class="o">=</span> <span class="n">Observations</span><span class="o">.</span><span class="n">query_region</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">radius</span><span class="o">=</span><span class="n">radius</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">filled</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="filter_hst_observations">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.filter_hst_observations">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_hst_observations</span><span class="p">(</span>
+    <span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">filters</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">DEFAULT_HST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">public_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">pipeline_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Apply standard HST imaging masks to a MAST observation table.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        Raw MAST observation table from :func:`query_region`.</span>
+<span class="sd">    filters : sequence of str or None, optional</span>
+<span class="sd">        Allowed filter names (e.g. ``&#39;F814W&#39;``). When ``None``, no filter</span>
+<span class="sd">        restriction is applied.</span>
+<span class="sd">    instruments : sequence of str, optional</span>
+<span class="sd">        Instrument substrings matched against ``instrument_name``</span>
+<span class="sd">        (default :data:`DEFAULT_HST_INSTRUMENTS`). Bare ``ACS`` matches</span>
+<span class="sd">        ``ACS/WFC``, ``ACS/HRC``, and ``ACS/SBC``.</span>
+<span class="sd">    public_only : bool, optional</span>
+<span class="sd">        When ``True``, keep only rows with ``dataRights == &#39;PUBLIC&#39;``.</span>
+<span class="sd">    pipeline_only : bool, optional</span>
+<span class="sd">        When ``True`` (default), keep only ``project == &#39;HST&#39;`` rows so HAP</span>
+<span class="sd">        visit / skycell reprocessings (and HLA) are excluded. Those duplicates</span>
+<span class="sd">        re-list the same ``flc``/``flt`` files or expose only derived products.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered table sorted by ``t_min``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">masks</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;HST&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;obs_collection&#39;</span><span class="p">]],</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;IMAGE&#39;</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;dataproduct_type&#39;</span><span class="p">]],</span>
+        <span class="n">_instrument_contains</span><span class="p">(</span><span class="n">obs_table</span><span class="p">,</span> <span class="n">instruments</span><span class="p">),</span>
+        <span class="c1"># Keep only detectors with a native product rule (ACS/WFC flc,</span>
+        <span class="c1"># ACS/HRC+SBC flt, WFC3 UVIS/IR, WFPC2).</span>
+        <span class="p">[</span>
+            <span class="n">has_supported_hst_science_products</span><span class="p">(</span><span class="n">inst</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">inst</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">]</span>
+        <span class="p">],</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;DETECTION&#39;</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">]],</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;CALIBRATION&#39;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;intentType&#39;</span><span class="p">]],</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="n">filters</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">allowed</span> <span class="o">=</span> <span class="p">{</span><span class="n">f</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">filters</span><span class="p">}</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="ow">in</span> <span class="n">allowed</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">]])</span>
+    <span class="k">if</span> <span class="n">public_only</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">str</span><span class="p">(</span><span class="n">r</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;PUBLIC&#39;</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;dataRights&#39;</span><span class="p">]])</span>
+    <span class="c1"># Native calwf3/calacs/calwp2 associations only (not HAP/HLA mosaics).</span>
+    <span class="k">if</span> <span class="n">pipeline_only</span> <span class="ow">and</span> <span class="s1">&#39;project&#39;</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;HST&#39;</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;project&#39;</span><span class="p">]])</span>
+
+    <span class="n">out</span> <span class="o">=</span> <span class="n">obs_table</span><span class="p">[</span><span class="n">_combine_masks</span><span class="p">(</span><span class="n">masks</span><span class="p">)]</span>
+    <span class="n">out</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="s1">&#39;t_min&#39;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">out</span></div>
+
+
+
+<div class="viewcode-block" id="filter_jwst_observations">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.filter_jwst_observations">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_jwst_observations</span><span class="p">(</span>
+    <span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">DEFAULT_JWST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">public_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Apply standard JWST imaging masks to a MAST observation table.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        Raw MAST observation table from :func:`query_region`.</span>
+<span class="sd">    instruments : sequence of str, optional</span>
+<span class="sd">        Instrument substrings matched against ``instrument_name``</span>
+<span class="sd">        (default :data:`DEFAULT_JWST_INSTRUMENTS`).</span>
+<span class="sd">    public_only : bool, optional</span>
+<span class="sd">        When ``True``, keep only rows with ``dataRights == &#39;PUBLIC&#39;``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered table sorted by ``t_min``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">masks</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;JWST&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;obs_collection&#39;</span><span class="p">]],</span>
+        <span class="n">_instrument_contains</span><span class="p">(</span><span class="n">obs_table</span><span class="p">,</span> <span class="n">instruments</span><span class="p">),</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;DETECTION&#39;</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">]],</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;CALIBRATION&#39;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;intentType&#39;</span><span class="p">]],</span>
+        <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;IMAGE&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;dataproduct_type&#39;</span><span class="p">]],</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="n">public_only</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">str</span><span class="p">(</span><span class="n">d</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;PUBLIC&#39;</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;dataRights&#39;</span><span class="p">]])</span>
+
+    <span class="n">out</span> <span class="o">=</span> <span class="n">obs_table</span><span class="p">[</span><span class="n">_combine_masks</span><span class="p">(</span><span class="n">masks</span><span class="p">)]</span>
+    <span class="n">out</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="s1">&#39;t_min&#39;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">out</span></div>
+
+
+
+<div class="viewcode-block" id="observation_matches_calib_stage">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.observation_matches_calib_stage">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">observation_matches_calib_stage</span><span class="p">(</span><span class="n">calib_level</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span> <span class="n">stage</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True if a MAST ``calib_level`` can satisfy ``stage``.</span>
+
+<span class="sd">    MAST uses ``calib_level=-1`` (or missing) when no calibrated products exist</span>
+<span class="sd">    yet — e.g. APT placeholders or unexecuted visits. Observations that only</span>
+<span class="sd">    reach a lower level than requested are also not relevant for download.</span>
+<span class="sd">    Unknown / unparseable levels are treated as potentially relevant so we do</span>
+<span class="sd">    not silently drop rows that might still have products.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    calib_level : object</span>
+<span class="sd">        MAST ``calib_level`` value (may be masked, ``None``, or non-numeric).</span>
+<span class="sd">    stage : int</span>
+<span class="sd">        Minimum calibration stage required (e.g. 2 for CAL, 3 for I2D).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        ``True`` when the observation may have products at ``stage`` or higher.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">calib_level</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">ma</span><span class="o">.</span><span class="n">is_masked</span><span class="p">(</span><span class="n">calib_level</span><span class="p">):</span>
+            <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">level</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">calib_level</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">if</span> <span class="n">level</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">return</span> <span class="n">level</span> <span class="o">&gt;=</span> <span class="nb">int</span><span class="p">(</span><span class="n">stage</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="filter_jwst_observations_by_stage">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.filter_jwst_observations_by_stage">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_jwst_observations_by_stage</span><span class="p">(</span><span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span> <span class="n">stage</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Keep JWST observations expected to have products at ``stage`` or higher.</span>
+
+<span class="sd">    Rows with ``calib_level=-1`` or otherwise below ``stage`` are dropped so</span>
+<span class="sd">    download does not report attempts on programs with no matching products.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        JWST observation table (may be empty or ``None``).</span>
+<span class="sd">    stage : int</span>
+<span class="sd">        Minimum calibration stage required (e.g. 2 for CAL, 3 for I2D).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered table, or the input unchanged when empty / missing</span>
+<span class="sd">        ``calib_level``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">obs_table</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">obs_table</span>
+    <span class="k">if</span> <span class="s1">&#39;calib_level&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">obs_table</span>
+    <span class="n">keep</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">observation_matches_calib_stage</span><span class="p">(</span><span class="n">level</span><span class="p">,</span> <span class="n">stage</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">level</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;calib_level&#39;</span><span class="p">]</span>
+    <span class="p">]</span>
+    <span class="k">return</span> <span class="n">obs_table</span><span class="p">[</span><span class="n">keep</span><span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="query_hst">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.query_hst">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">query_hst</span><span class="p">(</span>
+    <span class="n">coord</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span>
+    <span class="n">radius</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">u</span><span class="o">.</span><span class="n">Quantity</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">filters</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="n">DEFAULT_HST_FILTERS</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">DEFAULT_HST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">use_galaxy_size</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">public_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Query and filter HST imaging observations near ``coord``.</span>
+
+<span class="sd">    If a MAST token is provided (argument or environment), authenticate once and</span>
+<span class="sd">    include proprietary observations (``public_only`` is forced ``False``).</span>
+<span class="sd">    Without a token (or if login fails), only public data are queried.</span>
+<span class="sd">    By default only native pipeline rows (``project == &#39;HST&#39;``) are kept so</span>
+<span class="sd">    HAP/HLA reprocessings of the same visit are excluded.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    coord : SkyCoord</span>
+<span class="sd">        Target sky position.</span>
+<span class="sd">    radius : Quantity or None, optional</span>
+<span class="sd">        Search radius. When ``None``, uses :func:`galaxy_query_radius` if</span>
+<span class="sd">        ``use_galaxy_size`` is ``True``, otherwise 5 arcmin.</span>
+<span class="sd">    filters : sequence of str or None, optional</span>
+<span class="sd">        Allowed HST filters (default :data:`DEFAULT_HST_FILTERS`).</span>
+<span class="sd">    instruments : sequence of str, optional</span>
+<span class="sd">        Instrument substrings (default :data:`DEFAULT_HST_INSTRUMENTS`).</span>
+<span class="sd">    use_galaxy_size : bool, optional</span>
+<span class="sd">        When ``True`` and ``radius`` is ``None``, derive radius from PGC size.</span>
+<span class="sd">    public_only : bool, optional</span>
+<span class="sd">        When ``True``, exclude proprietary rows unless a token is resolved.</span>
+<span class="sd">    token : str or None, optional</span>
+<span class="sd">        MAST API token; also read from ``MAST_API_TOKEN`` / ``MAST_TOKEN``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered HST imaging observation table.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">prepare_mast_auth</span><span class="p">(</span><span class="n">token</span><span class="p">):</span>
+        <span class="n">public_only</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="k">if</span> <span class="n">radius</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">use_galaxy_size</span><span class="p">:</span>
+            <span class="n">radius</span> <span class="o">=</span> <span class="n">galaxy_query_radius</span><span class="p">(</span><span class="n">coord</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">radius</span> <span class="o">=</span> <span class="mi">5</span> <span class="o">*</span> <span class="n">u</span><span class="o">.</span><span class="n">arcmin</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s1">&#39;MAST Observations.query_region center=</span><span class="si">%s</span><span class="s1"> radius=</span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+        <span class="n">coord</span><span class="o">.</span><span class="n">to_string</span><span class="p">(</span><span class="s1">&#39;decimal&#39;</span><span class="p">),</span>
+        <span class="n">radius</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">obs_table</span> <span class="o">=</span> <span class="n">query_region</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">radius</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">filter_hst_observations</span><span class="p">(</span>
+        <span class="n">obs_table</span><span class="p">,</span> <span class="n">filters</span><span class="o">=</span><span class="n">filters</span><span class="p">,</span> <span class="n">instruments</span><span class="o">=</span><span class="n">instruments</span><span class="p">,</span> <span class="n">public_only</span><span class="o">=</span><span class="n">public_only</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="query_jwst">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.query_jwst">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">query_jwst</span><span class="p">(</span>
+    <span class="n">coord</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span>
+    <span class="n">radius</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">u</span><span class="o">.</span><span class="n">Quantity</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">DEFAULT_JWST_INSTRUMENTS</span><span class="p">,</span>
+    <span class="n">use_galaxy_size</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">public_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Query and filter JWST imaging observations near ``coord``.</span>
+
+<span class="sd">    If a MAST token is provided (argument or ``MAST_API_TOKEN`` / ``MAST_TOKEN``),</span>
+<span class="sd">    authenticate first and include proprietary observations (``public_only`` is</span>
+<span class="sd">    forced ``False``). Without a token, only public data are returned by default.</span>
+<span class="sd">    A missing or failed token never aborts the query.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    coord : SkyCoord</span>
+<span class="sd">        Target sky position.</span>
+<span class="sd">    radius : Quantity or None, optional</span>
+<span class="sd">        Search radius. When ``None``, uses :func:`galaxy_query_radius` with a</span>
+<span class="sd">        5 arcmin floor if ``use_galaxy_size`` is ``True``, otherwise 5 arcmin.</span>
+<span class="sd">    instruments : sequence of str, optional</span>
+<span class="sd">        Instrument substrings (default :data:`DEFAULT_JWST_INSTRUMENTS`).</span>
+<span class="sd">    use_galaxy_size : bool, optional</span>
+<span class="sd">        When ``True`` and ``radius`` is ``None``, derive radius from PGC size.</span>
+<span class="sd">    public_only : bool, optional</span>
+<span class="sd">        When ``True``, exclude proprietary rows unless a token is resolved.</span>
+<span class="sd">    token : str or None, optional</span>
+<span class="sd">        MAST API token; also read from ``MAST_API_TOKEN`` / ``MAST_TOKEN``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered JWST imaging observation table.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">prepare_mast_auth</span><span class="p">(</span><span class="n">token</span><span class="p">):</span>
+        <span class="n">public_only</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="k">if</span> <span class="n">radius</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">use_galaxy_size</span><span class="p">:</span>
+            <span class="n">radius</span> <span class="o">=</span> <span class="n">galaxy_query_radius</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">floor</span><span class="o">=</span><span class="mi">5</span> <span class="o">*</span> <span class="n">u</span><span class="o">.</span><span class="n">arcmin</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">radius</span> <span class="o">=</span> <span class="mi">5</span> <span class="o">*</span> <span class="n">u</span><span class="o">.</span><span class="n">arcmin</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s1">&#39;MAST Observations.query_region center=</span><span class="si">%s</span><span class="s1"> radius=</span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+        <span class="n">coord</span><span class="o">.</span><span class="n">to_string</span><span class="p">(</span><span class="s1">&#39;decimal&#39;</span><span class="p">),</span>
+        <span class="n">radius</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">obs_table</span> <span class="o">=</span> <span class="n">query_region</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">radius</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">filter_jwst_observations</span><span class="p">(</span>
+        <span class="n">obs_table</span><span class="p">,</span> <span class="n">instruments</span><span class="o">=</span><span class="n">instruments</span><span class="p">,</span> <span class="n">public_only</span><span class="o">=</span><span class="n">public_only</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="is_hst_science_product">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.is_hst_science_product">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">is_hst_science_product</span><span class="p">(</span><span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">instrument</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True if ``filename`` is a usable HST science product for ``instrument``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    filename : str</span>
+<span class="sd">        MAST product filename (e.g. ``*.flc.fits``).</span>
+<span class="sd">    instrument : str</span>
+<span class="sd">        MAST ``instrument_name`` string for the parent observation.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        ``True`` when ``filename`` matches :data:`HST_PRODUCT_RULES` for the</span>
+<span class="sd">        instrument.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="nb">any</span><span class="p">(</span>
+        <span class="n">suffix</span> <span class="ow">in</span> <span class="n">filename</span> <span class="ow">and</span> <span class="n">tag</span> <span class="ow">in</span> <span class="n">instrument</span>
+        <span class="k">for</span> <span class="n">suffix</span><span class="p">,</span> <span class="n">tag</span> <span class="ow">in</span> <span class="n">HST_PRODUCT_RULES</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="collect_hst_products">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.collect_hst_products">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">collect_hst_products</span><span class="p">(</span><span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Table</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Build a product table of HST flt/flc/c0m/c1m science files from observations.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        HST observation table (rows from :func:`query_hst` or similar).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table or None</span>
+<span class="sd">        Combined science-product table, or ``None`` when no products were found.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">productlist</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">for</span> <span class="n">obs</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">product_list</span> <span class="o">=</span> <span class="n">Observations</span><span class="o">.</span><span class="n">get_product_list</span><span class="p">(</span><span class="n">obs</span><span class="p">)</span>
+            <span class="n">product_list</span> <span class="o">=</span> <span class="n">product_list</span><span class="p">[</span><span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;type&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="s1">&#39;S&#39;</span><span class="p">]</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;MAST is not working currently</span><span class="se">\n</span><span class="s1">Try again later...&#39;</span><span class="p">)</span>
+            <span class="k">continue</span>
+
+        <span class="n">instrument</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">]</span>
+        <span class="n">product_list</span><span class="o">.</span><span class="n">add_column</span><span class="p">(</span><span class="n">Column</span><span class="p">([</span><span class="n">instrument</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">),</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">))</span>
+        <span class="n">product_list</span><span class="o">.</span><span class="n">add_column</span><span class="p">(</span><span class="n">Column</span><span class="p">([</span><span class="n">obs</span><span class="p">[</span><span class="s1">&#39;s_ra&#39;</span><span class="p">]]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">),</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;ra&#39;</span><span class="p">))</span>
+        <span class="n">product_list</span><span class="o">.</span><span class="n">add_column</span><span class="p">(</span><span class="n">Column</span><span class="p">([</span><span class="n">obs</span><span class="p">[</span><span class="s1">&#39;s_dec&#39;</span><span class="p">]]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">),</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;dec&#39;</span><span class="p">))</span>
+
+        <span class="k">for</span> <span class="n">prod</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_hst_science_product</span><span class="p">(</span><span class="n">prod</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">],</span> <span class="n">instrument</span><span class="p">):</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">productlist</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">productlist</span> <span class="o">=</span> <span class="n">Table</span><span class="p">(</span><span class="n">prod</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">productlist</span><span class="o">.</span><span class="n">add_row</span><span class="p">(</span><span class="n">prod</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">productlist</span></div>
+
+
+
+<div class="viewcode-block" id="normalize_filter_name">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.normalize_filter_name">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_filter_name</span><span class="p">(</span><span class="n">filt</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Turn MAST filter strings like ``F560W;CLEAR`` into a directory name.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    filt : str</span>
+<span class="sd">        MAST ``filters`` field (may contain semicolon-separated components).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Uppercase, filesystem-safe filter directory name.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">filt</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;;&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;[^A-Z0-9_\-]+&#39;</span><span class="p">,</span> <span class="s1">&#39;_&#39;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">name</span> <span class="ow">or</span> <span class="s1">&#39;UNKNOWN&#39;</span></div>
+
+
+
+<div class="viewcode-block" id="normalize_telescope_dirname">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.normalize_telescope_dirname">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_telescope_dirname</span><span class="p">(</span>
+    <span class="n">obs_collection</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">default</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;JWST&#39;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a telescope directory name (e.g. ``JWST``, ``HST``, ``Roman``).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_collection : object or None, optional</span>
+<span class="sd">        MAST ``obs_collection`` value (or similar telescope label).</span>
+<span class="sd">    default : str, optional</span>
+<span class="sd">        Fallback name when ``obs_collection`` is empty (default ``&#39;JWST&#39;``).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Normalized telescope directory name.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">obs_collection</span> <span class="ow">or</span> <span class="n">default</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="k">if</span> <span class="s1">&#39;JWST&#39;</span> <span class="ow">in</span> <span class="n">text</span> <span class="ow">or</span> <span class="n">text</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;JWST&#39;</span><span class="p">,</span> <span class="s1">&#39;JW&#39;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s1">&#39;JWST&#39;</span>
+    <span class="k">if</span> <span class="n">text</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;HST&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;HST&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;HST&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;ROMAN&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;Roman&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;EUCLID&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;Euclid&#39;</span>
+    <span class="k">return</span> <span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">obs_collection</span> <span class="ow">or</span> <span class="n">default</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="ow">or</span> <span class="n">default</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="normalize_instrument_dirname">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.normalize_instrument_dirname">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_instrument_dirname</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return an instrument directory name under the telescope root.</span>
+
+<span class="sd">    Examples: ``MIRI``, ``NIRCam``, ``NIRISS``, ``ACS``, ``WFC3``, ``WFI``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    instrument_name : object or None, optional</span>
+<span class="sd">        MAST ``instrument_name`` string (may include slash-separated components).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Normalized instrument directory name.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span> <span class="ow">or</span> <span class="s1">&#39;UNKNOWN&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="k">if</span> <span class="s1">&#39;NIRCAM&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;NIRCam&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;NIRISS&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;NIRISS&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;MIRI&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;MIRI&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;WFC3&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;WFC3&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;WFPC2&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;WFPC2&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;ACS&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;ACS&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;WFI&#39;</span> <span class="ow">in</span> <span class="n">text</span> <span class="ow">or</span> <span class="s1">&#39;ROMAN&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;WFI&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;VIS&#39;</span> <span class="ow">in</span> <span class="n">text</span> <span class="ow">and</span> <span class="s1">&#39;EUCLID&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;VIS&#39;</span>
+    <span class="k">if</span> <span class="s1">&#39;NISP&#39;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">&#39;NISP&#39;</span>
+    <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;/&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="ow">or</span> <span class="s1">&#39;UNKNOWN&#39;</span></div>
+
+
+
+<div class="viewcode-block" id="filter_jwst_products">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.filter_jwst_products">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_jwst_products</span><span class="p">(</span>
+    <span class="n">product_list</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">stage</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">mirimage_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Filter JWST products to science CAL (stage 2) or I2D (stage 3) files.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    product_list : Table</span>
+<span class="sd">        Raw MAST product list from ``Observations.get_product_list``.</span>
+<span class="sd">    stage : int, optional</span>
+<span class="sd">        Calibration stage to keep: ``2`` for CAL, ``3`` for I2D (default 2).</span>
+<span class="sd">    mirimage_only : bool, optional</span>
+<span class="sd">        When ``True``, keep only filenames containing ``mirimage``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered product table.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If ``stage`` is not ``2`` or ``3``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">masks</span> <span class="o">=</span> <span class="p">[[</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;SCIENCE&#39;</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;productType&#39;</span><span class="p">]]]</span>
+    <span class="k">if</span> <span class="n">mirimage_only</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="p">[</span><span class="s1">&#39;mirimage&#39;</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">]]</span>
+        <span class="p">)</span>
+    <span class="k">if</span> <span class="n">stage</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">t</span> <span class="o">==</span> <span class="s1">&#39;CAL&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;productSubGroupDescription&#39;</span><span class="p">]])</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">c</span> <span class="o">==</span> <span class="mi">2</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;calib_level&#39;</span><span class="p">]])</span>
+    <span class="k">elif</span> <span class="n">stage</span> <span class="o">==</span> <span class="mi">3</span><span class="p">:</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">t</span> <span class="o">==</span> <span class="s1">&#39;I2D&#39;</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;productSubGroupDescription&#39;</span><span class="p">]])</span>
+        <span class="n">masks</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">c</span> <span class="o">==</span> <span class="mi">3</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">[</span><span class="s1">&#39;calib_level&#39;</span><span class="p">]])</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Unsupported JWST stage: </span><span class="si">{</span><span class="n">stage</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">product_list</span><span class="p">[</span><span class="n">_combine_masks</span><span class="p">(</span><span class="n">masks</span><span class="p">)]</span></div>
+
+
+
+<div class="viewcode-block" id="flatten_mast_download_dir">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.flatten_mast_download_dir">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">flatten_mast_download_dir</span><span class="p">(</span><span class="n">download_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Move nested MAST products up to *download_dir* and prune empty folders.</span>
+
+<span class="sd">    ``Observations.download_products`` writes</span>
+<span class="sd">    ``&lt;download_dir&gt;/mastDownload/.../&lt;filename&gt;``. This relocates every</span>
+<span class="sd">    ``*.fits`` / ``*.fits.gz`` to ``&lt;download_dir&gt;/&lt;filename&gt;`` so the</span>
+<span class="sd">    on-disk path is</span>
+<span class="sd">    ``download/&lt;telescope&gt;/&lt;instrument&gt;/&lt;filter&gt;/&lt;obsid&gt;/&lt;filename&gt;``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">download_dir</span><span class="p">))</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">root</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="n">moved</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">dirpath</span><span class="p">,</span> <span class="n">_dirnames</span><span class="p">,</span> <span class="n">filenames</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">walk</span><span class="p">(</span><span class="n">root</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">filenames</span><span class="p">:</span>
+            <span class="n">lower</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">lower</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;.fits&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">lower</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;.fits.gz&#39;</span><span class="p">)):</span>
+                <span class="k">continue</span>
+            <span class="n">src</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">dirpath</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">src</span><span class="p">)</span> <span class="o">==</span> <span class="n">root</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">dest</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">dest</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">samefile</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dest</span><span class="p">):</span>
+                    <span class="k">continue</span>
+                <span class="c1"># Prefer the already-flattened file; drop the nested copy.</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">os</span><span class="o">.</span><span class="n">remove</span><span class="p">(</span><span class="n">src</span><span class="p">)</span>
+                <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+                    <span class="k">pass</span>
+                <span class="k">continue</span>
+            <span class="n">os</span><span class="o">.</span><span class="n">rename</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dest</span><span class="p">)</span>
+            <span class="n">moved</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">dest</span><span class="p">)</span>
+    <span class="c1"># Drop the nested MAST staging tree (non-FITS leftovers and all).</span>
+    <span class="n">mast_tree</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="s1">&#39;mastDownload&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">mast_tree</span><span class="p">):</span>
+        <span class="n">shutil</span><span class="o">.</span><span class="n">rmtree</span><span class="p">(</span><span class="n">mast_tree</span><span class="p">,</span> <span class="n">ignore_errors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="c1"># Remove any other empty nested directories.</span>
+    <span class="k">for</span> <span class="n">dirpath</span><span class="p">,</span> <span class="n">_dirnames</span><span class="p">,</span> <span class="n">_filenames</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">walk</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="n">topdown</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">dirpath</span> <span class="o">==</span> <span class="n">root</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">os</span><span class="o">.</span><span class="n">rmdir</span><span class="p">(</span><span class="n">dirpath</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+            <span class="k">pass</span>
+    <span class="k">return</span> <span class="n">moved</span></div>
+
+
+
+<div class="viewcode-block" id="observation_download_subdir">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.observation_download_subdir">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">observation_download_subdir</span><span class="p">(</span>
+    <span class="n">filt</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">obsid</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span>
+    <span class="n">layout</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_DOWNLOAD_LAYOUT</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">telescope</span><span class="p">:</span> <span class="nb">object</span> <span class="o">=</span> <span class="s1">&#39;JWST&#39;</span><span class="p">,</span>
+    <span class="n">instrument</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the per-observation subdirectory under the download root.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    filt : str</span>
+<span class="sd">        MAST ``filters`` field for the observation.</span>
+<span class="sd">    obsid : object</span>
+<span class="sd">        MAST observation ID (coerced to ``str``).</span>
+<span class="sd">    layout : str, optional</span>
+<span class="sd">        Directory layout name (default :data:`DEFAULT_DOWNLOAD_LAYOUT`).</span>
+<span class="sd">    telescope : object, optional</span>
+<span class="sd">        MAST ``obs_collection`` value (default ``&#39;JWST&#39;``).</span>
+<span class="sd">    instrument : object or None, optional</span>
+<span class="sd">        MAST ``instrument_name`` value.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Relative subdirectory path for this observation.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If ``layout`` is not a supported layout name.</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    Supported layouts:</span>
+
+<span class="sd">    ``telescope/instrument/filter/obsid`` (default)</span>
+<span class="sd">        e.g. ``JWST/MIRI/F560W/&lt;obsid&gt;``</span>
+<span class="sd">    ``filter/obsid``</span>
+<span class="sd">        e.g. ``&lt;FILTER&gt;/&lt;obsid&gt;`` (older download layout)</span>
+<span class="sd">    ``filter_obsid``</span>
+<span class="sd">        e.g. ``&lt;FILTER&gt;_&lt;obsid&gt;`` (legacy flat name)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">filt_name</span> <span class="o">=</span> <span class="n">normalize_filter_name</span><span class="p">(</span><span class="n">filt</span><span class="p">)</span>
+    <span class="n">obsid_s</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">obsid</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">layout</span> <span class="ow">in</span> <span class="p">(</span>
+        <span class="s1">&#39;telescope/instrument/filter/obsid&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;tel/inst/filter/obsid&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;canonical&#39;</span><span class="p">,</span>
+    <span class="p">):</span>
+        <span class="n">tel</span> <span class="o">=</span> <span class="n">normalize_telescope_dirname</span><span class="p">(</span><span class="n">telescope</span><span class="p">)</span>
+        <span class="n">inst</span> <span class="o">=</span> <span class="n">normalize_instrument_dirname</span><span class="p">(</span><span class="n">instrument</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">tel</span><span class="p">,</span> <span class="n">inst</span><span class="p">,</span> <span class="n">filt_name</span><span class="p">,</span> <span class="n">obsid_s</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">layout</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;filter/obsid&#39;</span><span class="p">,</span> <span class="s1">&#39;filter_dir&#39;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">filt_name</span><span class="p">,</span> <span class="n">obsid_s</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">layout</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;filter_obsid&#39;</span><span class="p">,</span> <span class="s1">&#39;legacy&#39;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">filt_name</span><span class="si">}</span><span class="s1">_</span><span class="si">{</span><span class="n">obsid_s</span><span class="si">}</span><span class="s1">&#39;</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s1">&#39;Unsupported download layout </span><span class="si">{</span><span class="n">layout</span><span class="si">!r}</span><span class="s1">; &#39;</span>
+        <span class="s2">&quot;use &#39;telescope/instrument/filter/obsid&#39;, &#39;filter/obsid&#39;, or &#39;filter_obsid&#39;&quot;</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="prune_non_full_frame_miri">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.prune_non_full_frame_miri">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">prune_non_full_frame_miri</span><span class="p">(</span>
+    <span class="n">root</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">remove</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Remove (or list) non-full-frame MIRI ``*mirimage*`` FITS under *root*.</span>
+
+<span class="sd">    Subarrays and cutouts are unsupported by alignment / ``mirimask``. Called</span>
+<span class="sd">    after MAST download so they never remain in the science tree.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    root : str or path-like</span>
+<span class="sd">        Directory to scan recursively.</span>
+<span class="sd">    remove : bool, optional</span>
+<span class="sd">        If True (default), delete matching files; otherwise only return paths.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of str</span>
+<span class="sd">        Paths that were non-full-frame (deleted when ``remove`` is True).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+    <span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.helpers</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_full_frame_miri</span>
+
+    <span class="n">root_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">root_path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="n">rejected</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="n">root_path</span><span class="o">.</span><span class="n">rglob</span><span class="p">(</span><span class="s1">&#39;*mirimage*.fits&#39;</span><span class="p">):</span>
+        <span class="n">name</span> <span class="o">=</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">name</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;.sky.fits&#39;</span><span class="p">):</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span><span class="n">name</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="n">suf</span><span class="p">)</span> <span class="k">for</span> <span class="n">suf</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;_cal.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;_rate.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;_jhat.fits&#39;</span><span class="p">)):</span>
+            <span class="c1"># Still check other mirimage products (e.g. calints) by shape.</span>
+            <span class="k">if</span> <span class="s1">&#39;_cal&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">name</span> <span class="ow">and</span> <span class="s1">&#39;_rate&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">name</span> <span class="ow">and</span> <span class="s1">&#39;_jhat&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">name</span><span class="p">:</span>
+                <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">is_full_frame_miri</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+            <span class="k">continue</span>
+        <span class="n">rejected</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">))</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+            <span class="s1">&#39;Rejecting non-full-frame MIRI product (unsupported subarray/cutout): </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+            <span class="n">path</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">remove</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">path</span><span class="o">.</span><span class="n">unlink</span><span class="p">()</span>
+            <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s1">&#39;could not remove </span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">rejected</span></div>
+
+
+
+<div class="viewcode-block" id="download_jwst_observations">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.download_jwst_observations">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">download_jwst_observations</span><span class="p">(</span>
+    <span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">stage</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">extension</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;fits&#39;</span><span class="p">,</span>
+    <span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">layout</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_DOWNLOAD_LAYOUT</span><span class="p">,</span>
+    <span class="n">mirimage_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">dry_run</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Download filtered JWST products for each observation into ``outdir``.</span>
+
+<span class="sd">    Pass ``token`` (or set ``MAST_API_TOKEN``) to authenticate before downloading</span>
+<span class="sd">    proprietary products, matching the hst123 ``Observations.login`` flow.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        JWST observation table (from :func:`query_jwst` or similar).</span>
+<span class="sd">    outdir : str</span>
+<span class="sd">        Download tree root (typically ``&lt;base-dir&gt;/download``).</span>
+<span class="sd">    stage : int, optional</span>
+<span class="sd">        Calibration stage to download: ``2`` for CAL, ``3`` for I2D (default 2).</span>
+<span class="sd">    extension : str, optional</span>
+<span class="sd">        File extension passed to ``Observations.download_products`` (default</span>
+<span class="sd">        ``&#39;fits&#39;``).</span>
+<span class="sd">    token : str or None, optional</span>
+<span class="sd">        MAST API token; also read from ``MAST_API_TOKEN`` / ``MAST_TOKEN``.</span>
+<span class="sd">    layout : str, optional</span>
+<span class="sd">        Per-observation subdirectory layout (default</span>
+<span class="sd">        :data:`DEFAULT_DOWNLOAD_LAYOUT`). See :func:`observation_download_subdir`.</span>
+<span class="sd">    mirimage_only : bool, optional</span>
+<span class="sd">        When ``True``, keep only ``*mirimage*`` product filenames (MIRI imager).</span>
+<span class="sd">    dry_run : bool, optional</span>
+<span class="sd">        When ``True``, list products without downloading.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    int</span>
+<span class="sd">        Number of observation product sets downloaded (or listed in dry-run).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># Auth is normally done in query_jwst; keep a cached no-op for standalone use.</span>
+    <span class="n">prepare_mast_auth</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">obs_table</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;observation table is empty. Cannot download files.&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="mi">0</span>
+
+    <span class="n">n_before</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span>
+    <span class="n">obs_table</span> <span class="o">=</span> <span class="n">filter_jwst_observations_by_stage</span><span class="p">(</span><span class="n">obs_table</span><span class="p">,</span> <span class="n">stage</span><span class="p">)</span>
+    <span class="n">n_skipped</span> <span class="o">=</span> <span class="n">n_before</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">n_skipped</span><span class="p">:</span>
+        <span class="c1"># Observations with calib_level=-1 / below the requested stage are not</span>
+        <span class="c1"># expected to have matching products (e.g. APT placeholders). Skip</span>
+        <span class="c1"># silently aside from a one-line tally — do not per-obs &quot;tried&quot;.</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s1">&#39;Skipping </span><span class="si">%d</span><span class="s1"> observation(s) with no calib_level&gt;=</span><span class="si">%d</span><span class="s1"> products available&#39;</span><span class="p">,</span>
+            <span class="n">n_skipped</span><span class="p">,</span>
+            <span class="n">stage</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+            <span class="s1">&#39;no observations with calib_level&gt;=</span><span class="si">%d</span><span class="s1">. Cannot download files.&#39;</span><span class="p">,</span>
+            <span class="n">stage</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="mi">0</span>
+
+    <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">outdir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">n_obs</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span>
+    <span class="n">n_downloaded</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;Downloading JWST products for </span><span class="si">%d</span><span class="s1"> observation(s) into </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">n_obs</span><span class="p">,</span> <span class="n">outdir</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">dry_run</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;Dry run: no files will be downloaded&#39;</span><span class="p">)</span>
+
+    <span class="n">has_collection</span> <span class="o">=</span> <span class="s1">&#39;obs_collection&#39;</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span>
+    <span class="n">has_instrument</span> <span class="o">=</span> <span class="s1">&#39;instrument_name&#39;</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">obs</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">obs_table</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="n">filt</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">]</span>
+        <span class="n">obsid</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;obsid&#39;</span><span class="p">]</span>
+        <span class="n">telescope</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;obs_collection&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">has_collection</span> <span class="k">else</span> <span class="s1">&#39;JWST&#39;</span>
+        <span class="n">instrument</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">has_instrument</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="n">subdir</span> <span class="o">=</span> <span class="n">observation_download_subdir</span><span class="p">(</span>
+            <span class="n">filt</span><span class="p">,</span>
+            <span class="n">obsid</span><span class="p">,</span>
+            <span class="n">layout</span><span class="o">=</span><span class="n">layout</span><span class="p">,</span>
+            <span class="n">telescope</span><span class="o">=</span><span class="n">telescope</span><span class="p">,</span>
+            <span class="n">instrument</span><span class="o">=</span><span class="n">instrument</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">with</span> <span class="n">capture_output</span><span class="p">():</span>
+                <span class="n">raw_products</span> <span class="o">=</span> <span class="n">Observations</span><span class="o">.</span><span class="n">get_product_list</span><span class="p">(</span><span class="n">obs</span><span class="p">)</span>
+            <span class="n">product_list</span> <span class="o">=</span> <span class="n">filter_jwst_products</span><span class="p">(</span>
+                <span class="n">raw_products</span><span class="p">,</span>
+                <span class="n">stage</span><span class="o">=</span><span class="n">stage</span><span class="p">,</span>
+                <span class="n">mirimage_only</span><span class="o">=</span><span class="n">mirimage_only</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s1">&#39;could not get products for obsid=</span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">obsid</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="c1"># Only reached for observations that looked stage-relevant.</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: no stage-</span><span class="si">%d</span><span class="s1"> science products&#39;</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">n_obs</span><span class="p">,</span> <span class="n">subdir</span><span class="p">,</span> <span class="n">stage</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">download_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">outdir</span><span class="p">,</span> <span class="n">subdir</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1"> </span><span class="si">%d</span><span class="s1"> product(s)...&#39;</span><span class="p">,</span>
+            <span class="n">i</span><span class="p">,</span>
+            <span class="n">n_obs</span><span class="p">,</span>
+            <span class="n">subdir</span><span class="p">,</span>
+            <span class="s1">&#39;listing&#39;</span> <span class="k">if</span> <span class="n">dry_run</span> <span class="k">else</span> <span class="s1">&#39;downloading&#39;</span><span class="p">,</span>
+            <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">),</span>
+        <span class="p">)</span>
+        <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;    </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">row</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">])</span>
+        <span class="k">if</span> <span class="n">dry_run</span><span class="p">:</span>
+            <span class="n">n_downloaded</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">with</span> <span class="n">capture_output</span><span class="p">():</span>
+                <span class="n">Observations</span><span class="o">.</span><span class="n">download_products</span><span class="p">(</span>
+                    <span class="n">product_list</span><span class="p">,</span> <span class="n">download_dir</span><span class="o">=</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">extension</span><span class="o">=</span><span class="n">extension</span>
+                <span class="p">)</span>
+            <span class="n">flat</span> <span class="o">=</span> <span class="n">flatten_mast_download_dir</span><span class="p">(</span><span class="n">download_dir</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">flat</span><span class="p">:</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span>
+                    <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: flattened </span><span class="si">%d</span><span class="s1"> nested MAST product(s)&#39;</span><span class="p">,</span>
+                    <span class="n">i</span><span class="p">,</span>
+                    <span class="n">n_obs</span><span class="p">,</span>
+                    <span class="n">subdir</span><span class="p">,</span>
+                    <span class="nb">len</span><span class="p">(</span><span class="n">flat</span><span class="p">),</span>
+                <span class="p">)</span>
+            <span class="c1"># Drop MIRI subarrays/cutouts immediately so they never enter</span>
+            <span class="c1"># alignment or DOLPHOT staging.</span>
+            <span class="n">pruned</span> <span class="o">=</span> <span class="n">prune_non_full_frame_miri</span><span class="p">(</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">remove</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">pruned</span><span class="p">:</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                    <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: removed </span><span class="si">%d</span><span class="s1"> non-full-frame MIRI product(s)&#39;</span><span class="p">,</span>
+                    <span class="n">i</span><span class="p">,</span>
+                    <span class="n">n_obs</span><span class="p">,</span>
+                    <span class="n">subdir</span><span class="p">,</span>
+                    <span class="nb">len</span><span class="p">(</span><span class="n">pruned</span><span class="p">),</span>
+                <span class="p">)</span>
+            <span class="n">n_downloaded</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s1">&#39;download failed for obsid=</span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">obsid</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s1">&#39;Finished: downloaded products for </span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1"> observation(s).&#39;</span><span class="p">,</span>
+        <span class="n">n_downloaded</span><span class="p">,</span>
+        <span class="n">n_obs</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">n_downloaded</span></div>
+
+
+
+<div class="viewcode-block" id="filter_hst_products">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.filter_hst_products">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">filter_hst_products</span><span class="p">(</span>
+    <span class="n">product_list</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">instrument_name</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Keep HST flt/flc/c0m/c1m SCIENCE products for *instrument*.</span>
+
+<span class="sd">    WFPC2 ``c1m`` DQ companions are always retained — they are required for</span>
+<span class="sd">    AstroDrizzle and ``wfpc2mask``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    product_list : Table</span>
+<span class="sd">        Raw MAST product list.</span>
+<span class="sd">    instrument_name : object</span>
+<span class="sd">        MAST ``instrument_name`` for the parent observation.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Table</span>
+<span class="sd">        Filtered product table.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">inst</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">)</span>
+    <span class="n">mask</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">is_hst_science_product</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">]),</span> <span class="n">inst</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">product_list</span>
+    <span class="p">]</span>
+    <span class="k">return</span> <span class="n">product_list</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">mask</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">bool</span><span class="p">)]</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_existing_hst_basenames</span><span class="p">(</span><span class="n">outdir</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Basenames of FITS files already present under *outdir* (recursive).&quot;&quot;&quot;</span>
+    <span class="n">found</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="n">outdir</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">root</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">found</span>
+    <span class="k">for</span> <span class="n">dirpath</span><span class="p">,</span> <span class="n">_dirnames</span><span class="p">,</span> <span class="n">filenames</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">walk</span><span class="p">(</span><span class="n">root</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">filenames</span><span class="p">:</span>
+            <span class="n">lower</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">lower</span><span class="o">.</span><span class="n">endswith</span><span class="p">((</span><span class="s1">&#39;.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;.fits.gz&#39;</span><span class="p">)):</span>
+                <span class="n">found</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">found</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_local_hst_science_basenames</span><span class="p">(</span>
+    <span class="n">download_dir</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">instrument_name</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Science FITS basenames already present directly under *download_dir*.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">download_dir</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="n">out</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">download_dir</span><span class="p">)):</span>
+        <span class="n">lower</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">lower</span><span class="o">.</span><span class="n">endswith</span><span class="p">((</span><span class="s1">&#39;.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;.fits.gz&#39;</span><span class="p">)):</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">is_hst_science_product</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">)):</span>
+            <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">out</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_hst_obs_locally_complete</span><span class="p">(</span>
+    <span class="n">download_dir</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">instrument_name</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Return local science basenames when the obs subdir looks complete enough</span>
+<span class="sd">    to skip a MAST ``get_product_list`` round-trip.</span>
+
+<span class="sd">    ACS/WFC3: any matching flc/flt. WFPC2: both ``c0m`` and ``c1m`` present.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">local</span> <span class="o">=</span> <span class="n">_local_hst_science_basenames</span><span class="p">(</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">instrument_name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">local</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="n">inst</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instrument_name</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="k">if</span> <span class="s1">&#39;WFPC2&#39;</span> <span class="ow">in</span> <span class="n">inst</span> <span class="ow">or</span> <span class="s1">&#39;PC/WFC&#39;</span> <span class="ow">in</span> <span class="n">inst</span><span class="p">:</span>
+        <span class="n">has_c0m</span> <span class="o">=</span> <span class="nb">any</span><span class="p">(</span><span class="n">n</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;c0m.fits&#39;</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">local</span><span class="p">)</span>
+        <span class="n">has_c1m</span> <span class="o">=</span> <span class="nb">any</span><span class="p">(</span><span class="n">n</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;c1m.fits&#39;</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="n">local</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">local</span> <span class="k">if</span> <span class="p">(</span><span class="n">has_c0m</span> <span class="ow">and</span> <span class="n">has_c1m</span><span class="p">)</span> <span class="k">else</span> <span class="p">[]</span>
+    <span class="k">return</span> <span class="n">local</span>
+
+
+<div class="viewcode-block" id="download_hst_observations">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.download_hst_observations">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">download_hst_observations</span><span class="p">(</span>
+    <span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">layout</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_DOWNLOAD_LAYOUT</span><span class="p">,</span>
+    <span class="n">dry_run</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">extension</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;fits&#39;</span><span class="p">,</span>
+<span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Download filtered HST science products for each observation into ``outdir``.</span>
+
+<span class="sd">    Products are restricted to native pipeline science files (WFPC2 ``c0m``/</span>
+<span class="sd">    ``c1m``, ACS/WFC ``flc``, ACS/HRC+SBC ``flt``, WFC3/UVIS ``flc``,</span>
+<span class="sd">    WFC3/IR ``flt``) with product ``type == &#39;S&#39;``. Each unique</span>
+<span class="sd">    ``productFilename`` is downloaded **once** (later obsids that re-list</span>
+<span class="sd">    the same file are skipped), and files already present under *outdir*</span>
+<span class="sd">    are not re-fetched. Observation directories that already contain local</span>
+<span class="sd">    science products skip the MAST product-list API call.</span>
+
+<span class="sd">    Transient MAST timeouts / connection errors on product-list and download</span>
+<span class="sd">    are retried; observations that still fail are counted in</span>
+<span class="sd">    ``MastDownloadResult.n_failed`` so callers can refuse a silent partial</span>
+<span class="sd">    inventory (issue #4).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        HST observation table from :func:`query_hst`.</span>
+<span class="sd">    outdir : str</span>
+<span class="sd">        Download tree root (typically ``&lt;base-dir&gt;/download``).</span>
+<span class="sd">    token : str or None, optional</span>
+<span class="sd">        MAST API token.</span>
+<span class="sd">    layout : str, optional</span>
+<span class="sd">        Per-observation subdirectory layout.</span>
+<span class="sd">    dry_run : bool, optional</span>
+<span class="sd">        List products without downloading.</span>
+<span class="sd">    extension : str, optional</span>
+<span class="sd">        File extension for ``download_products``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    MastDownloadResult</span>
+<span class="sd">        ``n_observations`` ready (newly downloaded, listed in dry-run, or</span>
+<span class="sd">        already present). ``n_failed`` counts product-list / download failures</span>
+<span class="sd">        after retries. ``0`` ready only when nothing usable was found.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># Lazy import avoids circular import with st123.mast.download.</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">st123.mast.download</span><span class="w"> </span><span class="kn">import</span> <span class="n">MastDownloadResult</span>
+
+    <span class="c1"># Auth is normally done in query_hst; keep a cached no-op for standalone use.</span>
+    <span class="n">prepare_mast_auth</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">obs_table</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;observation table is empty. Cannot download files.&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">MastDownloadResult</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">outdir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">n_obs</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">obs_table</span><span class="p">)</span>
+    <span class="n">n_downloaded</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_ready</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_failed</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_unique</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_skipped_dup</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_skipped_existing</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">n_skipped_local</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">seen_filenames</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+    <span class="n">existing</span> <span class="o">=</span> <span class="n">_existing_hst_basenames</span><span class="p">(</span><span class="n">outdir</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s1">&#39;Downloading HST products for </span><span class="si">%d</span><span class="s1"> observation(s) into </span><span class="si">%s</span><span class="s1"> &#39;</span>
+        <span class="s1">&#39;(</span><span class="si">%d</span><span class="s1"> existing FITS basename(s) under tree)&#39;</span><span class="p">,</span>
+        <span class="n">n_obs</span><span class="p">,</span>
+        <span class="n">outdir</span><span class="p">,</span>
+        <span class="nb">len</span><span class="p">(</span><span class="n">existing</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">dry_run</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;Dry run: no files will be downloaded&#39;</span><span class="p">)</span>
+
+    <span class="n">has_collection</span> <span class="o">=</span> <span class="s1">&#39;obs_collection&#39;</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span>
+    <span class="n">has_instrument</span> <span class="o">=</span> <span class="s1">&#39;instrument_name&#39;</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="o">.</span><span class="n">colnames</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">obs</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">obs_table</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="n">filt</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">]</span>
+        <span class="n">obsid</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;obsid&#39;</span><span class="p">]</span>
+        <span class="n">telescope</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;obs_collection&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">has_collection</span> <span class="k">else</span> <span class="s1">&#39;HST&#39;</span>
+        <span class="n">instrument</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s1">&#39;instrument_name&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">has_instrument</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="n">subdir</span> <span class="o">=</span> <span class="n">observation_download_subdir</span><span class="p">(</span>
+            <span class="n">filt</span><span class="p">,</span>
+            <span class="n">obsid</span><span class="p">,</span>
+            <span class="n">layout</span><span class="o">=</span><span class="n">layout</span><span class="p">,</span>
+            <span class="n">telescope</span><span class="o">=</span><span class="n">telescope</span><span class="p">,</span>
+            <span class="n">instrument</span><span class="o">=</span><span class="n">instrument</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">download_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">outdir</span><span class="p">,</span> <span class="n">subdir</span><span class="p">)</span>
+
+        <span class="c1"># Fast path: avoid MAST get_product_list when the obs subdir already</span>
+        <span class="c1"># has local science products (dominant cost on re-runs).</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">dry_run</span><span class="p">:</span>
+            <span class="n">local</span> <span class="o">=</span> <span class="n">_hst_obs_locally_complete</span><span class="p">(</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">instrument</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">local</span><span class="p">:</span>
+                <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">local</span><span class="p">:</span>
+                    <span class="n">seen_filenames</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+                <span class="n">n_ready</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="n">n_skipped_local</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="n">n_skipped_existing</span> <span class="o">+=</span> <span class="nb">len</span><span class="p">(</span><span class="n">local</span><span class="p">)</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                    <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: </span><span class="si">%d</span><span class="s1"> science product(s) already on disk — &#39;</span>
+                    <span class="s1">&#39;skipping MAST product list&#39;</span><span class="p">,</span>
+                    <span class="n">i</span><span class="p">,</span>
+                    <span class="n">n_obs</span><span class="p">,</span>
+                    <span class="n">subdir</span><span class="p">,</span>
+                    <span class="nb">len</span><span class="p">(</span><span class="n">local</span><span class="p">),</span>
+                <span class="p">)</span>
+                <span class="k">continue</span>
+
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: fetching MAST product list (obsid=</span><span class="si">%s</span><span class="s1">)...&#39;</span><span class="p">,</span>
+            <span class="n">i</span><span class="p">,</span>
+            <span class="n">n_obs</span><span class="p">,</span>
+            <span class="n">subdir</span><span class="p">,</span>
+            <span class="n">obsid</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">t0</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_fetch_products</span><span class="p">():</span>
+            <span class="k">with</span> <span class="n">capture_output</span><span class="p">():</span>
+                <span class="k">return</span> <span class="n">Observations</span><span class="o">.</span><span class="n">get_product_list</span><span class="p">(</span><span class="n">obs</span><span class="p">)</span>
+
+        <span class="n">raw_products</span><span class="p">,</span> <span class="n">plist_exc</span> <span class="o">=</span> <span class="n">_mast_call_with_retries</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;product list obsid=</span><span class="si">{</span><span class="n">obsid</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">,</span>
+            <span class="n">_fetch_products</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">raw_products</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+                <span class="s1">&#39;could not get products for obsid=</span><span class="si">%s</span><span class="s1"> after retries: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+                <span class="n">obsid</span><span class="p">,</span>
+                <span class="n">plist_exc</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">n_failed</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">dt</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">-</span> <span class="n">t0</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: product list returned </span><span class="si">%d</span><span class="s1"> row(s) in </span><span class="si">%.1f</span><span class="s1">s&#39;</span><span class="p">,</span>
+                <span class="n">i</span><span class="p">,</span>
+                <span class="n">n_obs</span><span class="p">,</span>
+                <span class="n">subdir</span><span class="p">,</span>
+                <span class="nb">len</span><span class="p">(</span><span class="n">raw_products</span><span class="p">)</span> <span class="k">if</span> <span class="n">raw_products</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span><span class="p">,</span>
+                <span class="n">dt</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="c1"># Simple exposures only (associations / HAP derived are type C/D).</span>
+            <span class="k">if</span> <span class="s1">&#39;type&#39;</span> <span class="ow">in</span> <span class="n">raw_products</span><span class="o">.</span><span class="n">colnames</span><span class="p">:</span>
+                <span class="n">raw_products</span> <span class="o">=</span> <span class="n">raw_products</span><span class="p">[</span><span class="n">raw_products</span><span class="p">[</span><span class="s1">&#39;type&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="s1">&#39;S&#39;</span><span class="p">]</span>
+            <span class="n">product_list</span> <span class="o">=</span> <span class="n">filter_hst_products</span><span class="p">(</span><span class="n">raw_products</span><span class="p">,</span> <span class="n">instrument</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+                <span class="s1">&#39;could not filter products for obsid=</span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">obsid</span><span class="p">,</span> <span class="n">exc</span>
+            <span class="p">)</span>
+            <span class="n">n_failed</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="c1"># Should be rare after filter_hst_observations drops unsupported</span>
+            <span class="c1"># detectors; keep as debug noise, not a failure.</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span>
+                <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: no supported native HST products &#39;</span>
+                <span class="s1">&#39;(instrument=</span><span class="si">%s</span><span class="s1">; expect flc/flt/c0m per HST_PRODUCT_RULES)&#39;</span><span class="p">,</span>
+                <span class="n">i</span><span class="p">,</span>
+                <span class="n">n_obs</span><span class="p">,</span>
+                <span class="n">subdir</span><span class="p">,</span>
+                <span class="n">instrument</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">continue</span>
+
+        <span class="c1"># Dedupe across obsids; skip files already on disk under outdir.</span>
+        <span class="n">keep_idx</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">j</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">product_list</span><span class="p">):</span>
+            <span class="n">fname</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">fname</span> <span class="ow">in</span> <span class="n">seen_filenames</span><span class="p">:</span>
+                <span class="n">n_skipped_dup</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">fname</span> <span class="ow">in</span> <span class="n">existing</span><span class="p">:</span>
+                <span class="n">n_skipped_existing</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="n">seen_filenames</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">fname</span><span class="p">)</span>
+                <span class="k">continue</span>
+            <span class="n">seen_filenames</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">fname</span><span class="p">)</span>
+            <span class="n">keep_idx</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">j</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">keep_idx</span><span class="p">:</span>
+            <span class="c1"># Already on disk (or duplicate of another obsid) — treat as success.</span>
+            <span class="n">n_ready</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+                <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: all science products already downloaded or duplicated&#39;</span><span class="p">,</span>
+                <span class="n">i</span><span class="p">,</span>
+                <span class="n">n_obs</span><span class="p">,</span>
+                <span class="n">subdir</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">product_list</span> <span class="o">=</span> <span class="n">product_list</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">keep_idx</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">int</span><span class="p">)]</span>
+        <span class="n">n_unique</span> <span class="o">+=</span> <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">)</span>
+
+        <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1"> </span><span class="si">%d</span><span class="s1"> unique product(s)...&#39;</span><span class="p">,</span>
+            <span class="n">i</span><span class="p">,</span>
+            <span class="n">n_obs</span><span class="p">,</span>
+            <span class="n">subdir</span><span class="p">,</span>
+            <span class="s1">&#39;listing&#39;</span> <span class="k">if</span> <span class="n">dry_run</span> <span class="k">else</span> <span class="s1">&#39;downloading&#39;</span><span class="p">,</span>
+            <span class="nb">len</span><span class="p">(</span><span class="n">product_list</span><span class="p">),</span>
+        <span class="p">)</span>
+        <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;    </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">row</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">])</span>
+        <span class="k">if</span> <span class="n">dry_run</span><span class="p">:</span>
+            <span class="n">n_downloaded</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="n">n_ready</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_download</span><span class="p">():</span>
+            <span class="k">with</span> <span class="n">capture_output</span><span class="p">():</span>
+                <span class="n">Observations</span><span class="o">.</span><span class="n">download_products</span><span class="p">(</span>
+                    <span class="n">product_list</span><span class="p">,</span> <span class="n">download_dir</span><span class="o">=</span><span class="n">download_dir</span><span class="p">,</span> <span class="n">extension</span><span class="o">=</span><span class="n">extension</span>
+                <span class="p">)</span>
+
+        <span class="n">_</span><span class="p">,</span> <span class="n">dl_exc</span> <span class="o">=</span> <span class="n">_mast_call_with_retries</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;download obsid=</span><span class="si">{</span><span class="n">obsid</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">,</span>
+            <span class="n">_download</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">dl_exc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+                <span class="s1">&#39;download failed for obsid=</span><span class="si">%s</span><span class="s1"> after retries: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+                <span class="n">obsid</span><span class="p">,</span>
+                <span class="n">dl_exc</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">n_failed</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+
+        <span class="n">flat</span> <span class="o">=</span> <span class="n">flatten_mast_download_dir</span><span class="p">(</span><span class="n">download_dir</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">flat</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span>
+                <span class="s1">&#39;[</span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1">] </span><span class="si">%s</span><span class="s1">: flattened </span><span class="si">%d</span><span class="s1"> nested MAST product(s)&#39;</span><span class="p">,</span>
+                <span class="n">i</span><span class="p">,</span>
+                <span class="n">n_obs</span><span class="p">,</span>
+                <span class="n">subdir</span><span class="p">,</span>
+                <span class="nb">len</span><span class="p">(</span><span class="n">flat</span><span class="p">),</span>
+            <span class="p">)</span>
+        <span class="n">n_downloaded</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="n">n_ready</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">product_list</span><span class="p">:</span>
+            <span class="n">existing</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s1">&#39;productFilename&#39;</span><span class="p">]))</span>
+
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s1">&#39;Finished: downloaded HST products for </span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1"> observation(s) &#39;</span>
+        <span class="s1">&#39;(</span><span class="si">%d</span><span class="s1"> unique file(s); skipped </span><span class="si">%d</span><span class="s1"> duplicate listing(s), &#39;</span>
+        <span class="s1">&#39;</span><span class="si">%d</span><span class="s1"> already on disk, </span><span class="si">%d</span><span class="s1"> local obs skip(s); </span><span class="si">%d</span><span class="s1"> observation(s) ready, &#39;</span>
+        <span class="s1">&#39;</span><span class="si">%d</span><span class="s1"> failed).&#39;</span><span class="p">,</span>
+        <span class="n">n_downloaded</span><span class="p">,</span>
+        <span class="n">n_obs</span><span class="p">,</span>
+        <span class="n">n_unique</span><span class="p">,</span>
+        <span class="n">n_skipped_dup</span><span class="p">,</span>
+        <span class="n">n_skipped_existing</span><span class="p">,</span>
+        <span class="n">n_skipped_local</span><span class="p">,</span>
+        <span class="n">n_ready</span><span class="p">,</span>
+        <span class="n">n_failed</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">n_failed</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+            <span class="s1">&#39;HST download incomplete: </span><span class="si">%d</span><span class="s1">/</span><span class="si">%d</span><span class="s1"> observation(s) failed after &#39;</span>
+            <span class="s1">&#39;retries; re-run download or check MAST before mosaicking&#39;</span><span class="p">,</span>
+            <span class="n">n_failed</span><span class="p">,</span>
+            <span class="n">n_obs</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="n">MastDownloadResult</span><span class="p">(</span><span class="n">n_ready</span><span class="p">,</span> <span class="n">n_failed</span><span class="o">=</span><span class="n">n_failed</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="parse_s_region">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.parse_s_region">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">parse_s_region</span><span class="p">(</span><span class="n">region</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">shapely</span><span class="o">.</span><span class="n">Polygon</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parse a MAST/FITS ``S_REGION`` POLYGON string into a shapely Polygon.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    region : str</span>
+<span class="sd">        ``S_REGION`` header value (e.g. ``&#39;POLYGON ICRS ra dec ...&#39;``).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Polygon</span>
+<span class="sd">        Sky polygon with vertices in degrees (RA, Dec).</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If the string format is unrecognized or has an odd coordinate count.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">region</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">prefix</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;POLYGON ICRS  &#39;</span><span class="p">,</span> <span class="s1">&#39;POLYGON ICRS &#39;</span><span class="p">,</span> <span class="s1">&#39;POLYGON &#39;</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">prefix</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+            <span class="n">coords</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">text</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">prefix</span><span class="p">,</span> <span class="mi">1</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+            <span class="k">break</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Unrecognized S_REGION format: </span><span class="si">{</span><span class="n">region</span><span class="si">!r}</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">coords</span><span class="o">.</span><span class="n">size</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Odd number of S_REGION coordinates: </span><span class="si">{</span><span class="n">region</span><span class="si">!r}</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">shapely</span><span class="o">.</span><span class="n">Polygon</span><span class="p">(</span><span class="n">coords</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span></div>
+
+
+
+<div class="viewcode-block" id="polygons_from_obs_table">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.polygons_from_obs_table">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">polygons_from_obs_table</span><span class="p">(</span><span class="n">obs_table</span><span class="p">:</span> <span class="n">Table</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return sky polygons and filter names for each row in ``obs_table``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obs_table : Table</span>
+<span class="sd">        MAST observation table with ``s_region`` and ``filters`` columns.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    pgons : ndarray</span>
+<span class="sd">        Object array of :class:`shapely.Polygon` footprints, one per row.</span>
+<span class="sd">    filters : list of str</span>
+<span class="sd">        Filter name for each row (same order as ``pgons``).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">pgons</span> <span class="o">=</span> <span class="p">[</span><span class="n">parse_s_region</span><span class="p">(</span><span class="n">region</span><span class="p">)</span> <span class="k">for</span> <span class="n">region</span> <span class="ow">in</span> <span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;s_region&#39;</span><span class="p">]]</span>
+    <span class="n">filters</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">obs_table</span><span class="p">[</span><span class="s1">&#39;filters&#39;</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">pgons</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">),</span> <span class="n">filters</span></div>
+
+
+
+<div class="viewcode-block" id="coverage_fraction">
+<a class="viewcode-back" href="../../../api.html#st123.mast.mast.coverage_fraction">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">coverage_fraction</span><span class="p">(</span>
+    <span class="n">pgons</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="n">shapely</span><span class="o">.</span><span class="n">geometry</span><span class="o">.</span><span class="n">base</span><span class="o">.</span><span class="n">BaseGeometry</span><span class="p">],</span>
+    <span class="n">filter_mask</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">bool</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fraction of the union footprint covered by the masked subset of polygons.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    pgons : iterable of BaseGeometry</span>
+<span class="sd">        Footprint polygons (typically from :func:`polygons_from_obs_table`).</span>
+<span class="sd">    filter_mask : sequence of bool</span>
+<span class="sd">        Boolean mask selecting which polygons contribute to the subset union.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    float</span>
+<span class="sd">        Intersection area divided by the full union area (0.0 when union area</span>
+<span class="sd">        is zero).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">pgons</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">pgons</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span>
+    <span class="n">net_field</span> <span class="o">=</span> <span class="n">shapely</span><span class="o">.</span><span class="n">unary_union</span><span class="p">(</span><span class="n">pgons</span><span class="p">)</span>
+    <span class="n">subset</span> <span class="o">=</span> <span class="n">shapely</span><span class="o">.</span><span class="n">unary_union</span><span class="p">(</span><span class="n">pgons</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">filter_mask</span><span class="p">)])</span>
+    <span class="k">if</span> <span class="n">net_field</span><span class="o">.</span><span class="n">area</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mf">0.0</span>
+    <span class="k">return</span> <span class="n">shapely</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">subset</span><span class="p">,</span> <span class="n">net_field</span><span class="p">)</span><span class="o">.</span><span class="n">area</span> <span class="o">/</span> <span class="n">net_field</span><span class="o">.</span><span class="n">area</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025–2026, C. D. Kilpatrick &amp; A. Suresh.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

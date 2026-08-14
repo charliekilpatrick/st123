@@ -1,0 +1,1115 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>st123.photometry.warmstart &mdash; st123 0.1.1.dev25+gb984091e0</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" href="../../../_static/st123-docs.css" type="text/css" />
+
+  
+      <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../_static/documentation_options.js?v=840d7aea"></script>
+      <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            st123
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../user_guide.html">User guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api.html">API</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">st123</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">st123.photometry.warmstart</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for st123.photometry.warmstart</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">Warm-start DOLPHOT runs seeded from an existing NIRCam catalog.</span>
+
+<span class="sd">Supports:</span>
+
+<span class="sd">* NIRCam → MIRI (``setup_miri_warmstart``; ``dolphotMIRI.pdf``)</span>
+<span class="sd">* NIRCam reference/catalog → HST science (``setup_hst_warmstart``;</span>
+<span class="sd">  ``hst_base_params`` / JHAT-aligned ACS/WFC3/WFPC2)</span>
+
+<span class="sd">Uses ``xytfile`` from a prior ``.phot`` catalog (DOLPHOT manual warm-start).</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">,</span> <span class="n">Union</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.io</span><span class="w"> </span><span class="kn">import</span> <span class="n">fits</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.helpers</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_full_frame_miri</span>
+
+<span class="c1"># Backward-compatible alias for callers that import from warmstart.</span>
+<span class="n">is_mirimask_compatible</span> <span class="o">=</span> <span class="n">is_full_frame_miri</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.photometry.dolphot</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">HST_WARMSTART_CROWD_MAX</span><span class="p">,</span>
+    <span class="n">HST_WARMSTART_MIN_SEP_ARCSEC</span><span class="p">,</span>
+    <span class="n">HST_WARMSTART_SHARP2_MAX</span><span class="p">,</span>
+    <span class="n">HST_WARMSTART_SNR_MIN</span><span class="p">,</span>
+    <span class="n">HST_WARMSTART_XYT_TYPES</span><span class="p">,</span>
+    <span class="n">MIRI_WARMSTART_CROWD_MAX</span><span class="p">,</span>
+    <span class="n">MIRI_WARMSTART_MIN_SEP_ARCSEC</span><span class="p">,</span>
+    <span class="n">MIRI_WARMSTART_SHARP2_MAX</span><span class="p">,</span>
+    <span class="n">MIRI_WARMSTART_SNR_MIN</span><span class="p">,</span>
+    <span class="n">MIRI_WARMSTART_XYT_TYPES</span><span class="p">,</span>
+    <span class="n">classify_image_kind</span><span class="p">,</span>
+    <span class="n">dolphot_command</span><span class="p">,</span>
+    <span class="n">parse_param_image_list</span><span class="p">,</span>
+    <span class="n">phot_to_xyt</span><span class="p">,</span>
+    <span class="n">prepare_frames</span><span class="p">,</span>
+    <span class="n">prepare_hst_frames</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.photometry.dolphot_split</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">DOLPHOT_MAX_NIMG</span><span class="p">,</span>
+    <span class="n">DolphotRunPlan</span><span class="p">,</span>
+    <span class="n">write_split_paramfiles</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.settings</span><span class="w"> </span><span class="kn">import</span> <span class="n">hst_base_params</span><span class="p">,</span> <span class="n">miri_base_params</span>
+
+<span class="n">PathLike</span> <span class="o">=</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">]</span>
+
+
+<div class="viewcode-block" id="WarmStartResult">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.WarmStartResult">[docs]</a>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">WarmStartResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Paths and launch command for a prepared warm-start DOLPHOT run.</span>
+
+<span class="sd">    Attributes</span>
+<span class="sd">    ----------</span>
+<span class="sd">    outdir : pathlib.Path</span>
+<span class="sd">        Staging directory containing staged frames, sky maps, and parameter file.</span>
+<span class="sd">    param_file : pathlib.Path</span>
+<span class="sd">        Primary ``dolphot.param`` (or part-0 param when split).</span>
+<span class="sd">    xyt_file : pathlib.Path</span>
+<span class="sd">        Warm-start star list (``warmstart.xyt``).</span>
+<span class="sd">    phot_out : str</span>
+<span class="sd">        Final DOLPHOT catalog basename (merged name when the run is split).</span>
+<span class="sd">    nircam_images : list of str</span>
+<span class="sd">        Basenames of staged NIRCam science frames.</span>
+<span class="sd">    miri_images : list of str</span>
+<span class="sd">        Basenames of staged MIRI ``*_jhat.fits`` frames.</span>
+<span class="sd">    hst_images : list of str</span>
+<span class="sd">        Basenames of staged HST science frames (NIRCam→HST warmstart).</span>
+<span class="sd">    command : str</span>
+<span class="sd">        Shell command for a single-part run (empty when split; see *commands*).</span>
+<span class="sd">    plan : DolphotRunPlan or None</span>
+<span class="sd">        Full run plan (includes split parts when ``Nimg`` exceeds the soft cap).</span>
+<span class="sd">    commands : list of str</span>
+<span class="sd">        One launch command per part (length 1 for unsplit runs).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">outdir</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">param_file</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">xyt_file</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">phot_out</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">nircam_images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span>
+    <span class="n">miri_images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span>
+    <span class="n">hst_images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span>
+    <span class="n">command</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;&#39;</span>
+    <span class="n">plan</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DolphotRunPlan</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">commands</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">list</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="discover_miri_jhat">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.discover_miri_jhat">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">discover_miri_jhat</span><span class="p">(</span>
+    <span class="n">data_root</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">alignment_summary</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">min_overlap</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span>
+    <span class="n">require_success</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Find overlapping MIRI ``*_jhat.fits`` frames under a data root.</span>
+
+<span class="sd">    Prefer ``*_alignment_summary.txt`` SUCCESS rows with</span>
+<span class="sd">    ``ref_overlap_frac &gt;= min_overlap``. Fall back to a recursive glob under</span>
+<span class="sd">    ``JWST/MIRI`` when no summary is available.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    data_root : str or os.PathLike</span>
+<span class="sd">        JWST dataset root to search (contains ``JWST/MIRI`` or alignment outputs).</span>
+<span class="sd">    alignment_summary : str or os.PathLike or None, optional</span>
+<span class="sd">        Explicit alignment summary table path. When ``None``, the first</span>
+<span class="sd">        ``*_alignment_summary.txt`` under *data_root* is used if present.</span>
+<span class="sd">    min_overlap : float, optional</span>
+<span class="sd">        Minimum ``ref_overlap_frac`` for SUCCESS rows in the summary table.</span>
+<span class="sd">    require_success : bool, optional</span>
+<span class="sd">        If True (default), ignore summary rows whose status is not ``SUCCESS``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of pathlib.Path</span>
+<span class="sd">        Sorted MIRI ``*_jhat.fits`` paths (stable order by full path then basename).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">data_root</span><span class="p">)</span>
+    <span class="n">summary</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">alignment_summary</span><span class="p">)</span> <span class="k">if</span> <span class="n">alignment_summary</span> <span class="k">else</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">summary</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">candidates</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">root</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s1">&#39;*_alignment_summary.txt&#39;</span><span class="p">))</span>
+        <span class="n">summary</span> <span class="o">=</span> <span class="n">candidates</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">candidates</span> <span class="k">else</span> <span class="kc">None</span>
+
+    <span class="n">found</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">if</span> <span class="n">summary</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">summary</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">summary</span><span class="o">.</span><span class="n">read_text</span><span class="p">()</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()[</span><span class="mi">1</span><span class="p">:]:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="ow">or</span> <span class="n">line</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;-&#39;</span><span class="p">):</span>
+                <span class="k">continue</span>
+            <span class="n">parts</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">8</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="c1"># Columns: miri_path filter status ref_overlap_frac ... aligned_path</span>
+            <span class="n">status</span> <span class="o">=</span> <span class="n">parts</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">overlap</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">parts</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+            <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">aligned</span> <span class="o">=</span> <span class="n">parts</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">require_success</span> <span class="ow">and</span> <span class="n">status</span> <span class="o">!=</span> <span class="s1">&#39;SUCCESS&#39;</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">overlap</span> <span class="o">&lt;</span> <span class="n">min_overlap</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">aligned</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s1">&#39;_jhat.fits&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">aligned</span> <span class="o">==</span> <span class="s1">&#39;NA&#39;</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">aligned</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                <span class="n">found</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">found</span><span class="p">:</span>
+        <span class="c1"># Stable order: filter path then basename.</span>
+        <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">found</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">(),</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="p">))</span>
+
+    <span class="c1"># Fallback: all MIRI JHAT products under the canonical tree.</span>
+    <span class="n">patterns</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s1">&#39;JWST/MIRI/**/alignment_output/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;**/MIRI/**/alignment_output/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;**/mirimage/*_jhat.fits&#39;</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="n">seen</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">pat</span> <span class="ow">in</span> <span class="n">patterns</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">root</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="n">pat</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                <span class="n">seen</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">resolve</span><span class="p">())</span>
+    <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">seen</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">(),</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="p">))</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_link_or_copy</span><span class="p">(</span><span class="n">src</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">dst</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">use_hardlink</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">dst</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+        <span class="k">return</span>
+    <span class="n">dst</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">use_hardlink</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">os</span><span class="o">.</span><span class="n">link</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst</span><span class="p">)</span>
+            <span class="k">return</span>
+        <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+            <span class="k">pass</span>
+    <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_stage_nircam_products</span><span class="p">(</span>
+    <span class="n">nircam_rundir</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+    <span class="n">ref_base</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">image_bases</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">use_hardlink</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">Path</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Hardlink/copy reference + science frames and existing ``.sky.fits``.&quot;&quot;&quot;</span>
+    <span class="n">ref_src</span> <span class="o">=</span> <span class="n">nircam_rundir</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">ref_base</span><span class="si">}</span><span class="s1">.fits&#39;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">ref_src</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Reference image missing: </span><span class="si">{</span><span class="n">ref_src</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="n">ref_dst</span> <span class="o">=</span> <span class="n">outdir</span> <span class="o">/</span> <span class="n">ref_src</span><span class="o">.</span><span class="n">name</span>
+    <span class="n">_link_or_copy</span><span class="p">(</span><span class="n">ref_src</span><span class="p">,</span> <span class="n">ref_dst</span><span class="p">,</span> <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">)</span>
+    <span class="n">sky_src</span> <span class="o">=</span> <span class="n">nircam_rundir</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">ref_base</span><span class="si">}</span><span class="s1">.sky.fits&#39;</span>
+    <span class="k">if</span> <span class="n">sky_src</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="n">_link_or_copy</span><span class="p">(</span><span class="n">sky_src</span><span class="p">,</span> <span class="n">outdir</span> <span class="o">/</span> <span class="n">sky_src</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">)</span>
+
+    <span class="n">staged</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">base</span> <span class="ow">in</span> <span class="n">image_bases</span><span class="p">:</span>
+        <span class="n">src</span> <span class="o">=</span> <span class="n">nircam_rundir</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">base</span><span class="si">}</span><span class="s1">.fits&#39;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">src</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;NIRCam frame missing: </span><span class="si">{</span><span class="n">src</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+        <span class="n">dst</span> <span class="o">=</span> <span class="n">outdir</span> <span class="o">/</span> <span class="n">src</span><span class="o">.</span><span class="n">name</span>
+        <span class="n">_link_or_copy</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst</span><span class="p">,</span> <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">)</span>
+        <span class="n">sky</span> <span class="o">=</span> <span class="n">nircam_rundir</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">base</span><span class="si">}</span><span class="s1">.sky.fits&#39;</span>
+        <span class="k">if</span> <span class="n">sky</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="n">_link_or_copy</span><span class="p">(</span><span class="n">sky</span><span class="p">,</span> <span class="n">outdir</span> <span class="o">/</span> <span class="n">sky</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">)</span>
+        <span class="n">staged</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">dst</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ref_dst</span><span class="p">,</span> <span class="n">staged</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_stage_miri_jhat</span><span class="p">(</span>
+    <span class="n">miri_sources</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">Path</span><span class="p">],</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">overwrite</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Copy MIRI JHAT frames into *outdir* (writable copies for mirimask).&quot;&quot;&quot;</span>
+    <span class="n">staged</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">unusable</span> <span class="o">=</span> <span class="n">outdir</span> <span class="o">/</span> <span class="s1">&#39;unusable&#39;</span>
+    <span class="k">for</span> <span class="n">src</span> <span class="ow">in</span> <span class="n">miri_sources</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">is_full_frame_miri</span><span class="p">(</span><span class="n">src</span><span class="p">):</span>
+            <span class="n">unusable</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="n">dst_bad</span> <span class="o">=</span> <span class="n">unusable</span> <span class="o">/</span> <span class="n">src</span><span class="o">.</span><span class="n">name</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">dst_bad</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst_bad</span><span class="p">)</span>
+                <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+                    <span class="k">pass</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="s1">&#39;Skipping non-full-frame MIRI JHAT (unsupported subarray/cutout): </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span>
+                <span class="n">src</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">dst</span> <span class="o">=</span> <span class="n">outdir</span> <span class="o">/</span> <span class="n">src</span><span class="o">.</span><span class="n">name</span>
+        <span class="k">if</span> <span class="n">overwrite</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">dst</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst</span><span class="p">)</span>
+            <span class="c1"># Stale sky maps from a prior partial prep must not block re-prep.</span>
+            <span class="k">if</span> <span class="n">overwrite</span><span class="p">:</span>
+                <span class="n">sky</span> <span class="o">=</span> <span class="n">outdir</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">dst</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;.fits&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">.sky.fits&quot;</span>
+                <span class="k">if</span> <span class="n">sky</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+                    <span class="n">sky</span><span class="o">.</span><span class="n">unlink</span><span class="p">()</span>
+        <span class="n">staged</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">dst</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">staged</span>
+
+
+<div class="viewcode-block" id="find_photfile">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.find_photfile">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_photfile</span><span class="p">(</span><span class="n">nircam_rundir</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Locate the primary ``.phot`` catalog in a finished NIRCam DOLPHOT run.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    nircam_rundir : str or os.PathLike</span>
+<span class="sd">        Directory containing a completed NIRCam DOLPHOT run.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    pathlib.Path</span>
+<span class="sd">        Path to the main ``.phot`` catalog (largest candidate when multiple exist).</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    FileNotFoundError</span>
+<span class="sd">        If no suitable ``.phot`` catalog is found under *nircam_rundir*.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">rundir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">nircam_rundir</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_is_usable_phot</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Skip empty stubs left by interrupted DOLPHOT runs.</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span> <span class="ow">and</span> <span class="n">path</span><span class="o">.</span><span class="n">stat</span><span class="p">()</span><span class="o">.</span><span class="n">st_size</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+
+    <span class="c1"># Prefer a top-level *.phot that is not a sidecar (no extra dots before .phot)</span>
+    <span class="n">candidates</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span>
+        <span class="n">p</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">rundir</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s1">&#39;*.phot&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">_is_usable_phot</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="ow">and</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">&#39;.&#39;</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">candidates</span><span class="p">:</span>
+        <span class="c1"># Fallback: any *.phot without .psf/.res in the name</span>
+        <span class="n">candidates</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span>
+            <span class="n">p</span>
+            <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">rundir</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s1">&#39;*.phot&#39;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">_is_usable_phot</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;.psf.&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="ow">and</span> <span class="s1">&#39;.res.&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span>
+        <span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">candidates</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;No non-empty .phot catalog found under </span><span class="si">{</span><span class="n">rundir</span><span class="si">}</span><span class="s1">&#39;</span>
+        <span class="p">)</span>
+    <span class="c1"># Prefer the largest catalog (main photometry product).</span>
+    <span class="k">return</span> <span class="nb">max</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">stat</span><span class="p">()</span><span class="o">.</span><span class="n">st_size</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="setup_miri_warmstart">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.setup_miri_warmstart">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_miri_warmstart</span><span class="p">(</span>
+    <span class="n">nircam_rundir</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">miri_jhat</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">data_root</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">alignment_summary</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">photfile</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">min_overlap</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span>
+    <span class="n">dolphot_bin</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">phot_out</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prepare_miri</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">use_hardlink</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">xyt_types</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_snr_min</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_crowd_max</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_sharp2_max</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_min_sep_arcsec</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_force_xy</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_max_radius_arcsec</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_center_xy</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prune_xyt_for_miri</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">ncores</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">max_nimg</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">DOLPHOT_MAX_NIMG</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WarmStartResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Create a warm-start DOLPHOT directory with NIRCam + overlapping MIRI frames.</span>
+
+<span class="sd">    Steps</span>
+<span class="sd">    -----</span>
+<span class="sd">    1. Read ``dolphot.param`` / ``.phot`` from *nircam_rundir*.</span>
+<span class="sd">    2. Stage NIRCam reference, frames, and sky maps into *outdir*.</span>
+<span class="sd">    3. Copy overlapping MIRI ``*_jhat.fits``, run ``mirimask -estnoise`` and</span>
+<span class="sd">       MIRI ``calcsky``, then stage their sky maps.</span>
+<span class="sd">    4. Build ``warmstart.xyt`` from the NIRCam photometry.</span>
+<span class="sd">    5. Write a combined ``dolphot.param`` with MIRI FitSky=2 recommendations</span>
+<span class="sd">       and ``xytfile = warmstart.xyt``.</span>
+
+<span class="sd">    Does **not** run ``dolphot``; use :attr:`WarmStartResult.command`.</span>
+<span class="sd">    ``ncores`` sets ``MaxThreads`` on that launch command (same as ``--ncores``).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    nircam_rundir : str or os.PathLike</span>
+<span class="sd">        Completed NIRCam DOLPHOT run directory (contains ``dolphot.param``).</span>
+<span class="sd">    outdir : str or os.PathLike</span>
+<span class="sd">        Output directory for the combined warm-start staging tree.</span>
+<span class="sd">    miri_jhat : sequence of str or os.PathLike or None, optional</span>
+<span class="sd">        Explicit MIRI ``*_jhat.fits`` paths. When ``None``, frames are discovered</span>
+<span class="sd">        via :func:`discover_miri_jhat`.</span>
+<span class="sd">    data_root : str or os.PathLike or None, optional</span>
+<span class="sd">        JWST data root for MIRI discovery when *miri_jhat* is ``None``. Defaults</span>
+<span class="sd">        to a heuristic based on *nircam_rundir* layout.</span>
+<span class="sd">    alignment_summary : str or os.PathLike or None, optional</span>
+<span class="sd">        Alignment summary table forwarded to :func:`discover_miri_jhat`.</span>
+<span class="sd">    photfile : str or os.PathLike or None, optional</span>
+<span class="sd">        NIRCam ``.phot`` catalog for warm-start seeding. Defaults to</span>
+<span class="sd">        :func:`find_photfile`.</span>
+<span class="sd">    min_overlap : float, optional</span>
+<span class="sd">        Minimum reference overlap fraction for MIRI frame discovery.</span>
+<span class="sd">    dolphot_bin : str or os.PathLike or None, optional</span>
+<span class="sd">        Override path to the DOLPHOT ``bin`` directory for MIRI prep.</span>
+<span class="sd">    phot_out : str or None, optional</span>
+<span class="sd">        Output catalog basename for the combined run. Defaults to</span>
+<span class="sd">        ``&lt;nircam_stem&gt;_nircam_miri.phot``.</span>
+<span class="sd">    prepare_miri : bool, optional</span>
+<span class="sd">        If True (default), run ``mirimask`` and MIRI ``calcsky`` on frames</span>
+<span class="sd">        missing ``.sky.fits`` sidecars.</span>
+<span class="sd">    use_hardlink : bool, optional</span>
+<span class="sd">        If True (default), hardlink NIRCam products into *outdir* when possible.</span>
+<span class="sd">    xyt_types : sequence of int or None, optional</span>
+<span class="sd">        DOLPHOT object types to retain in ``warmstart.xyt`` (forwarded to</span>
+<span class="sd">        :func:`phot_to_xyt`).</span>
+<span class="sd">    xyt_snr_min, xyt_crowd_max, xyt_sharp2_max : float or None, optional</span>
+<span class="sd">        Quality cuts for ``warmstart.xyt`` (see :func:`phot_to_xyt`).</span>
+<span class="sd">    xyt_min_sep_arcsec : float or None, optional</span>
+<span class="sd">        Minimum seed separation on the NIRCam reference (arcsec).</span>
+<span class="sd">    xyt_force_xy : sequence of (x, y) or None, optional</span>
+<span class="sd">        Reference-pixel coordinates that must be retained (e.g. the SN).</span>
+<span class="sd">    xyt_max_radius_arcsec : float or None, optional</span>
+<span class="sd">        Keep only seeds within this radius of *xyt_center_xy* (or the first</span>
+<span class="sd">        ``xyt_force_xy`` point). Use ~5″ for single-target NGC3310 runs.</span>
+<span class="sd">    xyt_center_xy : (x, y) or None, optional</span>
+<span class="sd">        Center for the radius cut when not using ``xyt_force_xy``.</span>
+<span class="sd">    prune_xyt_for_miri : bool, optional</span>
+<span class="sd">        If True, apply the recommended MIRI seed cuts (type=1, SNR≥10,</span>
+<span class="sd">        crowd≤0.5, sharp²≤0.01, minsep=0.30″) unless overridden above.</span>
+<span class="sd">    ncores : int, optional</span>
+<span class="sd">        ``MaxThreads`` for the generated DOLPHOT launch command.</span>
+<span class="sd">    max_nimg : int, optional</span>
+<span class="sd">        Soft science-image cap per DOLPHOT invocation (default 400). Larger</span>
+<span class="sd">        lists are split into roughly equal parts that share the same reference</span>
+<span class="sd">        and ``warmstart.xyt``; catalogs are merged after all parts finish.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    WarmStartResult</span>
+<span class="sd">        Staged paths, frame lists, and shell command(s) for the combined run.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    FileNotFoundError</span>
+<span class="sd">        If ``dolphot.param``, photometry seed, or MIRI frames are missing.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">nircam_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">nircam_rundir</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">outdir</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">out</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="n">param_src</span> <span class="o">=</span> <span class="n">nircam_dir</span> <span class="o">/</span> <span class="s1">&#39;dolphot.param&#39;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">param_src</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Missing </span><span class="si">{</span><span class="n">param_src</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+
+    <span class="n">ref_base</span><span class="p">,</span> <span class="n">nircam_bases</span> <span class="o">=</span> <span class="n">parse_param_image_list</span><span class="p">(</span><span class="n">param_src</span><span class="p">)</span>
+    <span class="n">phot_src</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">photfile</span><span class="p">)</span> <span class="k">if</span> <span class="n">photfile</span> <span class="k">else</span> <span class="n">find_photfile</span><span class="p">(</span><span class="n">nircam_dir</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">miri_jhat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">miri_sources</span> <span class="o">=</span> <span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">miri_jhat</span><span class="p">]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">data_root</span><span class="p">)</span> <span class="k">if</span> <span class="n">data_root</span> <span class="k">else</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span>
+        <span class="c1"># nircam_0_0 -&gt; dolphot -&gt; NGC3310</span>
+        <span class="k">if</span> <span class="n">data_root</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Prefer the JWST data root two levels up from dolphot/&lt;run&gt;</span>
+            <span class="c1"># e.g. .../NGC3310/dolphot/nircam_0_0 -&gt; .../NGC3310</span>
+            <span class="n">guess</span> <span class="o">=</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span>
+            <span class="n">root</span> <span class="o">=</span> <span class="n">guess</span> <span class="k">if</span> <span class="p">(</span><span class="n">guess</span> <span class="o">/</span> <span class="s1">&#39;JWST&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="k">else</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span>
+        <span class="n">miri_sources</span> <span class="o">=</span> <span class="n">discover_miri_jhat</span><span class="p">(</span>
+            <span class="n">root</span><span class="p">,</span>
+            <span class="n">alignment_summary</span><span class="o">=</span><span class="n">alignment_summary</span><span class="p">,</span>
+            <span class="n">min_overlap</span><span class="o">=</span><span class="n">min_overlap</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">miri_sources</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+            <span class="s1">&#39;No overlapping MIRI *_jhat.fits frames found; pass miri_jhat=...&#39;</span>
+        <span class="p">)</span>
+
+    <span class="n">ref_dst</span><span class="p">,</span> <span class="n">nircam_staged</span> <span class="o">=</span> <span class="n">_stage_nircam_products</span><span class="p">(</span>
+        <span class="n">nircam_dir</span><span class="p">,</span>
+        <span class="n">out</span><span class="p">,</span>
+        <span class="n">ref_base</span><span class="p">,</span>
+        <span class="n">nircam_bases</span><span class="p">,</span>
+        <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="c1"># Re-copy MIRI JHAT before prep: mirimask is not idempotent (strips DQ).</span>
+    <span class="n">need_prep_names</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">src</span><span class="o">.</span><span class="n">name</span>
+        <span class="k">for</span> <span class="n">src</span> <span class="ow">in</span> <span class="n">miri_sources</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">out</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;.fits&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">.sky.fits&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span>
+    <span class="p">}</span>
+    <span class="n">miri_staged</span> <span class="o">=</span> <span class="n">_stage_miri_jhat</span><span class="p">(</span>
+        <span class="n">miri_sources</span><span class="p">,</span>
+        <span class="n">out</span><span class="p">,</span>
+        <span class="n">overwrite</span><span class="o">=</span><span class="nb">bool</span><span class="p">(</span><span class="n">prepare_miri</span> <span class="ow">and</span> <span class="n">need_prep_names</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">miri_staged</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;No mirimask-compatible full-frame MIRI JHAT frames for </span><span class="si">{</span><span class="n">out</span><span class="si">}</span><span class="s1">&#39;</span>
+        <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">prepare_miri</span><span class="p">:</span>
+        <span class="n">need_prep</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">miri_staged</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="n">need_prep_names</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">need_prep</span><span class="p">:</span>
+            <span class="n">prepare_frames</span><span class="p">(</span>
+                <span class="n">need_prep</span><span class="p">,</span>
+                <span class="n">instrument</span><span class="o">=</span><span class="s1">&#39;miri&#39;</span><span class="p">,</span>
+                <span class="n">dolphot_bin</span><span class="o">=</span><span class="n">dolphot_bin</span><span class="p">,</span>
+                <span class="n">ncores</span><span class="o">=</span><span class="n">ncores</span><span class="p">,</span>
+            <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">prune_xyt_for_miri</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">xyt_types</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_types</span> <span class="o">=</span> <span class="n">MIRI_WARMSTART_XYT_TYPES</span>
+        <span class="k">if</span> <span class="n">xyt_snr_min</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_snr_min</span> <span class="o">=</span> <span class="n">MIRI_WARMSTART_SNR_MIN</span>
+        <span class="k">if</span> <span class="n">xyt_crowd_max</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_crowd_max</span> <span class="o">=</span> <span class="n">MIRI_WARMSTART_CROWD_MAX</span>
+        <span class="k">if</span> <span class="n">xyt_sharp2_max</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_sharp2_max</span> <span class="o">=</span> <span class="n">MIRI_WARMSTART_SHARP2_MAX</span>
+        <span class="k">if</span> <span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_min_sep_arcsec</span> <span class="o">=</span> <span class="n">MIRI_WARMSTART_MIN_SEP_ARCSEC</span>
+
+    <span class="n">min_sep_pix</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">max_radius_pix</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">pixscale</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">need_pixscale</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="p">(</span><span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_min_sep_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="ow">or</span> <span class="p">(</span><span class="n">xyt_max_radius_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_max_radius_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">need_pixscale</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">astropy.wcs</span><span class="w"> </span><span class="kn">import</span> <span class="n">WCS</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">astropy.units</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">u</span>
+
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">ref_dst</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="n">sci</span> <span class="o">=</span> <span class="n">hdul</span><span class="p">[</span><span class="s1">&#39;SCI&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">in</span> <span class="n">hdul</span> <span class="k">else</span> <span class="n">hdul</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">pixscale</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span>
+                <span class="nb">abs</span><span class="p">(</span><span class="n">WCS</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="p">)</span><span class="o">.</span><span class="n">proj_plane_pixel_scales</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">arcsec</span><span class="p">)</span><span class="o">.</span><span class="n">value</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_min_sep_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">min_sep_pix</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">xyt_min_sep_arcsec</span><span class="p">)</span> <span class="o">/</span> <span class="n">pixscale</span>
+        <span class="k">if</span> <span class="n">xyt_max_radius_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_max_radius_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">max_radius_pix</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">xyt_max_radius_arcsec</span><span class="p">)</span> <span class="o">/</span> <span class="n">pixscale</span>
+
+    <span class="n">xyt_path</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;warmstart.xyt&#39;</span>
+    <span class="n">phot_to_xyt</span><span class="p">(</span>
+        <span class="n">phot_src</span><span class="p">,</span>
+        <span class="n">xyt_path</span><span class="p">,</span>
+        <span class="n">types</span><span class="o">=</span><span class="n">xyt_types</span><span class="p">,</span>
+        <span class="n">snr_min</span><span class="o">=</span><span class="n">xyt_snr_min</span><span class="p">,</span>
+        <span class="n">crowd_max</span><span class="o">=</span><span class="n">xyt_crowd_max</span><span class="p">,</span>
+        <span class="n">sharp2_max</span><span class="o">=</span><span class="n">xyt_sharp2_max</span><span class="p">,</span>
+        <span class="n">min_sep_pix</span><span class="o">=</span><span class="n">min_sep_pix</span><span class="p">,</span>
+        <span class="n">force_xy</span><span class="o">=</span><span class="n">xyt_force_xy</span><span class="p">,</span>
+        <span class="n">center_xy</span><span class="o">=</span><span class="n">xyt_center_xy</span><span class="p">,</span>
+        <span class="n">max_radius_pix</span><span class="o">=</span><span class="n">max_radius_pix</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">all_images</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">nircam_staged</span><span class="p">)</span> <span class="o">+</span> <span class="nb">list</span><span class="p">(</span><span class="n">miri_staged</span><span class="p">)</span>
+    <span class="n">kinds</span> <span class="o">=</span> <span class="p">[</span><span class="n">classify_image_kind</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">all_images</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">phot_out</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">stem</span> <span class="o">=</span> <span class="n">phot_src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;.phot&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+        <span class="n">phot_out</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">stem</span><span class="si">}</span><span class="s1">_nircam_miri.phot&#39;</span>
+
+    <span class="n">plan</span> <span class="o">=</span> <span class="n">write_split_paramfiles</span><span class="p">(</span>
+        <span class="n">out</span><span class="p">,</span>
+        <span class="n">refimage</span><span class="o">=</span><span class="n">ref_dst</span><span class="p">,</span>
+        <span class="n">images</span><span class="o">=</span><span class="n">all_images</span><span class="p">,</span>
+        <span class="n">phot_out</span><span class="o">=</span><span class="n">phot_out</span><span class="p">,</span>
+        <span class="n">global_params</span><span class="o">=</span><span class="n">miri_base_params</span><span class="p">,</span>
+        <span class="n">xytfile</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+        <span class="n">image_kinds</span><span class="o">=</span><span class="n">kinds</span><span class="p">,</span>
+        <span class="n">max_nimg</span><span class="o">=</span><span class="n">max_nimg</span><span class="p">,</span>
+        <span class="n">read_filters</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">param_path</span> <span class="o">=</span> <span class="n">plan</span><span class="o">.</span><span class="n">param_file</span>
+
+    <span class="n">commands</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">dolphot_command</span><span class="p">(</span>
+            <span class="n">out</span><span class="p">,</span>
+            <span class="n">phot_out</span><span class="o">=</span><span class="n">part</span><span class="o">.</span><span class="n">phot_out</span><span class="p">,</span>
+            <span class="n">param_file</span><span class="o">=</span><span class="n">part</span><span class="o">.</span><span class="n">param_file</span><span class="p">,</span>
+            <span class="n">dolphot_bin</span><span class="o">=</span><span class="n">dolphot_bin</span><span class="p">,</span>
+            <span class="n">ncores</span><span class="o">=</span><span class="n">ncores</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">for</span> <span class="n">part</span> <span class="ow">in</span> <span class="n">plan</span><span class="o">.</span><span class="n">parts</span>
+    <span class="p">]</span>
+    <span class="n">cmd</span> <span class="o">=</span> <span class="n">commands</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">commands</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span> <span class="k">else</span> <span class="s1">&#39;&#39;</span>
+
+    <span class="c1"># Record a small README with the launch command(s).</span>
+    <span class="n">n_xyt</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="mi">1</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">xyt_path</span><span class="o">.</span><span class="n">open</span><span class="p">())</span>
+    <span class="n">launch_lines</span> <span class="o">=</span> <span class="s1">&#39;</span><span class="se">\n</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;  </span><span class="si">{</span><span class="n">c</span><span class="si">}</span><span class="s1">&#39;</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">commands</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">plan</span><span class="o">.</span><span class="n">needs_merge</span><span class="p">:</span>
+        <span class="n">launch_lines</span> <span class="o">+=</span> <span class="p">(</span>
+            <span class="s1">&#39;</span><span class="se">\n\n</span><span class="s1">After all parts finish, merge with:</span><span class="se">\n</span><span class="s1">&#39;</span>
+            <span class="s1">&#39;  python -c &quot;from st123.photometry.dolphot_split import &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;finalize_split_outdir; finalize_split_outdir(r</span><span class="se">\&#39;</span><span class="si">{</span><span class="n">out</span><span class="si">}</span><span class="se">\&#39;</span><span class="s1">)&quot;</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="p">)</span>
+    <span class="n">readme</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;WARMSTART_README.txt&#39;</span>
+    <span class="n">readme</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span>
+        <span class="s1">&#39;DOLPHOT NIRCam+MIRI warm-start run</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;NIRCam source: </span><span class="si">{</span><span class="n">nircam_dir</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Photometry seed: </span><span class="si">{</span><span class="n">phot_src</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xytfile: </span><span class="si">{</span><span class="n">xyt_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1"> (</span><span class="si">{</span><span class="n">n_xyt</span><span class="si">}</span><span class="s1"> stars)</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt prune_for_miri: </span><span class="si">{</span><span class="n">prune_xyt_for_miri</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt types: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">xyt_types</span><span class="p">)</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">xyt_types</span><span class="w"> </span><span class="ow">is</span><span class="w"> </span><span class="ow">not</span><span class="w"> </span><span class="kc">None</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="kc">None</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt snr_min: </span><span class="si">{</span><span class="n">xyt_snr_min</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt crowd_max: </span><span class="si">{</span><span class="n">xyt_crowd_max</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt sharp2_max: </span><span class="si">{</span><span class="n">xyt_sharp2_max</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt min_sep_arcsec: </span><span class="si">{</span><span class="n">xyt_min_sep_arcsec</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt max_radius_arcsec: </span><span class="si">{</span><span class="n">xyt_max_radius_arcsec</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt center_xy: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">xyt_center_xy</span><span class="p">)</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">xyt_center_xy</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="kc">None</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt force_xy: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">xyt_force_xy</span><span class="p">)</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">xyt_force_xy</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="kc">None</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;NIRCam frames: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">nircam_staged</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;MIRI frames: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">miri_staged</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Total science frames: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">all_images</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;max_nimg (soft): </span><span class="si">{</span><span class="n">max_nimg</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;split_parts: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">plan</span><span class="o">.</span><span class="n">parts</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Parameter file: </span><span class="si">{</span><span class="n">param_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Final phot_out: </span><span class="si">{</span><span class="n">phot_out</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="s1">&#39;</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="s1">&#39;Launch (not run by setup):</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">launch_lines</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+    <span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">WarmStartResult</span><span class="p">(</span>
+        <span class="n">outdir</span><span class="o">=</span><span class="n">out</span><span class="p">,</span>
+        <span class="n">param_file</span><span class="o">=</span><span class="n">param_path</span><span class="p">,</span>
+        <span class="n">xyt_file</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+        <span class="n">phot_out</span><span class="o">=</span><span class="n">phot_out</span><span class="p">,</span>
+        <span class="n">nircam_images</span><span class="o">=</span><span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">nircam_staged</span><span class="p">],</span>
+        <span class="n">miri_images</span><span class="o">=</span><span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">miri_staged</span><span class="p">],</span>
+        <span class="n">command</span><span class="o">=</span><span class="n">cmd</span><span class="p">,</span>
+        <span class="n">plan</span><span class="o">=</span><span class="n">plan</span><span class="p">,</span>
+        <span class="n">commands</span><span class="o">=</span><span class="n">commands</span><span class="p">,</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="discover_hst_jhat">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.discover_hst_jhat">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">discover_hst_jhat</span><span class="p">(</span>
+    <span class="n">data_root</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">patterns</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Find HST ``*_jhat.fits`` frames under a project or reduction root.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    data_root : str or os.PathLike</span>
+<span class="sd">        Project root (contains ``reduction/jhat`` / ``jhat_hst``) or a</span>
+<span class="sd">        directory to search.</span>
+<span class="sd">    patterns : sequence of str or None, optional</span>
+<span class="sd">        Glob patterns relative to *data_root*. Defaults cover</span>
+<span class="sd">        ``reduction/jhat_hst``, legacy ``reduction/jhat``, and nested trees.</span>
+<span class="sd">    instruments : sequence of str or None, optional</span>
+<span class="sd">        If set, keep only frames whose ``INSTRUME`` matches (e.g. ``ACS``,</span>
+<span class="sd">        ``WFC3``) so WFPC2 can be excluded from dual-mode warmstarts.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of pathlib.Path</span>
+<span class="sd">        Sorted unique ``*_jhat.fits`` paths.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.helpers</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_instrument</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">data_root</span><span class="p">)</span>
+    <span class="n">pats</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">patterns</span><span class="p">)</span> <span class="k">if</span> <span class="n">patterns</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="p">[</span>
+        <span class="s1">&#39;reduction/jhat_hst/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;reduction/jhat/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;jhat_hst/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;jhat/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;**/reduction/jhat_hst/*_jhat.fits&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;**/reduction/jhat/*_jhat.fits&#39;</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="n">allow</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">instruments</span><span class="p">:</span>
+        <span class="n">allow</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">instruments</span>
+            <span class="k">if</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="ow">and</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;HST&#39;</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">allow</span><span class="p">:</span>
+            <span class="n">allow</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">seen</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_accept</span><span class="p">(</span><span class="n">p</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">p</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">name</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="s1">&#39;mirimage&#39;</span> <span class="ow">in</span> <span class="n">name</span> <span class="ow">or</span> <span class="n">name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;jw&#39;</span><span class="p">):</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">parent</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">parent</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="s1">&#39;/jwst/&#39;</span> <span class="ow">in</span> <span class="n">parent</span> <span class="ow">or</span> <span class="s1">&#39;/miri/&#39;</span> <span class="ow">in</span> <span class="n">parent</span> <span class="ow">or</span> <span class="s1">&#39;/nircam/&#39;</span> <span class="ow">in</span> <span class="n">parent</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">if</span> <span class="n">allow</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">inst</span> <span class="o">=</span> <span class="n">get_instrument</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">False</span>
+            <span class="k">if</span> <span class="n">inst</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">allow</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">False</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+    <span class="k">for</span> <span class="n">pat</span> <span class="ow">in</span> <span class="n">pats</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">root</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="n">pat</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">_accept</span><span class="p">(</span><span class="n">p</span><span class="p">):</span>
+                <span class="n">seen</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">resolve</span><span class="p">())</span>
+        <span class="k">if</span> <span class="n">seen</span><span class="p">:</span>
+            <span class="k">break</span>
+    <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">seen</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">(),</span> <span class="n">p</span><span class="o">.</span><span class="n">name</span><span class="p">))</span></div>
+
+
+
+<div class="viewcode-block" id="setup_hst_warmstart">
+<a class="viewcode-back" href="../../../api.html#st123.photometry.warmstart.setup_hst_warmstart">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_hst_warmstart</span><span class="p">(</span>
+    <span class="n">nircam_rundir</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="n">outdir</span><span class="p">:</span> <span class="n">PathLike</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">hst_jhat</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">data_root</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">instruments</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">photfile</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">dolphot_bin</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">PathLike</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">phot_out</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prepare_hst</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">include_nircam_science</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">use_hardlink</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">xyt_types</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_snr_min</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_crowd_max</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_sharp2_max</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_min_sep_arcsec</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_force_xy</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sequence</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_max_radius_arcsec</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">xyt_center_xy</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prune_xyt_for_hst</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">ncores</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WarmStartResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Create a warm-start DOLPHOT directory with a NIRCam ref + HST science.</span>
+
+<span class="sd">    Stages the NIRCam ``img0`` (and optional NIRCam science), builds</span>
+<span class="sd">    ``warmstart.xyt`` from the NIRCam ``.phot``, then runs</span>
+<span class="sd">    :func:`prepare_hst_frames` on HST JHAT frames with ``hst_base_params``</span>
+<span class="sd">    and ``xytfile``. Does **not** HST-mask the NIRCam reference.</span>
+
+<span class="sd">    Does **not** run ``dolphot``; use :attr:`WarmStartResult.command`.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    nircam_rundir : path-like</span>
+<span class="sd">        Completed NIRCam DOLPHOT run (``dolphot.param`` + ``.phot`` + img0).</span>
+<span class="sd">    outdir : path-like</span>
+<span class="sd">        Staging directory (e.g. ``dolphot/nircam_hst_0_0``).</span>
+<span class="sd">    hst_jhat : sequence of path-like or None, optional</span>
+<span class="sd">        Explicit HST ``*_jhat.fits`` paths. When ``None``, discover under</span>
+<span class="sd">        *data_root* via :func:`discover_hst_jhat`.</span>
+<span class="sd">    data_root : path-like or None, optional</span>
+<span class="sd">        Project root for HST JHAT discovery.</span>
+<span class="sd">    instruments : sequence of str or None, optional</span>
+<span class="sd">        Restrict discovered HST JHAT to these instruments (e.g. ``ACS``,</span>
+<span class="sd">        ``WFC3``). Ignored when *hst_jhat* is given explicitly.</span>
+<span class="sd">    photfile : path-like or None, optional</span>
+<span class="sd">        NIRCam ``.phot`` seed catalog.</span>
+<span class="sd">    dolphot_bin : path-like or None, optional</span>
+<span class="sd">        DOLPHOT ``bin`` override.</span>
+<span class="sd">    phot_out : str or None, optional</span>
+<span class="sd">        Output catalog basename (default ``&lt;stem&gt;_nircam_hst.phot``).</span>
+<span class="sd">    prepare_hst : bool, optional</span>
+<span class="sd">        If True (default), run HST mask/split/calcsky via</span>
+<span class="sd">        :func:`prepare_hst_frames`.</span>
+<span class="sd">    include_nircam_science : bool, optional</span>
+<span class="sd">        If True, also stage NIRCam science frames into the paramfile.</span>
+<span class="sd">        Default False (HST-only photometry on the NIRCam reference).</span>
+<span class="sd">    use_hardlink : bool, optional</span>
+<span class="sd">        Hardlink NIRCam products when possible.</span>
+<span class="sd">    xyt_* / prune_xyt_for_hst :</span>
+<span class="sd">        Seed catalog cuts (see :func:`phot_to_xyt`). When</span>
+<span class="sd">        *prune_xyt_for_hst* is True, apply HST defaults (type=1, SNR≥5, …)</span>
+<span class="sd">        unless overridden.</span>
+<span class="sd">    ncores : int, optional</span>
+<span class="sd">        Parallelism for HST prep and ``MaxThreads`` on the launch command.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    WarmStartResult</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">nircam_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">nircam_rundir</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">outdir</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">out</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="n">param_src</span> <span class="o">=</span> <span class="n">nircam_dir</span> <span class="o">/</span> <span class="s1">&#39;dolphot.param&#39;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">param_src</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;Missing </span><span class="si">{</span><span class="n">param_src</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+
+    <span class="n">ref_base</span><span class="p">,</span> <span class="n">nircam_bases</span> <span class="o">=</span> <span class="n">parse_param_image_list</span><span class="p">(</span><span class="n">param_src</span><span class="p">)</span>
+    <span class="n">phot_src</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">photfile</span><span class="p">)</span> <span class="k">if</span> <span class="n">photfile</span> <span class="k">else</span> <span class="n">find_photfile</span><span class="p">(</span><span class="n">nircam_dir</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">hst_jhat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">hst_sources</span> <span class="o">=</span> <span class="p">[</span><span class="n">Path</span><span class="p">(</span><span class="n">p</span><span class="p">)</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">hst_jhat</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">instruments</span><span class="p">:</span>
+            <span class="c1"># Still honor ACS/WFC3 filters on an explicit path list.</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.helpers</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_instrument</span>
+
+            <span class="n">allow</span> <span class="o">=</span> <span class="p">{</span>
+                <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+                <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">instruments</span>
+                <span class="k">if</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="ow">and</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="o">!=</span> <span class="s1">&#39;HST&#39;</span>
+            <span class="p">}</span>
+            <span class="k">if</span> <span class="n">allow</span><span class="p">:</span>
+                <span class="n">kept</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+                <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="n">hst_sources</span><span class="p">:</span>
+                    <span class="k">try</span><span class="p">:</span>
+                        <span class="n">inst</span> <span class="o">=</span> <span class="n">get_instrument</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+                    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                        <span class="k">continue</span>
+                    <span class="k">if</span> <span class="n">inst</span> <span class="ow">in</span> <span class="n">allow</span><span class="p">:</span>
+                        <span class="n">kept</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+                <span class="n">hst_sources</span> <span class="o">=</span> <span class="n">kept</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">data_root</span><span class="p">)</span> <span class="k">if</span> <span class="n">data_root</span> <span class="k">else</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span>
+        <span class="k">if</span> <span class="n">data_root</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">guess</span> <span class="o">=</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="p">(</span><span class="n">guess</span> <span class="o">/</span> <span class="s1">&#39;reduction&#39;</span> <span class="o">/</span> <span class="s1">&#39;jhat_hst&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span>
+                <span class="ow">or</span> <span class="p">(</span><span class="n">guess</span> <span class="o">/</span> <span class="s1">&#39;reduction&#39;</span> <span class="o">/</span> <span class="s1">&#39;jhat&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span>
+                <span class="ow">or</span> <span class="p">(</span><span class="n">guess</span> <span class="o">/</span> <span class="s1">&#39;HST&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span>
+            <span class="p">):</span>
+                <span class="n">root</span> <span class="o">=</span> <span class="n">guess</span>
+            <span class="k">elif</span> <span class="p">(</span><span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s1">&#39;reduction&#39;</span> <span class="o">/</span> <span class="s1">&#39;jhat_hst&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">or</span> <span class="p">(</span>
+                <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s1">&#39;reduction&#39;</span> <span class="o">/</span> <span class="s1">&#39;jhat&#39;</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+                <span class="n">root</span> <span class="o">=</span> <span class="n">nircam_dir</span><span class="o">.</span><span class="n">parent</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">root</span> <span class="o">=</span> <span class="n">guess</span>
+        <span class="n">hst_sources</span> <span class="o">=</span> <span class="n">discover_hst_jhat</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="n">instruments</span><span class="o">=</span><span class="n">instruments</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">hst_sources</span><span class="p">:</span>
+        <span class="n">inst_msg</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39; for instruments </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">instruments</span><span class="p">)</span><span class="si">}</span><span class="s1">&#39;</span> <span class="k">if</span> <span class="n">instruments</span> <span class="k">else</span> <span class="s1">&#39;&#39;</span>
+        <span class="p">)</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;No HST *_jhat.fits frames found</span><span class="si">{</span><span class="n">inst_msg</span><span class="si">}</span><span class="s1">; &#39;</span>
+            <span class="s1">&#39;pass hst_jhat=... or align HST first&#39;</span>
+        <span class="p">)</span>
+
+    <span class="n">science_bases</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">nircam_bases</span><span class="p">)</span> <span class="k">if</span> <span class="n">include_nircam_science</span> <span class="k">else</span> <span class="p">[]</span>
+    <span class="n">ref_dst</span><span class="p">,</span> <span class="n">nircam_staged</span> <span class="o">=</span> <span class="n">_stage_nircam_products</span><span class="p">(</span>
+        <span class="n">nircam_dir</span><span class="p">,</span>
+        <span class="n">out</span><span class="p">,</span>
+        <span class="n">ref_base</span><span class="p">,</span>
+        <span class="n">science_bases</span><span class="p">,</span>
+        <span class="n">use_hardlink</span><span class="o">=</span><span class="n">use_hardlink</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">prune_xyt_for_hst</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">xyt_types</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_types</span> <span class="o">=</span> <span class="n">HST_WARMSTART_XYT_TYPES</span>
+        <span class="k">if</span> <span class="n">xyt_snr_min</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_snr_min</span> <span class="o">=</span> <span class="n">HST_WARMSTART_SNR_MIN</span>
+        <span class="k">if</span> <span class="n">xyt_crowd_max</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_crowd_max</span> <span class="o">=</span> <span class="n">HST_WARMSTART_CROWD_MAX</span>
+        <span class="k">if</span> <span class="n">xyt_sharp2_max</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_sharp2_max</span> <span class="o">=</span> <span class="n">HST_WARMSTART_SHARP2_MAX</span>
+        <span class="k">if</span> <span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">xyt_min_sep_arcsec</span> <span class="o">=</span> <span class="n">HST_WARMSTART_MIN_SEP_ARCSEC</span>
+
+    <span class="n">min_sep_pix</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">max_radius_pix</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">need_pixscale</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="p">(</span><span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_min_sep_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="ow">or</span> <span class="p">(</span><span class="n">xyt_max_radius_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_max_radius_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">need_pixscale</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">astropy.wcs</span><span class="w"> </span><span class="kn">import</span> <span class="n">WCS</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">astropy.units</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">u</span>
+
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">ref_dst</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="n">sci</span> <span class="o">=</span> <span class="n">hdul</span><span class="p">[</span><span class="s1">&#39;SCI&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">in</span> <span class="n">hdul</span> <span class="k">else</span> <span class="n">hdul</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">pixscale</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span>
+                <span class="nb">abs</span><span class="p">(</span><span class="n">WCS</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="p">)</span><span class="o">.</span><span class="n">proj_plane_pixel_scales</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">arcsec</span><span class="p">)</span><span class="o">.</span><span class="n">value</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">xyt_min_sep_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_min_sep_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">min_sep_pix</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">xyt_min_sep_arcsec</span><span class="p">)</span> <span class="o">/</span> <span class="n">pixscale</span>
+        <span class="k">if</span> <span class="n">xyt_max_radius_arcsec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xyt_max_radius_arcsec</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">max_radius_pix</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">xyt_max_radius_arcsec</span><span class="p">)</span> <span class="o">/</span> <span class="n">pixscale</span>
+
+    <span class="n">xyt_path</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;warmstart.xyt&#39;</span>
+    <span class="n">phot_to_xyt</span><span class="p">(</span>
+        <span class="n">phot_src</span><span class="p">,</span>
+        <span class="n">xyt_path</span><span class="p">,</span>
+        <span class="n">types</span><span class="o">=</span><span class="n">xyt_types</span><span class="p">,</span>
+        <span class="n">snr_min</span><span class="o">=</span><span class="n">xyt_snr_min</span><span class="p">,</span>
+        <span class="n">crowd_max</span><span class="o">=</span><span class="n">xyt_crowd_max</span><span class="p">,</span>
+        <span class="n">sharp2_max</span><span class="o">=</span><span class="n">xyt_sharp2_max</span><span class="p">,</span>
+        <span class="n">min_sep_pix</span><span class="o">=</span><span class="n">min_sep_pix</span><span class="p">,</span>
+        <span class="n">force_xy</span><span class="o">=</span><span class="n">xyt_force_xy</span><span class="p">,</span>
+        <span class="n">center_xy</span><span class="o">=</span><span class="n">xyt_center_xy</span><span class="p">,</span>
+        <span class="n">max_radius_pix</span><span class="o">=</span><span class="n">max_radius_pix</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">phot_out</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">stem</span> <span class="o">=</span> <span class="n">phot_src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;.phot&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+        <span class="n">phot_out</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">stem</span><span class="si">}</span><span class="s1">_nircam_hst.phot&#39;</span>
+
+    <span class="c1"># Stage HST JHAT into outdir (writable copies for mask/split).</span>
+    <span class="n">hst_staged_src</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">src</span> <span class="ow">in</span> <span class="n">hst_sources</span><span class="p">:</span>
+        <span class="n">dst</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="n">src</span><span class="o">.</span><span class="n">name</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">dst</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span> <span class="ow">or</span> <span class="n">dst</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span> <span class="o">!=</span> <span class="n">src</span><span class="o">.</span><span class="n">resolve</span><span class="p">():</span>
+            <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">dst</span><span class="p">)</span>
+        <span class="n">hst_staged_src</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">dst</span><span class="p">)</span>
+        <span class="c1"># WFPC2 c1m beside JHAT when available (prepare_hst_frames also searches).</span>
+        <span class="n">c1</span> <span class="o">=</span> <span class="n">src</span><span class="o">.</span><span class="n">with_name</span><span class="p">(</span><span class="n">src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_jhat.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;_c1m.fits&#39;</span><span class="p">))</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">c1</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="n">alt</span> <span class="o">=</span> <span class="n">src</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="p">(</span><span class="n">src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_jhat.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span> <span class="o">+</span> <span class="s1">&#39;_c1m.fits&#39;</span><span class="p">)</span>
+            <span class="n">c1</span> <span class="o">=</span> <span class="n">alt</span> <span class="k">if</span> <span class="n">alt</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span> <span class="k">else</span> <span class="n">c1</span>
+        <span class="c1"># Also try raw stem without _jhat</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">c1</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="n">stem</span> <span class="o">=</span> <span class="n">src</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_jhat.fits&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">cand</span> <span class="ow">in</span> <span class="p">(</span>
+                <span class="n">src</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">stem</span><span class="si">}</span><span class="s1">_c1m.fits&#39;</span><span class="p">,</span>
+                <span class="n">src</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s1">&#39;raw&#39;</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">stem</span><span class="si">}</span><span class="s1">_c1m.fits&#39;</span><span class="p">,</span>
+            <span class="p">):</span>
+                <span class="k">if</span> <span class="n">cand</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                    <span class="n">c1</span> <span class="o">=</span> <span class="n">cand</span>
+                    <span class="k">break</span>
+        <span class="k">if</span> <span class="n">c1</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="n">c1_dst</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="n">c1</span><span class="o">.</span><span class="n">name</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">c1_dst</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+                <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">c1</span><span class="p">,</span> <span class="n">c1_dst</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">prepare_hst</span><span class="p">:</span>
+        <span class="n">param_path</span> <span class="o">=</span> <span class="n">prepare_hst_frames</span><span class="p">(</span>
+            <span class="n">hst_staged_src</span><span class="p">,</span>
+            <span class="n">out</span><span class="p">,</span>
+            <span class="n">instrument</span><span class="o">=</span><span class="s1">&#39;hst&#39;</span><span class="p">,</span>
+            <span class="n">refimage</span><span class="o">=</span><span class="n">ref_dst</span><span class="p">,</span>
+            <span class="n">dolphot_bin</span><span class="o">=</span><span class="n">dolphot_bin</span><span class="p">,</span>
+            <span class="n">copy_files</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">ncores</span><span class="o">=</span><span class="n">ncores</span><span class="p">,</span>
+            <span class="n">xytfile</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="c1"># prepare_hst_frames always sets phot_out to out.name.phot; rewrite</span>
+        <span class="c1"># when a custom name / NIRCam science inclusion is requested.</span>
+        <span class="n">text</span> <span class="o">=</span> <span class="n">param_path</span><span class="o">.</span><span class="n">read_text</span><span class="p">()</span>
+        <span class="c1"># Ensure hst_base_params and xytfile survived.</span>
+        <span class="k">if</span> <span class="s1">&#39;xytfile&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+            <span class="n">text</span> <span class="o">=</span> <span class="n">text</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span> <span class="o">+</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="se">\n</span><span class="s1">xytfile = </span><span class="si">{</span><span class="n">xyt_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+            <span class="n">param_path</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">text</span><span class="p">)</span>
+        <span class="c1"># Optionally append NIRCam science frames to the param image list.</span>
+        <span class="k">if</span> <span class="n">include_nircam_science</span> <span class="ow">and</span> <span class="n">nircam_staged</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">st123.photometry.dolphot</span><span class="w"> </span><span class="kn">import</span> <span class="n">write_paramfile</span>
+
+            <span class="c1"># Re-parse science chips produced by prepare_hst_frames.</span>
+            <span class="n">_</span><span class="p">,</span> <span class="n">hst_bases</span> <span class="o">=</span> <span class="n">parse_param_image_list</span><span class="p">(</span><span class="n">param_path</span><span class="p">)</span>
+            <span class="n">hst_paths</span> <span class="o">=</span> <span class="p">[</span><span class="n">out</span> <span class="o">/</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">b</span><span class="si">}</span><span class="s1">.fits&#39;</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">hst_bases</span><span class="p">]</span>
+            <span class="n">all_images</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">nircam_staged</span><span class="p">)</span> <span class="o">+</span> <span class="p">[</span>
+                <span class="n">p</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">hst_paths</span> <span class="k">if</span> <span class="n">p</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span>
+            <span class="p">]</span>
+            <span class="n">write_paramfile</span><span class="p">(</span>
+                <span class="n">param_path</span><span class="p">,</span>
+                <span class="n">refimage</span><span class="o">=</span><span class="n">ref_dst</span><span class="p">,</span>
+                <span class="n">images</span><span class="o">=</span><span class="n">all_images</span><span class="p">,</span>
+                <span class="n">global_params</span><span class="o">=</span><span class="n">hst_base_params</span><span class="p">,</span>
+                <span class="n">xytfile</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="c1"># Prefer user phot_out name in the launch command even if param</span>
+        <span class="c1"># still lists the default staging name.</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">st123.photometry.dolphot</span><span class="w"> </span><span class="kn">import</span> <span class="n">write_paramfile</span>
+
+        <span class="n">write_paramfile</span><span class="p">(</span>
+            <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;dolphot.param&#39;</span><span class="p">,</span>
+            <span class="n">refimage</span><span class="o">=</span><span class="n">ref_dst</span><span class="p">,</span>
+            <span class="n">images</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">nircam_staged</span><span class="p">)</span> <span class="o">+</span> <span class="nb">list</span><span class="p">(</span><span class="n">hst_staged_src</span><span class="p">),</span>
+            <span class="n">global_params</span><span class="o">=</span><span class="n">hst_base_params</span><span class="p">,</span>
+            <span class="n">xytfile</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">param_path</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;dolphot.param&#39;</span>
+
+    <span class="c1"># Collect staged HST chip / MEF products listed in the paramfile.</span>
+    <span class="n">_</span><span class="p">,</span> <span class="n">sci_bases</span> <span class="o">=</span> <span class="n">parse_param_image_list</span><span class="p">(</span><span class="n">param_path</span><span class="p">)</span>
+    <span class="n">nircam_stems</span> <span class="o">=</span> <span class="p">{</span><span class="n">Path</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">.</span><span class="n">stem</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">nircam_staged</span><span class="p">}</span> <span class="o">|</span> <span class="p">{</span><span class="n">ref_base</span><span class="p">}</span>
+    <span class="n">hst_names</span> <span class="o">=</span> <span class="p">[</span><span class="n">b</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">sci_bases</span> <span class="k">if</span> <span class="n">b</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">nircam_stems</span><span class="p">]</span>
+
+    <span class="n">cmd</span> <span class="o">=</span> <span class="n">dolphot_command</span><span class="p">(</span>
+        <span class="n">out</span><span class="p">,</span>
+        <span class="n">phot_out</span><span class="o">=</span><span class="n">phot_out</span><span class="p">,</span>
+        <span class="n">param_file</span><span class="o">=</span><span class="n">param_path</span><span class="p">,</span>
+        <span class="n">dolphot_bin</span><span class="o">=</span><span class="n">dolphot_bin</span><span class="p">,</span>
+        <span class="n">ncores</span><span class="o">=</span><span class="n">ncores</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">n_xyt</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="mi">1</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">xyt_path</span><span class="o">.</span><span class="n">open</span><span class="p">())</span>
+    <span class="n">readme</span> <span class="o">=</span> <span class="n">out</span> <span class="o">/</span> <span class="s1">&#39;WARMSTART_README.txt&#39;</span>
+    <span class="n">readme</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span>
+        <span class="s1">&#39;DOLPHOT NIRCam→HST warm-start run</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;NIRCam source: </span><span class="si">{</span><span class="n">nircam_dir</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Photometry seed: </span><span class="si">{</span><span class="n">phot_src</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Reference (img0): </span><span class="si">{</span><span class="n">ref_dst</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xytfile: </span><span class="si">{</span><span class="n">xyt_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s1"> (</span><span class="si">{</span><span class="n">n_xyt</span><span class="si">}</span><span class="s1"> stars)</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt prune_for_hst: </span><span class="si">{</span><span class="n">prune_xyt_for_hst</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt types: </span><span class="si">{</span><span class="nb">list</span><span class="p">(</span><span class="n">xyt_types</span><span class="p">)</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">xyt_types</span><span class="w"> </span><span class="ow">is</span><span class="w"> </span><span class="ow">not</span><span class="w"> </span><span class="kc">None</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="kc">None</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt snr_min: </span><span class="si">{</span><span class="n">xyt_snr_min</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt crowd_max: </span><span class="si">{</span><span class="n">xyt_crowd_max</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt sharp2_max: </span><span class="si">{</span><span class="n">xyt_sharp2_max</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;xyt min_sep_arcsec: </span><span class="si">{</span><span class="n">xyt_min_sep_arcsec</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;NIRCam science frames: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">nircam_staged</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;HST JHAT inputs: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">hst_sources</span><span class="p">)</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Parameter file: </span><span class="si">{</span><span class="n">param_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Phot output: </span><span class="si">{</span><span class="n">phot_out</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;Globals: UseWCS=2 Align=0 Force1=1 PSFres=0 (hst_base_params)</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="s1">&#39;</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="s1">&#39;Launch (not run by setup):</span><span class="se">\n</span><span class="s1">&#39;</span>
+        <span class="sa">f</span><span class="s1">&#39;  </span><span class="si">{</span><span class="n">cmd</span><span class="si">}</span><span class="se">\n</span><span class="s1">&#39;</span>
+    <span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">WarmStartResult</span><span class="p">(</span>
+        <span class="n">outdir</span><span class="o">=</span><span class="n">out</span><span class="p">,</span>
+        <span class="n">param_file</span><span class="o">=</span><span class="n">param_path</span><span class="p">,</span>
+        <span class="n">xyt_file</span><span class="o">=</span><span class="n">xyt_path</span><span class="p">,</span>
+        <span class="n">phot_out</span><span class="o">=</span><span class="n">phot_out</span><span class="p">,</span>
+        <span class="n">nircam_images</span><span class="o">=</span><span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">nircam_staged</span><span class="p">],</span>
+        <span class="n">hst_images</span><span class="o">=</span><span class="n">hst_names</span><span class="p">,</span>
+        <span class="n">command</span><span class="o">=</span><span class="n">cmd</span><span class="p">,</span>
+        <span class="n">commands</span><span class="o">=</span><span class="p">[</span><span class="n">cmd</span><span class="p">],</span>
+    <span class="p">)</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025–2026, C. D. Kilpatrick &amp; A. Suresh.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

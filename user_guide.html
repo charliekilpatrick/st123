@@ -1,0 +1,183 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>User guide &mdash; st123 0.1.1.dev25+gb984091e0</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" href="_static/st123-docs.css" type="text/css" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=840d7aea"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Changelog" href="changelog.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            st123
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">User guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#typical-workflow">Typical workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#work-directory-layout">Work-directory layout</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#console-scripts">Console scripts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#supported-instruments">Supported instruments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#tips">Tips</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">st123</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">User guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/user_guide.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="user-guide">
+<h1>User guide<a class="headerlink" href="#user-guide" title="Link to this heading"></a></h1>
+<section id="typical-workflow">
+<h2>Typical workflow<a class="headerlink" href="#typical-workflow" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p><strong>Query / download</strong> products from MAST (<code class="docutils literal notranslate"><span class="pre">download</span></code>, or library
+helpers in <a class="reference internal" href="api.html#module-st123.mast" title="st123.mast"><code class="xref py py-mod docutils literal notranslate"><span class="pre">st123.mast</span></code></a>).</p></li>
+<li><p><strong>Align</strong> JWST frames with JHAT (<code class="docutils literal notranslate"><span class="pre">align</span></code> and related helpers under
+<a class="reference internal" href="api.html#module-st123.alignment" title="st123.alignment"><code class="xref py py-mod docutils literal notranslate"><span class="pre">st123.alignment</span></code></a>).</p></li>
+<li><p><strong>Mosaic / coadd</strong> (<code class="docutils literal notranslate"><span class="pre">mosaic</span></code>) under <a class="reference internal" href="api.html#module-st123.mosaic" title="st123.mosaic"><code class="xref py py-mod docutils literal notranslate"><span class="pre">st123.mosaic</span></code></a>. Each
+<code class="docutils literal notranslate"><span class="pre">reference/group_*/ref_*</span></code> box gets a shared sky stamp
+(<code class="docutils literal notranslate"><span class="pre">stamp_wcs.fits</span></code>); JWST filters and HST drizzle products are built on
+that footprint so missions stay registered.</p></li>
+<li><p><strong>Prepare DOLPHOT</strong> (<code class="docutils literal notranslate"><span class="pre">dolphot-prep</span></code>) and run the external <code class="docutils literal notranslate"><span class="pre">dolphot</span></code>
+binary. Warm-start options via <code class="docutils literal notranslate"><span class="pre">dolphot-warmstart</span></code>
+(<a class="reference internal" href="api.html#module-st123.photometry" title="st123.photometry"><code class="xref py py-mod docutils literal notranslate"><span class="pre">st123.photometry</span></code></a>): NIRCam→MIRI (<code class="docutils literal notranslate"><span class="pre">--target</span> <span class="pre">miri</span></code>, default) or
+NIRCam reference/catalog → HST science (<code class="docutils literal notranslate"><span class="pre">--target</span> <span class="pre">hst</span></code>). See the README
+“HST one-target end-to-end” and “HST warmstart from NIRCam” sections for
+recommended globals (<code class="docutils literal notranslate"><span class="pre">UseWCS=2</span></code>, <code class="docutils literal notranslate"><span class="pre">Align=0</span></code>, <code class="docutils literal notranslate"><span class="pre">Force1=1</span></code>) and QA.</p></li>
+<li><p><strong>Catalog</strong> photometry products (<code class="docutils literal notranslate"><span class="pre">catalog</span></code>), or scrape a <code class="docutils literal notranslate"><span class="pre">.phot</span></code> with
+<a class="reference internal" href="api.html#st123.photometry.dolphot.nearest_phot_source" title="st123.photometry.dolphot.nearest_phot_source"><code class="xref py py-func docutils literal notranslate"><span class="pre">st123.photometry.dolphot.nearest_phot_source()</span></code></a>.</p></li>
+</ol>
+</section>
+<section id="work-directory-layout">
+<h2>Work-directory layout<a class="headerlink" href="#work-directory-layout" title="Link to this heading"></a></h2>
+<p>CLIs generally take a <code class="docutils literal notranslate"><span class="pre">--base-dir</span></code> (or similar) pointing at a reduction
+root. Logs are written under <code class="docutils literal notranslate"><span class="pre">&lt;base-dir&gt;/logs/</span></code> when package logging is
+enabled. Instrument / filter products are typically arranged under
+telescope and instrument directories after MAST download.</p>
+</section>
+<section id="console-scripts">
+<h2>Console scripts<a class="headerlink" href="#console-scripts" title="Link to this heading"></a></h2>
+<p>Installed entry points (see <code class="docutils literal notranslate"><span class="pre">pyproject.toml</span></code> <code class="docutils literal notranslate"><span class="pre">[project.scripts]</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">download</span></code> — MAST query / download</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">align</span></code> — JHAT alignment</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mosaic</span></code> — mosaicking / coadds</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">link-raw</span></code>, <code class="docutils literal notranslate"><span class="pre">image-overlap</span></code>, <code class="docutils literal notranslate"><span class="pre">region</span></code> — path / footprint helpers</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dolphot-prep</span></code> — DOLPHOT mask / calcsky / paramfile prep
+(console name kept distinct from the <code class="docutils literal notranslate"><span class="pre">dolphot</span></code> binary)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dolphot-warmstart</span></code> — NIRCam→MIRI or NIRCam→HST warm-start setup</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">catalog</span></code> — combined photometry catalogs</p></li>
+</ul>
+<p>Run <code class="docutils literal notranslate"><span class="pre">&lt;command&gt;</span> <span class="pre">--help</span></code> for options. Shared knobs such as <code class="docutils literal notranslate"><span class="pre">--ncores</span></code>
+propagate into DOLPHOT <code class="docutils literal notranslate"><span class="pre">MaxThreads</span></code> and other parallel stages where
+applicable.</p>
+</section>
+<section id="supported-instruments">
+<h2>Supported instruments<a class="headerlink" href="#supported-instruments" title="Link to this heading"></a></h2>
+<p>Filter / instrument tables live in <a class="reference internal" href="api.html#module-st123.utils.settings" title="st123.utils.settings"><code class="xref py py-mod docutils literal notranslate"><span class="pre">st123.utils.settings</span></code></a>
+(<code class="docutils literal notranslate"><span class="pre">acceptable_filters</span></code>, <code class="docutils literal notranslate"><span class="pre">FILTERS_BY_INSTRUMENT</span></code>), covering HST
+(WFPC2, ACS, WFC3), JWST (NIRCam, MIRI), Roman, and Euclid groups used
+for validation and MAST filtering.</p>
+</section>
+<section id="tips">
+<h2>Tips<a class="headerlink" href="#tips" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Prefer an editable install (<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">-e</span> <span class="pre">.</span></code>) so the repo-local
+JHAT under <code class="docutils literal notranslate"><span class="pre">extdeps/jhat/</span></code> is used.</p></li>
+<li><p>Put the DOLPHOT <code class="docutils literal notranslate"><span class="pre">bin</span></code> directory on <code class="docutils literal notranslate"><span class="pre">PATH</span></code> before <code class="docutils literal notranslate"><span class="pre">dolphot-prep</span></code> /
+running <code class="docutils literal notranslate"><span class="pre">dolphot</span></code>.</p></li>
+<li><p>For network tests or live MAST queries, set a MAST token via the usual
+environment / <code class="docutils literal notranslate"><span class="pre">astroquery</span></code> mechanisms.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="changelog.html" class="btn btn-neutral float-right" title="Changelog" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025–2026, C. D. Kilpatrick &amp; A. Suresh.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,649 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>st123.mosaic.image_overlap &mdash; st123 0.1.1.dev25+gb984091e0</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" href="../../../_static/st123-docs.css" type="text/css" />
+
+  
+      <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../_static/documentation_options.js?v=840d7aea"></script>
+      <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            st123
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../user_guide.html">User guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api.html">API</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">st123</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">st123.mosaic.image_overlap</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for st123.mosaic.image_overlap</h1><div class="highlight"><pre>
+<span></span><span class="ch">#!/usr/bin/env python</span>
+<span class="sd">&quot;&quot;&quot;Compute science / reference image footprint overlap from S_REGION polygons.&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy</span><span class="w"> </span><span class="kn">import</span> <span class="n">units</span> <span class="k">as</span> <span class="n">u</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.io</span><span class="w"> </span><span class="kn">import</span> <span class="n">fits</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.wcs</span><span class="w"> </span><span class="kn">import</span> <span class="n">WCS</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">shapely.geometry</span><span class="w"> </span><span class="kn">import</span> <span class="n">Polygon</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">shapely.ops</span><span class="w"> </span><span class="kn">import</span> <span class="n">unary_union</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.mosaic.region</span><span class="w"> </span><span class="kn">import</span> <span class="n">SRegionPolygon</span><span class="p">,</span> <span class="n">illuminated_s_region_from_fits</span>
+
+<span class="n">warnings</span><span class="o">.</span><span class="n">filterwarnings</span><span class="p">(</span><span class="s1">&#39;ignore&#39;</span><span class="p">)</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="AreaMetrics">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.AreaMetrics">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">AreaMetrics</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Area in science-image pixel units, with solid-angle and ROI-fraction context.</span>
+
+<span class="sd">    Attributes</span>
+<span class="sd">    ----------</span>
+<span class="sd">    pixels2 : float</span>
+<span class="sd">        Area in science detector pixels squared.</span>
+<span class="sd">    arcmin2 : float</span>
+<span class="sd">        Solid angle in square arcminutes.</span>
+<span class="sd">    fraction_of_roi : float</span>
+<span class="sd">        Fraction of the illuminated science ROI (0–1, or NaN if ROI area is zero).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">pixels2</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">arcmin2</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">fraction_of_roi</span><span class="p">:</span> <span class="nb">float</span>
+
+<div class="viewcode-block" id="AreaMetrics.from_pixels">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.AreaMetrics.from_pixels">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_pixels</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span>
+        <span class="n">area_pix2</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+        <span class="n">pix_area_arcmin2</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+        <span class="n">roi_pix2</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AreaMetrics</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Build metrics from a pixel area and calibration constants.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        area_pix2 : float</span>
+<span class="sd">            Area in science detector pixels squared.</span>
+<span class="sd">        pix_area_arcmin2 : float</span>
+<span class="sd">            Solid angle of one science pixel in square arcminutes.</span>
+<span class="sd">        roi_pix2 : float</span>
+<span class="sd">            Total illuminated ROI area in science pixels squared.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        AreaMetrics</span>
+<span class="sd">            Computed area metrics.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">frac</span> <span class="o">=</span> <span class="n">area_pix2</span> <span class="o">/</span> <span class="n">roi_pix2</span> <span class="k">if</span> <span class="n">roi_pix2</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="s1">&#39;nan&#39;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">pixels2</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">area_pix2</span><span class="p">),</span>
+            <span class="n">arcmin2</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="n">area_pix2</span><span class="p">)</span> <span class="o">*</span> <span class="n">pix_area_arcmin2</span><span class="p">,</span>
+            <span class="n">fraction_of_roi</span><span class="o">=</span><span class="n">frac</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">fraction_of_miri_roi</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Alias for :attr:`fraction_of_roi` used by the MIRI alignment pipeline.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        float</span>
+<span class="sd">            Same value as :attr:`fraction_of_roi`.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">fraction_of_roi</span>
+
+<div class="viewcode-block" id="AreaMetrics.format">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.AreaMetrics.format">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">format</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return a human-readable summary of all area fields.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        str</span>
+<span class="sd">            Formatted string with pixels², arcmin², and ROI fraction.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">pixels2</span><span class="si">:</span><span class="s1">.3f</span><span class="si">}</span><span class="s1"> pixels^2 | </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">arcmin2</span><span class="si">:</span><span class="s1">.6f</span><span class="si">}</span><span class="s1"> arcmin^2 | &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">fraction_of_roi</span><span class="si">:</span><span class="s1">.4f</span><span class="si">}</span><span class="s1"> of illuminated ROI&#39;</span>
+        <span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="ScienceFootprint">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.ScienceFootprint">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">ScienceFootprint</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Illuminated science footprint (sky S_REGION + on-detector pixel polygon).</span>
+
+<span class="sd">    See also :data:`MirIFootprint`, an alias for this class used in MIRI notebooks</span>
+<span class="sd">    and alignment call sites.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">s_region</span><span class="p">:</span> <span class="n">SRegionPolygon</span>
+    <span class="n">wcs</span><span class="p">:</span> <span class="n">WCS</span>
+    <span class="n">polygon</span><span class="p">:</span> <span class="n">Polygon</span>
+    <span class="n">pixel_area_arcmin2</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">center_ra_deg</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">center_dec_deg</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">sky_polygon_arcsec</span><span class="p">:</span> <span class="n">Polygon</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">area</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AreaMetrics</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Area metrics for the full illuminated science footprint.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        AreaMetrics</span>
+<span class="sd">            Metrics for the on-detector pixel polygon.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">AreaMetrics</span><span class="o">.</span><span class="n">from_pixels</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">polygon</span><span class="o">.</span><span class="n">area</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pixel_area_arcmin2</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">polygon</span><span class="o">.</span><span class="n">area</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pixel_area_arcsec2</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Solid angle of one science pixel in square arcseconds.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        float</span>
+<span class="sd">            Pixel solid angle derived from :attr:`pixel_area_arcmin2`.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pixel_area_arcmin2</span> <span class="o">*</span> <span class="mf">3600.0</span>
+
+<div class="viewcode-block" id="ScienceFootprint.from_fits">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.ScienceFootprint.from_fits">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_fits</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ScienceFootprint</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Load an illuminated footprint from a science FITS file.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        path : str</span>
+<span class="sd">            Path to a science FITS file with ``S_REGION`` and WCS headers.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        ScienceFootprint</span>
+<span class="sd">            Parsed footprint with sky and pixel polygons.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">s_region</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">wcs</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">illuminated_s_region_from_fits</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="n">verts</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s_region</span><span class="o">.</span><span class="n">vertices</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+        <span class="n">center_ra</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">verts</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]))</span>
+        <span class="n">center_dec</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">verts</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]))</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">path</span><span class="o">=</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">s_region</span><span class="o">=</span><span class="n">s_region</span><span class="p">,</span>
+            <span class="n">wcs</span><span class="o">=</span><span class="n">wcs</span><span class="p">,</span>
+            <span class="n">polygon</span><span class="o">=</span><span class="n">s_region</span><span class="o">.</span><span class="n">to_pixel_polygon</span><span class="p">(</span><span class="n">wcs</span><span class="p">),</span>
+            <span class="n">pixel_area_arcmin2</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span>
+                <span class="n">wcs</span><span class="o">.</span><span class="n">proj_plane_pixel_area</span><span class="p">()</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">arcmin</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">value</span>
+            <span class="p">),</span>
+            <span class="n">center_ra_deg</span><span class="o">=</span><span class="n">center_ra</span><span class="p">,</span>
+            <span class="n">center_dec_deg</span><span class="o">=</span><span class="n">center_dec</span><span class="p">,</span>
+            <span class="n">sky_polygon_arcsec</span><span class="o">=</span><span class="n">s_region</span><span class="o">.</span><span class="n">to_tangent_polygon</span><span class="p">(</span><span class="n">center_ra</span><span class="p">,</span> <span class="n">center_dec</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="ScienceFootprint.metrics">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.ScienceFootprint.metrics">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">metrics</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">area_pix2</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AreaMetrics</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Convert a pixel area into :class:`AreaMetrics` for this footprint.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        area_pix2 : float</span>
+<span class="sd">            Area in science detector pixels squared.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        AreaMetrics</span>
+<span class="sd">            Metrics normalized to the illuminated ROI of this footprint.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">AreaMetrics</span><span class="o">.</span><span class="n">from_pixels</span><span class="p">(</span>
+            <span class="n">area_pix2</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pixel_area_arcmin2</span><span class="p">,</span>
+            <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">polygon</span><span class="o">.</span><span class="n">area</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="ScienceFootprint.metrics_from_sky_arcsec2">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.ScienceFootprint.metrics_from_sky_arcsec2">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">metrics_from_sky_arcsec2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">area_arcsec2</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AreaMetrics</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Convert a tangent-plane area (arcsec²) into science-pixel metrics.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        area_arcsec2 : float</span>
+<span class="sd">            Area in square arcseconds on the local sky tangent plane.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        AreaMetrics</span>
+<span class="sd">            Equivalent area expressed in science pixels and ROI fraction.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">pix_area</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">pixel_area_arcsec2</span>
+        <span class="n">area_pix2</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">area_arcsec2</span><span class="p">)</span> <span class="o">/</span> <span class="n">pix_area</span> <span class="k">if</span> <span class="n">pix_area</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">roi_pix2</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="o">.</span><span class="n">area</span><span class="p">)</span> <span class="o">/</span> <span class="n">pix_area</span> <span class="k">if</span> <span class="n">pix_area</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">AreaMetrics</span><span class="o">.</span><span class="n">from_pixels</span><span class="p">(</span>
+            <span class="n">area_pix2</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pixel_area_arcmin2</span><span class="p">,</span>
+            <span class="n">roi_pix2</span><span class="p">,</span>
+        <span class="p">)</span></div>
+</div>
+
+
+
+<span class="c1"># Alias for :class:`ScienceFootprint` (MIRI pipeline / notebook naming).</span>
+<span class="n">MirIFootprint</span> <span class="o">=</span> <span class="n">ScienceFootprint</span>
+
+
+<div class="viewcode-block" id="OverlapResult">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.OverlapResult">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">OverlapResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Overlap of one reference footprint with a science illuminated footprint.</span>
+
+<span class="sd">    Attributes</span>
+<span class="sd">    ----------</span>
+<span class="sd">    ref_path : str</span>
+<span class="sd">        Path to the reference FITS file.</span>
+<span class="sd">    ref_s_region : SRegionPolygon</span>
+<span class="sd">        Parsed ``S_REGION`` polygon from the reference header.</span>
+<span class="sd">    ref_area : AreaMetrics</span>
+<span class="sd">        Reference footprint area expressed in science-pixel units.</span>
+<span class="sd">    overlap_area : AreaMetrics</span>
+<span class="sd">        Intersection area expressed in science-pixel units.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">ref_path</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">ref_s_region</span><span class="p">:</span> <span class="n">SRegionPolygon</span>
+    <span class="n">ref_area</span><span class="p">:</span> <span class="n">AreaMetrics</span>
+    <span class="n">overlap_area</span><span class="p">:</span> <span class="n">AreaMetrics</span></div>
+
+
+
+<div class="viewcode-block" id="BestOverlap">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.BestOverlap">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">BestOverlap</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Best-matching reference for a single science frame.</span>
+
+<span class="sd">    Attributes</span>
+<span class="sd">    ----------</span>
+<span class="sd">    science_path : str</span>
+<span class="sd">        Path to the science FITS file.</span>
+<span class="sd">    ref_path : str or None</span>
+<span class="sd">        Path to the best-matching reference, or ``None`` if no overlap was found.</span>
+<span class="sd">    overlap_area : AreaMetrics</span>
+<span class="sd">        Overlap area for the chosen reference (zero if ``ref_path`` is ``None``).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">science_path</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">ref_path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="n">overlap_area</span><span class="p">:</span> <span class="n">AreaMetrics</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">miri_path</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Alias for :attr:`science_path` used by the MIRI alignment pipeline.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        str</span>
+<span class="sd">            Same value as :attr:`science_path`.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">science_path</span></div>
+
+
+
+<div class="viewcode-block" id="load_header_s_region">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.load_header_s_region">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">load_header_s_region</span><span class="p">(</span><span class="n">fits_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">extname</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;SCI&#39;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SRegionPolygon</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parse ``S_REGION`` from a FITS science header.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    fits_path : str</span>
+<span class="sd">        Path to a FITS file containing an ``S_REGION`` keyword.</span>
+<span class="sd">    extname : str, optional</span>
+<span class="sd">        HDU extension name to read (default ``&#39;SCI&#39;``).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    SRegionPolygon</span>
+<span class="sd">        Parsed sky polygon from the header.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">fits_path</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">SRegionPolygon</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">hdul</span><span class="p">[</span><span class="n">extname</span><span class="p">]</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;S_REGION&#39;</span><span class="p">])</span></div>
+
+
+
+<div class="viewcode-block" id="polygon_area">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.polygon_area">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">polygon_area</span><span class="p">(</span><span class="n">polygon</span><span class="p">:</span> <span class="n">Polygon</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return Shapely polygon area, or 0 for an empty geometry.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    polygon : Polygon</span>
+<span class="sd">        Shapely polygon (typically in arcsecond offsets or pixel coordinates).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    float</span>
+<span class="sd">        Polygon area, or ``0.0`` when ``polygon`` is empty.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="mf">0.0</span> <span class="k">if</span> <span class="n">polygon</span><span class="o">.</span><span class="n">is_empty</span> <span class="k">else</span> <span class="nb">float</span><span class="p">(</span><span class="n">polygon</span><span class="o">.</span><span class="n">area</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="compute_overlap">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.compute_overlap">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">compute_overlap</span><span class="p">(</span><span class="n">science</span><span class="p">:</span> <span class="n">ScienceFootprint</span><span class="p">,</span> <span class="n">ref_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OverlapResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute footprint overlap in a local sky tangent plane.</span>
+
+<span class="sd">    Intersection is performed on ``S_REGION`` polygons expressed as</span>
+<span class="sd">    arcsecond offsets from the science footprint center. Reported areas are</span>
+<span class="sd">    converted to science pixels² via the science pixel solid angle.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    science : ScienceFootprint</span>
+<span class="sd">        Illuminated science footprint (from :meth:`ScienceFootprint.from_fits`).</span>
+<span class="sd">    ref_path : str</span>
+<span class="sd">        Path to a reference FITS file with an ``S_REGION`` header keyword.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    OverlapResult</span>
+<span class="sd">        Reference and overlap areas in science-pixel units.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">ref_s_region</span> <span class="o">=</span> <span class="n">load_header_s_region</span><span class="p">(</span><span class="n">ref_path</span><span class="p">)</span>
+    <span class="n">ref_sky</span> <span class="o">=</span> <span class="n">ref_s_region</span><span class="o">.</span><span class="n">to_tangent_polygon</span><span class="p">(</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">center_ra_deg</span><span class="p">,</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">center_dec_deg</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">overlap_sky</span> <span class="o">=</span> <span class="n">science</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">ref_sky</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">OverlapResult</span><span class="p">(</span>
+        <span class="n">ref_path</span><span class="o">=</span><span class="n">ref_path</span><span class="p">,</span>
+        <span class="n">ref_s_region</span><span class="o">=</span><span class="n">ref_s_region</span><span class="p">,</span>
+        <span class="n">ref_area</span><span class="o">=</span><span class="n">science</span><span class="o">.</span><span class="n">metrics_from_sky_arcsec2</span><span class="p">(</span><span class="n">polygon_area</span><span class="p">(</span><span class="n">ref_sky</span><span class="p">)),</span>
+        <span class="n">overlap_area</span><span class="o">=</span><span class="n">science</span><span class="o">.</span><span class="n">metrics_from_sky_arcsec2</span><span class="p">(</span><span class="n">polygon_area</span><span class="p">(</span><span class="n">overlap_sky</span><span class="p">)),</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="compute_cumulative_overlap_fraction">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.compute_cumulative_overlap_fraction">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">compute_cumulative_overlap_fraction</span><span class="p">(</span>
+    <span class="n">science</span><span class="p">:</span> <span class="n">ScienceFootprint</span><span class="p">,</span>
+    <span class="n">ref_paths</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fraction of the science illuminated ROI covered by the union of references.</span>
+
+<span class="sd">    Overlapping reference footprints are merged (unique area only) before</span>
+<span class="sd">    dividing by the science sky footprint area.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    science : ScienceFootprint</span>
+<span class="sd">        Illuminated science footprint.</span>
+<span class="sd">    ref_paths : list of str</span>
+<span class="sd">        Paths to reference FITS files with ``S_REGION`` headers.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    float</span>
+<span class="sd">        Covered fraction of the science sky footprint (0.0 when there is no</span>
+<span class="sd">        overlap or the science area is zero).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">science_area</span> <span class="o">=</span> <span class="n">polygon_area</span><span class="p">(</span><span class="n">science</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">science_area</span> <span class="o">&lt;=</span> <span class="mf">0.0</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">ref_paths</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mf">0.0</span>
+
+    <span class="n">pieces</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">ref_path</span> <span class="ow">in</span> <span class="n">ref_paths</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">ref_s_region</span> <span class="o">=</span> <span class="n">load_header_s_region</span><span class="p">(</span><span class="n">ref_path</span><span class="p">)</span>
+            <span class="n">ref_sky</span> <span class="o">=</span> <span class="n">ref_s_region</span><span class="o">.</span><span class="n">to_tangent_polygon</span><span class="p">(</span>
+                <span class="n">science</span><span class="o">.</span><span class="n">center_ra_deg</span><span class="p">,</span>
+                <span class="n">science</span><span class="o">.</span><span class="n">center_dec_deg</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">overlap_sky</span> <span class="o">=</span> <span class="n">science</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">ref_sky</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">overlap_sky</span><span class="o">.</span><span class="n">is_empty</span> <span class="ow">and</span> <span class="n">polygon_area</span><span class="p">(</span><span class="n">overlap_sky</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mf">0.0</span><span class="p">:</span>
+            <span class="n">pieces</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">overlap_sky</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">pieces</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mf">0.0</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">polygon_area</span><span class="p">(</span><span class="n">unary_union</span><span class="p">(</span><span class="n">pieces</span><span class="p">))</span> <span class="o">/</span> <span class="n">science_area</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="overlap_area_pixels">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.overlap_area_pixels">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">overlap_area_pixels</span><span class="p">(</span>
+    <span class="n">science_image</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">ref_image</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="n">Polygon</span><span class="p">,</span> <span class="n">Polygon</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return overlap area (science pixels²) and the two sky-tangent polygons.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    science_image : str</span>
+<span class="sd">        Path to the science FITS file.</span>
+<span class="sd">    ref_image : str</span>
+<span class="sd">        Path to the reference FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    overlap_pixels2 : float</span>
+<span class="sd">        Intersection area in science detector pixels squared.</span>
+<span class="sd">    science_sky : Polygon</span>
+<span class="sd">        Science footprint in local tangent-plane arcseconds.</span>
+<span class="sd">    ref_sky : Polygon</span>
+<span class="sd">        Reference footprint in the same tangent-plane frame.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">science</span> <span class="o">=</span> <span class="n">ScienceFootprint</span><span class="o">.</span><span class="n">from_fits</span><span class="p">(</span><span class="n">science_image</span><span class="p">)</span>
+    <span class="n">ref_s_region</span> <span class="o">=</span> <span class="n">load_header_s_region</span><span class="p">(</span><span class="n">ref_image</span><span class="p">)</span>
+    <span class="n">ref_sky</span> <span class="o">=</span> <span class="n">ref_s_region</span><span class="o">.</span><span class="n">to_tangent_polygon</span><span class="p">(</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">center_ra_deg</span><span class="p">,</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">center_dec_deg</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">overlap</span> <span class="o">=</span> <span class="n">science</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">ref_sky</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">(</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">metrics_from_sky_arcsec2</span><span class="p">(</span><span class="n">polygon_area</span><span class="p">(</span><span class="n">overlap</span><span class="p">))</span><span class="o">.</span><span class="n">pixels2</span><span class="p">,</span>
+        <span class="n">science</span><span class="o">.</span><span class="n">sky_polygon_arcsec</span><span class="p">,</span>
+        <span class="n">ref_sky</span><span class="p">,</span>
+    <span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="find_best_refs">
+<a class="viewcode-back" href="../../../api.html#st123.mosaic.find_best_refs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">find_best_refs</span><span class="p">(</span>
+    <span class="n">science_images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">refs</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">outfile</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">BestOverlap</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;For each science image, find the reference with maximum overlap area.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    science_images : list of str</span>
+<span class="sd">        Paths to science FITS files.</span>
+<span class="sd">    refs : list of str</span>
+<span class="sd">        Paths to candidate reference FITS files.</span>
+<span class="sd">    outfile : str or None, optional</span>
+<span class="sd">        If given, write a human-readable log of overlap results to this path.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of BestOverlap</span>
+<span class="sd">        One best-match record per science image (``ref_path`` may be ``None``).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">BestOverlap</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">out_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">outfile</span><span class="p">)</span> <span class="k">if</span> <span class="n">outfile</span> <span class="k">else</span> <span class="kc">None</span>
+    <span class="n">out_lines</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">science_images</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;Science: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">image</span><span class="p">)</span>
+        <span class="n">science</span> <span class="o">=</span> <span class="n">ScienceFootprint</span><span class="o">.</span><span class="n">from_fits</span><span class="p">(</span><span class="n">image</span><span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;  illuminated S_REGION: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">science</span><span class="o">.</span><span class="n">s_region</span><span class="o">.</span><span class="n">to_string</span><span class="p">())</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+            <span class="s1">&#39;  WCS pixel solid angle: </span><span class="si">%.8e</span><span class="s1"> arcmin^2 / pixel&#39;</span><span class="p">,</span>
+            <span class="n">science</span><span class="o">.</span><span class="n">pixel_area_arcmin2</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;  illuminated area: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">science</span><span class="o">.</span><span class="n">area</span><span class="o">.</span><span class="n">format</span><span class="p">())</span>
+
+        <span class="n">best</span><span class="p">:</span> <span class="n">BestOverlap</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">ref</span> <span class="ow">in</span> <span class="n">refs</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">compute_overlap</span><span class="p">(</span><span class="n">science</span><span class="p">,</span> <span class="n">ref</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+                <span class="n">msg</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">image</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">ref</span><span class="si">}</span><span class="se">\n</span><span class="s1">image failed: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="se">\n\n</span><span class="s1">&#39;</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;  FAILED for ref </span><span class="si">%s</span><span class="s1">: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">ref</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+                <span class="n">out_lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+                <span class="k">continue</span>
+
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;  ref: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">ref</span><span class="p">)</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;    S_REGION: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">ref_s_region</span><span class="o">.</span><span class="n">to_string</span><span class="p">())</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;    ref area: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">ref_area</span><span class="o">.</span><span class="n">format</span><span class="p">())</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;    overlap area: </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">format</span><span class="p">())</span>
+
+            <span class="k">if</span> <span class="n">best</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">result</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">pixels2</span> <span class="o">&gt;</span> <span class="n">best</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">pixels2</span><span class="p">:</span>
+                <span class="n">best</span> <span class="o">=</span> <span class="n">BestOverlap</span><span class="p">(</span>
+                    <span class="n">science_path</span><span class="o">=</span><span class="n">image</span><span class="p">,</span>
+                    <span class="n">ref_path</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">ref_path</span><span class="p">,</span>
+                    <span class="n">overlap_area</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">overlap_area</span><span class="p">,</span>
+                <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">best</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">best</span> <span class="o">=</span> <span class="n">BestOverlap</span><span class="p">(</span>
+                <span class="n">science_path</span><span class="o">=</span><span class="n">image</span><span class="p">,</span>
+                <span class="n">ref_path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                <span class="n">overlap_area</span><span class="o">=</span><span class="n">science</span><span class="o">.</span><span class="n">metrics</span><span class="p">(</span><span class="mf">0.0</span><span class="p">),</span>
+            <span class="p">)</span>
+
+        <span class="n">line</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s1">&#39;Overlap maximized: Science image: </span><span class="si">{</span><span class="n">best</span><span class="o">.</span><span class="n">science_path</span><span class="si">}</span><span class="s1">, &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;Reference image: </span><span class="si">{</span><span class="n">best</span><span class="o">.</span><span class="n">ref_path</span><span class="si">}</span><span class="s1">, &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;Max overlap area: </span><span class="si">{</span><span class="n">best</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">pixels2</span><span class="si">:</span><span class="s1">.3f</span><span class="si">}</span><span class="s1"> pixels^2 &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;(</span><span class="si">{</span><span class="n">best</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">arcmin2</span><span class="si">:</span><span class="s1">.6f</span><span class="si">}</span><span class="s1"> arcmin^2, &#39;</span>
+            <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">best</span><span class="o">.</span><span class="n">overlap_area</span><span class="o">.</span><span class="n">fraction_of_roi</span><span class="si">:</span><span class="s1">.4f</span><span class="si">}</span><span class="s1"> of illuminated ROI)&#39;</span>
+        <span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+        <span class="n">out_lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">line</span> <span class="o">+</span> <span class="s1">&#39;</span><span class="se">\n\n</span><span class="s1">&#39;</span><span class="p">)</span>
+        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">best</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">out_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">out_path</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="s1">&#39;&#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">out_lines</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">results</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025–2026, C. D. Kilpatrick &amp; A. Suresh.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,1034 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>st123.utils.helpers &mdash; st123 0.1.1.dev25+gb984091e0</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" href="../../../_static/st123-docs.css" type="text/css" />
+
+  
+      <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../_static/documentation_options.js?v=840d7aea"></script>
+      <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            st123
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../user_guide.html">User guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api.html">API</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">st123</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">st123.utils.helpers</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for st123.utils.helpers</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;Shared helpers: coordinates, FITS bookkeeping, visits, and cross-matching.&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shapely</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy</span><span class="w"> </span><span class="kn">import</span> <span class="n">units</span> <span class="k">as</span> <span class="n">u</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.coordinates</span><span class="w"> </span><span class="kn">import</span> <span class="n">SkyCoord</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.io</span><span class="w"> </span><span class="kn">import</span> <span class="n">fits</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.table</span><span class="w"> </span><span class="kn">import</span> <span class="n">Column</span><span class="p">,</span> <span class="n">Table</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">astropy.time</span><span class="w"> </span><span class="kn">import</span> <span class="n">Time</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">st123.utils.settings</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">BEST_FILTER_TYPES</span><span class="p">,</span>
+    <span class="n">BEST_REFERENCE_FILTERS</span><span class="p">,</span>
+    <span class="n">acceptable_filters</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="is_number">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.is_number">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">is_number</span><span class="p">(</span><span class="n">num</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Return whether ``num`` can be converted to a float.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    num : object</span>
+<span class="sd">        Value to test.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        True when ``float(num)`` succeeds.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="nb">float</span><span class="p">(</span><span class="n">num</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">return</span> <span class="kc">True</span></div>
+
+
+
+<span class="c1"># Quotes that bash does not strip (Unicode curly/smart quotes) and ASCII</span>
+<span class="c1"># quotes sometimes left inside exported shell values (issue #3).</span>
+<span class="n">_COORD_QUOTE_CHARS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s1">&#39;&quot;&#39;</span><span class="p">,</span>
+    <span class="s2">&quot;&#39;&quot;</span><span class="p">,</span>
+    <span class="s1">&#39;</span><span class="se">\u201c</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># “</span>
+    <span class="s1">&#39;</span><span class="se">\u201d</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># ”</span>
+    <span class="s1">&#39;</span><span class="se">\u2018</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># ‘</span>
+    <span class="s1">&#39;</span><span class="se">\u2019</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># ’</span>
+    <span class="s1">&#39;</span><span class="se">\u00ab</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># «</span>
+    <span class="s1">&#39;</span><span class="se">\u00bb</span><span class="s1">&#39;</span><span class="p">,</span>  <span class="c1"># »</span>
+<span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_normalize_coord_token</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">float</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Strip surrounding whitespace/quotes from a coordinate token.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">value</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">value</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="c1"># Peel matching or mixed quote wrappers; also drop stray leading/trailing</span>
+    <span class="c1"># curly quotes that shell exports leave inside the value.</span>
+    <span class="k">while</span> <span class="n">text</span> <span class="ow">and</span> <span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">in</span> <span class="n">_COORD_QUOTE_CHARS</span><span class="p">:</span>
+        <span class="n">text</span> <span class="o">=</span> <span class="n">text</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span><span class="o">.</span><span class="n">lstrip</span><span class="p">()</span>
+    <span class="k">while</span> <span class="n">text</span> <span class="ow">and</span> <span class="n">text</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="ow">in</span> <span class="n">_COORD_QUOTE_CHARS</span><span class="p">:</span>
+        <span class="n">text</span> <span class="o">=</span> <span class="n">text</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">text</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+
+<div class="viewcode-block" id="parse_coord">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.parse_coord">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">parse_coord</span><span class="p">(</span><span class="n">ra</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">float</span><span class="p">,</span> <span class="n">dec</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SkyCoord</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Parse RA/Dec into an ICRS :class:`~astropy.coordinates.SkyCoord`.</span>
+
+<span class="sd">    Accepts decimal degrees or sexagesimal strings (``&#39;:&#39;`` in both values).</span>
+<span class="sd">    Surrounding ASCII or curly/smart quotes are stripped so shell exports like</span>
+<span class="sd">    ``export RA=”09:53:42.00”`` (Unicode quotes) still parse.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    ra : str or float</span>
+<span class="sd">        Right ascension.</span>
+<span class="sd">    dec : str or float</span>
+<span class="sd">        Declination.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    SkyCoord or None</span>
+<span class="sd">        Parsed coordinate, or ``None`` when parsing fails.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">ra</span> <span class="o">=</span> <span class="n">_normalize_coord_token</span><span class="p">(</span><span class="n">ra</span><span class="p">)</span>
+    <span class="n">dec</span> <span class="o">=</span> <span class="n">_normalize_coord_token</span><span class="p">(</span><span class="n">dec</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="ow">not</span> <span class="p">(</span><span class="n">is_number</span><span class="p">(</span><span class="n">ra</span><span class="p">)</span> <span class="ow">and</span> <span class="n">is_number</span><span class="p">(</span><span class="n">dec</span><span class="p">))</span> <span class="ow">and</span>
+            <span class="p">(</span><span class="s1">&#39;:&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">ra</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;:&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">dec</span><span class="p">))):</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;cannot interpret: </span><span class="si">%s</span><span class="s1"> </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">ra</span><span class="p">,</span> <span class="n">dec</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="k">if</span> <span class="s1">&#39;:&#39;</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">ra</span><span class="p">)</span> <span class="ow">and</span> <span class="s1">&#39;:&#39;</span> <span class="ow">in</span> <span class="nb">str</span><span class="p">(</span><span class="n">dec</span><span class="p">):</span>
+        <span class="n">unit</span> <span class="o">=</span> <span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">hourangle</span><span class="p">,</span> <span class="n">u</span><span class="o">.</span><span class="n">deg</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">unit</span> <span class="o">=</span> <span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">deg</span><span class="p">,</span> <span class="n">u</span><span class="o">.</span><span class="n">deg</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">SkyCoord</span><span class="p">(</span><span class="n">ra</span><span class="p">,</span> <span class="n">dec</span><span class="p">,</span> <span class="n">frame</span><span class="o">=</span><span class="s1">&#39;icrs&#39;</span><span class="p">,</span> <span class="n">unit</span><span class="o">=</span><span class="n">unit</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s1">&#39;Cannot parse coordinates: </span><span class="si">%s</span><span class="s1"> </span><span class="si">%s</span><span class="s1">&#39;</span><span class="p">,</span> <span class="n">ra</span><span class="p">,</span> <span class="n">dec</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">None</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_looks_like_filter_name</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True for bandpass-like strings (reject numeric wheel positions).&quot;&quot;&quot;</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">text</span> <span class="ow">or</span> <span class="n">text</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="p">{</span><span class="s1">&#39;none&#39;</span><span class="p">,</span> <span class="s1">&#39;n/a&#39;</span><span class="p">,</span> <span class="s1">&#39;clear&#39;</span><span class="p">,</span> <span class="s1">&#39;clear1&#39;</span><span class="p">,</span> <span class="s1">&#39;clear2&#39;</span><span class="p">}:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="nb">float</span><span class="p">(</span><span class="n">text</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">True</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_filter_from_photmode</span><span class="p">(</span><span class="n">photmode</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Extract ``F###…`` from ACS/WFC3/WFPC2 ``PHOTMODE`` strings.&quot;&quot;&quot;</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">photmode</span> <span class="ow">or</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+    <span class="n">match</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;\b(F\d{3,}[A-Z0-9]*)\b&#39;</span><span class="p">,</span> <span class="n">text</span><span class="p">,</span> <span class="n">flags</span><span class="o">=</span><span class="n">re</span><span class="o">.</span><span class="n">IGNORECASE</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">match</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="k">if</span> <span class="n">match</span> <span class="k">else</span> <span class="kc">None</span>
+
+
+<div class="viewcode-block" id="get_filter">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_filter">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_filter</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Read the filter name from a FITS header.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    image : str or Path</span>
+<span class="sd">        Path to a calibrated science FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Lowercase filter name (``FILTNAM1``, ``FILTER``, or ``FILTER1``/``FILTER2``;</span>
+<span class="sd">        ``PHOTMODE`` as a last resort for stripped JHAT products).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># WFPC2 uses FILTNAM1; FILTER1 is often a numeric wheel position.</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;FILTNAM1&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">_looks_like_filter_name</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;FILTER&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">_looks_like_filter_name</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;FILTER1&#39;</span><span class="p">))</span>
+        <span class="k">if</span> <span class="s1">&#39;clear&#39;</span> <span class="ow">in</span> <span class="n">f</span><span class="o">.</span><span class="n">lower</span><span class="p">():</span>
+            <span class="n">f</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;FILTER2&#39;</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">_looks_like_filter_name</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">f</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="c1"># JHAT can strip FILTER/INSTRUME; SCI PHOTMODE still encodes the band.</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">memmap</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">hdu</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">filt</span> <span class="o">=</span> <span class="n">_filter_from_photmode</span><span class="p">(</span><span class="n">hdu</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;PHOTMODE&#39;</span><span class="p">))</span>
+                <span class="k">if</span> <span class="n">filt</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="n">filt</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;No filter keyword found in </span><span class="si">{</span><span class="n">image</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="get_module">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_module">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_module</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Read the JWST module identifier from a FITS header.</span>
+
+<span class="sd">    NIRCam exposures use ``MODULE`` (``A`` / ``B``) or the letter embedded in</span>
+<span class="sd">    ``DETECTOR`` (``NRCB1`` → ``b``). MIRI has no module keyword and is</span>
+<span class="sd">    returned as ``miri``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    image : str or Path</span>
+<span class="sd">        Path to a science FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Lowercase module identifier (``a``, ``b``, ``miri``, …).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">module</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;MODULE&#39;</span><span class="p">))</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">module</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">module</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="n">detector</span> <span class="o">=</span> <span class="s1">&#39;&#39;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">detector</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;DETECTOR&#39;</span><span class="p">))</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="n">detector</span> <span class="o">=</span> <span class="s1">&#39;&#39;</span>
+
+    <span class="c1"># NIRCam: NRCA1 / NRCBLONG → module letter.</span>
+    <span class="k">if</span> <span class="n">detector</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;NRC&#39;</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">detector</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">3</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">detector</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="n">instrument</span> <span class="o">=</span> <span class="s1">&#39;&#39;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">instrument</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;INSTRUME&#39;</span><span class="p">))</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="k">if</span> <span class="s1">&#39;miri&#39;</span> <span class="ow">in</span> <span class="n">instrument</span> <span class="ow">or</span> <span class="n">detector</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;MIR&#39;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s1">&#39;miri&#39;</span>
+
+    <span class="c1"># Last resort: parse detector token from the file name.</span>
+    <span class="n">chip</span> <span class="o">=</span> <span class="n">get_detector_chip</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">image</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">chip</span><span class="p">:</span>
+        <span class="n">chip_l</span> <span class="o">=</span> <span class="n">chip</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">chip_l</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;nrc&#39;</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">chip_l</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">chip_l</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>
+        <span class="k">if</span> <span class="s1">&#39;mir&#39;</span> <span class="ow">in</span> <span class="n">chip_l</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s1">&#39;miri&#39;</span>
+
+    <span class="k">return</span> <span class="s1">&#39;unknown&#39;</span></div>
+
+
+
+<div class="viewcode-block" id="get_instrument">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_instrument">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_instrument</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Read the instrument name from a FITS header.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    image : str or Path</span>
+<span class="sd">        Path to a science FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Lowercase ``INSTRUME`` value (or ``PHOTMODE`` / ``APERTURE`` fallback).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">memmap</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">hdu</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">inst</span> <span class="o">=</span> <span class="n">hdu</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;INSTRUME&#39;</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">inst</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">str</span><span class="p">(</span><span class="n">inst</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">():</span>
+                    <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">inst</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">hdu</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">photmode</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">hdu</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;PHOTMODE&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">photmode</span><span class="p">:</span>
+                    <span class="n">token</span> <span class="o">=</span> <span class="n">photmode</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;,&#39;</span><span class="p">,</span> <span class="s1">&#39; &#39;</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
+                    <span class="k">if</span> <span class="n">token</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="n">token</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="n">aperture</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">hdul</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;APERTURE&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">aperture</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;UVIS&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">aperture</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;IR&#39;</span><span class="p">):</span>
+                <span class="k">return</span> <span class="s1">&#39;wfc3&#39;</span>
+            <span class="k">if</span> <span class="n">aperture</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;WFC&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">aperture</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">&#39;HRC&#39;</span><span class="p">):</span>
+                <span class="k">return</span> <span class="s1">&#39;acs&#39;</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">pass</span>
+    <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;INSTRUME&#39;</span><span class="p">))</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="get_chip">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_chip">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_chip</span><span class="p">(</span><span class="n">image</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Return the detector chip identifier from a FITS file.</span>
+
+<span class="sd">    For multi-extension HST images, ambiguous cases default to chip ``1``.</span>
+<span class="sd">    JWST products typically expose ``DETECTOR`` instead of ``CCDCHIP``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    image : str or Path</span>
+<span class="sd">        Path to a science FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    int or str</span>
+<span class="sd">        Chip number or detector name; ``1`` when no chip keyword is found.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdu</span><span class="p">:</span>
+        <span class="n">chip</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="n">hdu</span><span class="p">:</span>
+            <span class="k">if</span> <span class="s1">&#39;CCDCHIP&#39;</span> <span class="ow">in</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="p">:</span>
+                <span class="n">chip</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">chip</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;CCDCHIP&#39;</span><span class="p">]</span>
+            <span class="k">elif</span> <span class="s1">&#39;DETECTOR&#39;</span> <span class="ow">in</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="p">:</span>
+                <span class="n">chip</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">chip</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;DETECTOR&#39;</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">chip</span> <span class="k">if</span> <span class="n">chip</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">1</span></div>
+
+
+
+<div class="viewcode-block" id="get_detector_chip">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_detector_chip">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_detector_chip</span><span class="p">(</span><span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Get the detector chip token from a file name.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    filename : str</span>
+<span class="sd">        File name or path.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str or None</span>
+<span class="sd">        Detector chip (e.g. ``nrcb1``, ``nrcblong``, ``mirimage``), or ``None``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">tokens</span><span class="p">:</span>
+        <span class="k">if</span> <span class="s1">&#39;nrc&#39;</span> <span class="ow">in</span> <span class="n">token</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">token</span>
+    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">tokens</span><span class="p">:</span>
+        <span class="k">if</span> <span class="s1">&#39;mirimage&#39;</span> <span class="ow">in</span> <span class="n">token</span><span class="o">.</span><span class="n">lower</span><span class="p">():</span>
+            <span class="k">return</span> <span class="n">token</span>
+    <span class="k">return</span> <span class="kc">None</span></div>
+
+
+
+<span class="c1"># Full-frame MIRI imager SCI size (ny, nx). Subarrays / cutouts are unsupported</span>
+<span class="c1"># by ``mirimask`` and by the alignment→DOLPHOT path.</span>
+<span class="n">MIRI_FULL_FRAME_SCI_SHAPE</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1024</span><span class="p">,</span> <span class="mi">1032</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="is_full_frame_miri">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.is_full_frame_miri">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">is_full_frame_miri</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Return whether a FITS file is a full-frame MIRI imager product.</span>
+
+<span class="sd">    Accepts SCI arrays of shape ``(1024, 1032)`` or ``(1, 1024, 1032)``.</span>
+<span class="sd">    Explicit non-``FULL`` ``SUBARRAY`` header values are rejected even when</span>
+<span class="sd">    dimensions are ambiguous. Non-MIRI files return ``False``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    path : str or Path</span>
+<span class="sd">        Path to a CAL / JHAT / rate FITS file.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bool</span>
+<span class="sd">        ``True`` when the file is usable as a full-frame MIRI imager frame.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">memmap</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="n">subarray</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="n">instrument</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="n">detector</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">for</span> <span class="n">hdu</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">hdr</span> <span class="o">=</span> <span class="n">hdu</span><span class="o">.</span><span class="n">header</span>
+                <span class="k">if</span> <span class="n">instrument</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;INSTRUME&#39;</span> <span class="ow">in</span> <span class="n">hdr</span><span class="p">:</span>
+                    <span class="n">instrument</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;INSTRUME&#39;</span><span class="p">])</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">detector</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;DETECTOR&#39;</span> <span class="ow">in</span> <span class="n">hdr</span><span class="p">:</span>
+                    <span class="n">detector</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;DETECTOR&#39;</span><span class="p">])</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">subarray</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;SUBARRAY&#39;</span> <span class="ow">in</span> <span class="n">hdr</span><span class="p">:</span>
+                    <span class="n">subarray</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;SUBARRAY&#39;</span><span class="p">])</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+
+            <span class="n">name</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">))</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="n">is_miri</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="p">(</span><span class="n">instrument</span> <span class="o">==</span> <span class="s1">&#39;MIRI&#39;</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="p">(</span><span class="n">detector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;MIR&#39;</span> <span class="ow">in</span> <span class="n">detector</span><span class="p">)</span>
+                <span class="ow">or</span> <span class="p">(</span><span class="s1">&#39;mirimage&#39;</span> <span class="ow">in</span> <span class="n">name</span><span class="p">)</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_miri</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">False</span>
+
+            <span class="k">if</span> <span class="n">subarray</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">subarray</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;FULL&#39;</span><span class="p">,</span> <span class="s1">&#39;N/A&#39;</span><span class="p">,</span> <span class="s1">&#39;NONE&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">):</span>
+                <span class="k">return</span> <span class="kc">False</span>
+
+            <span class="n">sci</span> <span class="o">=</span> <span class="n">hdul</span><span class="p">[</span><span class="s1">&#39;SCI&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">in</span> <span class="n">hdul</span> <span class="k">else</span> <span class="n">hdul</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">data</span> <span class="o">=</span> <span class="n">sci</span><span class="o">.</span><span class="n">data</span>
+            <span class="k">if</span> <span class="n">data</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">shape</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">data</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">naxis1</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;NAXIS1&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="n">naxis2</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;NAXIS2&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="n">shape</span> <span class="o">=</span> <span class="p">(</span><span class="n">naxis2</span><span class="p">,</span> <span class="n">naxis1</span><span class="p">)</span> <span class="k">if</span> <span class="n">naxis1</span> <span class="ow">and</span> <span class="n">naxis2</span> <span class="k">else</span> <span class="p">()</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">shape</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span> <span class="ow">and</span> <span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="n">shape</span> <span class="o">=</span> <span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span>
+            <span class="k">return</span> <span class="n">shape</span> <span class="o">==</span> <span class="n">MIRI_FULL_FRAME_SCI_SHAPE</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span></div>
+
+
+
+<div class="viewcode-block" id="is_mirimask_compatible">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.is_mirimask_compatible">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">is_mirimask_compatible</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Alias for :func:`is_full_frame_miri` (DOLPHOT ``mirimask`` requirement).&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">is_full_frame_miri</span><span class="p">(</span><span class="n">path</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="get_zpt">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_zpt">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_zpt</span><span class="p">(</span>
+    <span class="n">image</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">,</span>
+    <span class="n">ccdchip</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">zptype</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;abmag&#39;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Compute the photometric zero point from ``PHOTFLAM`` and ``PHOTPLAM``.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    image : str or Path</span>
+<span class="sd">        Path to a science FITS file.</span>
+<span class="sd">    ccdchip : int or str, optional</span>
+<span class="sd">        CCD chip or detector name when multiple science HDUs are present.</span>
+<span class="sd">    zptype : str, optional</span>
+<span class="sd">        ``&#39;abmag&#39;`` for AB magnitude or ``&#39;st&#39;`` for ST magnitude.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    float or None</span>
+<span class="sd">        Zero point in magnitudes, or ``None`` when header keywords are missing.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;readonly&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdu</span><span class="p">:</span>
+        <span class="n">inst</span> <span class="o">=</span> <span class="n">get_instrument</span><span class="p">(</span><span class="n">image</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="n">sci</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="n">h</span> <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="n">hdu</span>
+            <span class="k">if</span> <span class="s1">&#39;PHOTPLAM&#39;</span> <span class="ow">in</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span> <span class="ow">and</span> <span class="s1">&#39;PHOTFLAM&#39;</span> <span class="ow">in</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span>
+        <span class="p">]</span>
+
+        <span class="n">use_hdu</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">sci</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">use_hdu</span> <span class="o">=</span> <span class="n">sci</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">elif</span> <span class="nb">len</span><span class="p">(</span><span class="n">sci</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="n">sci</span><span class="p">:</span>
+                <span class="k">if</span> <span class="s1">&#39;acs&#39;</span> <span class="ow">in</span> <span class="n">inst</span> <span class="ow">or</span> <span class="s1">&#39;wfc3&#39;</span> <span class="ow">in</span> <span class="n">inst</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;CCDCHIP&#39;</span><span class="p">)</span> <span class="o">==</span> <span class="n">ccdchip</span><span class="p">:</span>
+                        <span class="n">use_hdu</span> <span class="o">=</span> <span class="n">h</span>
+                        <span class="k">break</span>
+                <span class="k">elif</span> <span class="n">h</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;DETECTOR&#39;</span><span class="p">)</span> <span class="o">==</span> <span class="n">ccdchip</span><span class="p">:</span>
+                    <span class="n">use_hdu</span> <span class="o">=</span> <span class="n">h</span>
+                    <span class="k">break</span>
+
+        <span class="k">if</span> <span class="n">use_hdu</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+
+        <span class="n">photplam</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">use_hdu</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;PHOTPLAM&#39;</span><span class="p">])</span>
+        <span class="n">photflam</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">use_hdu</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;PHOTFLAM&#39;</span><span class="p">])</span>
+
+    <span class="k">if</span> <span class="s1">&#39;ab&#39;</span> <span class="ow">in</span> <span class="n">zptype</span><span class="p">:</span>
+        <span class="k">return</span> <span class="o">-</span><span class="mf">2.5</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">log10</span><span class="p">(</span><span class="n">photflam</span><span class="p">)</span> <span class="o">-</span> <span class="mi">5</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">log10</span><span class="p">(</span><span class="n">photplam</span><span class="p">)</span> <span class="o">-</span> <span class="mf">2.408</span>
+    <span class="k">if</span> <span class="s1">&#39;st&#39;</span> <span class="ow">in</span> <span class="n">zptype</span><span class="p">:</span>
+        <span class="k">return</span> <span class="o">-</span><span class="mf">2.5</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">log10</span><span class="p">(</span><span class="n">photflam</span><span class="p">)</span> <span class="o">-</span> <span class="mf">21.1</span>
+    <span class="k">return</span> <span class="kc">None</span></div>
+
+
+
+<div class="viewcode-block" id="organize_visit_tables">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.organize_visit_tables">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">organize_visit_tables</span><span class="p">(</span><span class="n">obstable</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span> <span class="n">byvisit</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Table</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Split an observation table into per-visit subtables.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obstable : astropy.table.Table</span>
+<span class="sd">        Table with a ``visit`` column.</span>
+<span class="sd">    byvisit : bool, optional</span>
+<span class="sd">        If True, return one table per unique visit; otherwise return a</span>
+<span class="sd">        single-element list containing ``obstable``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of astropy.table.Table</span>
+<span class="sd">        Visit-grouped subtables.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">byvisit</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">obstable</span><span class="p">]</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="n">obstable</span><span class="p">[</span><span class="n">obstable</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">visit</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">visit</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">obstable</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">data</span><span class="p">))</span>
+    <span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="organize_reduction_tables">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.organize_reduction_tables">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">organize_reduction_tables</span><span class="p">(</span>
+    <span class="n">obstable</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span>
+    <span class="n">byvisit</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">bymodule</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="n">Table</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Group an observation table by module and optionally by visit.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    obstable : astropy.table.Table</span>
+<span class="sd">        Table with ``module`` and ``visit`` columns.</span>
+<span class="sd">    byvisit : bool, optional</span>
+<span class="sd">        Split each module group by visit (passed to</span>
+<span class="sd">        :func:`organize_visit_tables`).</span>
+<span class="sd">    bymodule : bool, optional</span>
+<span class="sd">        If True, split by unique ``module`` values before visit grouping.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of list of astropy.table.Table</span>
+<span class="sd">        Nested lists of subtables (one outer entry per module when</span>
+<span class="sd">        ``bymodule`` is True, otherwise a single outer entry).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">bymodule</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">organize_visit_tables</span><span class="p">(</span><span class="n">obstable</span><span class="p">,</span> <span class="n">byvisit</span><span class="o">=</span><span class="n">byvisit</span><span class="p">)]</span>
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="n">organize_visit_tables</span><span class="p">(</span><span class="n">obstable</span><span class="p">[</span><span class="n">obstable</span><span class="p">[</span><span class="s1">&#39;module&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">mod</span><span class="p">],</span> <span class="n">byvisit</span><span class="o">=</span><span class="n">byvisit</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">mod</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">obstable</span><span class="p">[</span><span class="s1">&#39;module&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">data</span><span class="p">))</span>
+    <span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="pick_deepest_images">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.pick_deepest_images">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">pick_deepest_images</span><span class="p">(</span>
+    <span class="n">images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">],</span>
+    <span class="n">reffilter</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">avoid_wfpc2</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">refinst</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Select reference images with the deepest total exposure.</span>
+
+<span class="sd">    Chooses instrument/filter combinations preferring common wide filters,</span>
+<span class="sd">    then suffix types (``lp``, ``w``, ``x``, ``m``, ``n``).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    images : list of str or Path</span>
+<span class="sd">        Science FITS paths to consider.</span>
+<span class="sd">    reffilter : str or None, optional</span>
+<span class="sd">        Force a specific filter (must appear in</span>
+<span class="sd">        :data:`st123.utils.settings.acceptable_filters`).</span>
+<span class="sd">    avoid_wfpc2 : bool, optional</span>
+<span class="sd">        Exclude WFPC2 instrument/filter pairs when alternatives exist.</span>
+<span class="sd">    refinst : str or None, optional</span>
+<span class="sd">        Restrict candidates to this instrument substring.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    list of str</span>
+<span class="sd">        Paths of images in the best instrument/filter group.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">best_filters</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">BEST_REFERENCE_FILTERS</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">reffilter</span> <span class="ow">and</span> <span class="n">reffilter</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span> <span class="ow">in</span> <span class="n">acceptable_filters</span><span class="p">:</span>
+        <span class="n">best_filters</span> <span class="o">=</span> <span class="p">[</span><span class="n">reffilter</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span>
+    <span class="n">best_types</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">BEST_FILTER_TYPES</span><span class="p">)</span>
+
+    <span class="n">filts</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_filter</span><span class="p">(</span><span class="n">im</span><span class="p">)</span> <span class="k">for</span> <span class="n">im</span> <span class="ow">in</span> <span class="n">images</span><span class="p">]</span>
+    <span class="n">insts</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">get_instrument</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_full&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_sub&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">im</span> <span class="ow">in</span> <span class="n">images</span>
+    <span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">refinst</span><span class="p">:</span>
+        <span class="n">mask</span> <span class="o">=</span> <span class="p">[</span><span class="n">refinst</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="ow">in</span> <span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">insts</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">mask</span><span class="p">):</span>
+            <span class="n">filts</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">filts</span><span class="p">)[</span><span class="n">mask</span><span class="p">])</span>
+            <span class="n">insts</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">insts</span><span class="p">)[</span><span class="n">mask</span><span class="p">])</span>
+
+    <span class="n">unique_filter_inst</span> <span class="o">=</span> <span class="nb">list</span><span class="p">({</span>
+        <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">filt</span><span class="si">}</span><span class="s1">_</span><span class="si">{</span><span class="n">inst</span><span class="si">}</span><span class="s1">&#39;</span> <span class="k">for</span> <span class="n">filt</span><span class="p">,</span> <span class="n">inst</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">filts</span><span class="p">,</span> <span class="n">insts</span><span class="p">)</span>
+    <span class="p">})</span>
+
+    <span class="c1"># Prefer not to build a reference from ACS/HRC when other options exist.</span>
+    <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="s1">&#39;hrc&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">val</span> <span class="k">for</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span><span class="p">):</span>
+        <span class="n">unique_filter_inst</span> <span class="o">=</span> <span class="p">[</span><span class="n">val</span> <span class="k">for</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span> <span class="k">if</span> <span class="s1">&#39;hrc&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">val</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">avoid_wfpc2</span> <span class="ow">and</span> <span class="nb">any</span><span class="p">(</span><span class="s1">&#39;wfpc2&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">val</span> <span class="k">for</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span><span class="p">):</span>
+        <span class="n">unique_filter_inst</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="n">val</span> <span class="k">for</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span> <span class="k">if</span> <span class="s1">&#39;wfpc2&#39;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">val</span>
+        <span class="p">]</span>
+
+    <span class="n">total_exposure</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">val</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span><span class="p">:</span>
+        <span class="n">exposure</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="k">for</span> <span class="n">im</span> <span class="ow">in</span> <span class="n">images</span><span class="p">:</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="n">get_filter</span><span class="p">(</span><span class="n">im</span><span class="p">)</span> <span class="ow">in</span> <span class="n">val</span>
+                <span class="ow">and</span> <span class="n">get_instrument</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;_&#39;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">in</span> <span class="n">val</span>
+            <span class="p">):</span>
+                <span class="n">exposure</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">im</span><span class="p">,</span> <span class="s1">&#39;EFFEXPTM&#39;</span><span class="p">))</span>
+        <span class="n">total_exposure</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">exposure</span><span class="p">)</span>
+
+    <span class="n">best_filt_inst</span> <span class="o">=</span> <span class="s1">&#39;&#39;</span>
+    <span class="n">best_exposure</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+    <span class="k">for</span> <span class="n">filt</span> <span class="ow">in</span> <span class="n">best_filters</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="p">(</span><span class="n">s</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span> <span class="k">if</span> <span class="n">filt</span> <span class="ow">in</span> <span class="n">s</span><span class="p">):</span>
+            <span class="n">exposure</span> <span class="o">=</span> <span class="n">total_exposure</span><span class="p">[</span><span class="n">unique_filter_inst</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">v</span><span class="p">)]</span>
+            <span class="k">if</span> <span class="n">exposure</span> <span class="o">&gt;</span> <span class="n">best_exposure</span><span class="p">:</span>
+                <span class="n">best_filt_inst</span> <span class="o">=</span> <span class="n">v</span>
+                <span class="n">best_exposure</span> <span class="o">=</span> <span class="n">exposure</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">best_filt_inst</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">filt_type</span> <span class="ow">in</span> <span class="n">best_types</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="p">(</span><span class="n">s</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">unique_filter_inst</span> <span class="k">if</span> <span class="n">filt_type</span> <span class="ow">in</span> <span class="n">s</span><span class="p">):</span>
+                <span class="n">exposure</span> <span class="o">=</span> <span class="n">total_exposure</span><span class="p">[</span><span class="n">unique_filter_inst</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">v</span><span class="p">)]</span>
+                <span class="k">if</span> <span class="n">exposure</span> <span class="o">&gt;</span> <span class="n">best_exposure</span><span class="p">:</span>
+                    <span class="n">best_filt_inst</span> <span class="o">=</span> <span class="n">v</span>
+                    <span class="n">best_exposure</span> <span class="o">=</span> <span class="n">exposure</span>
+
+    <span class="n">reference_images</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">im</span> <span class="ow">in</span> <span class="n">images</span><span class="p">:</span>
+        <span class="n">filt</span> <span class="o">=</span> <span class="n">get_filter</span><span class="p">(</span><span class="n">im</span><span class="p">)</span>
+        <span class="n">inst</span> <span class="o">=</span> <span class="n">get_instrument</span><span class="p">(</span><span class="n">im</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_full&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">&#39;_sub&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">filt</span><span class="si">}</span><span class="s1">_</span><span class="si">{</span><span class="n">inst</span><span class="si">}</span><span class="s1">&#39;</span> <span class="o">==</span> <span class="n">best_filt_inst</span><span class="p">:</span>
+            <span class="n">reference_images</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">im</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">reference_images</span></div>
+
+
+
+<div class="viewcode-block" id="get_sky_pgons">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.get_sky_pgons">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_sky_pgons</span><span class="p">(</span><span class="n">table</span><span class="p">:</span> <span class="n">Table</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Parse ``S_REGION`` sky polygons from images listed in a table.</span>
+
+<span class="sd">    When ``S_REGION`` is missing, fall back to the SCI WCS footprint</span>
+<span class="sd">    (``WCS.calc_footprint``) so mixed JWST/HST planning still works.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    table : astropy.table.Table</span>
+<span class="sd">        Table with an ``image`` column of FITS paths.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    numpy.ndarray</span>
+<span class="sd">        Object-dtype array of Shapely polygons (one per row).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># Lazy: avoid utils.helpers ↔ mast.mast import cycles at package load.</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">shapely.geometry</span><span class="w"> </span><span class="kn">import</span> <span class="n">Polygon</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">st123.mast.mast</span><span class="w"> </span><span class="kn">import</span> <span class="n">parse_s_region</span>
+
+    <span class="n">pgons</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">im</span> <span class="ow">in</span> <span class="n">table</span><span class="p">[</span><span class="s1">&#39;image&#39;</span><span class="p">]:</span>
+        <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">im</span><span class="p">)</span> <span class="k">as</span> <span class="n">hdul</span><span class="p">:</span>
+            <span class="n">region</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="n">sci</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">for</span> <span class="n">hdu</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">name</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="n">hdu</span><span class="p">,</span> <span class="s1">&#39;name&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">or</span> <span class="p">(</span><span class="n">sci</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">hdu</span><span class="p">,</span> <span class="s1">&#39;data&#39;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">or</span> <span class="n">sci</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="n">sci</span> <span class="o">=</span> <span class="n">hdu</span>
+                    <span class="k">if</span> <span class="n">hdu</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;S_REGION&#39;</span><span class="p">):</span>
+                        <span class="n">region</span> <span class="o">=</span> <span class="n">hdu</span><span class="o">.</span><span class="n">header</span><span class="p">[</span><span class="s1">&#39;S_REGION&#39;</span><span class="p">]</span>
+                        <span class="k">break</span>
+            <span class="k">if</span> <span class="n">region</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;SCI&#39;</span> <span class="ow">in</span> <span class="n">hdul</span><span class="p">:</span>
+                <span class="n">region</span> <span class="o">=</span> <span class="n">hdul</span><span class="p">[</span><span class="s1">&#39;SCI&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">header</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;S_REGION&#39;</span><span class="p">)</span>
+                <span class="n">sci</span> <span class="o">=</span> <span class="n">hdul</span><span class="p">[</span><span class="s1">&#39;SCI&#39;</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">region</span><span class="p">:</span>
+                <span class="n">pgons</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">parse_s_region</span><span class="p">(</span><span class="n">region</span><span class="p">))</span>
+                <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">sci</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;No SCI / S_REGION in </span><span class="si">{</span><span class="n">im</span><span class="si">}</span><span class="s1">&#39;</span><span class="p">)</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">astropy.wcs</span><span class="w"> </span><span class="kn">import</span> <span class="n">WCS</span>
+
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">wcs</span> <span class="o">=</span> <span class="n">WCS</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="p">,</span> <span class="n">fobj</span><span class="o">=</span><span class="n">hdul</span><span class="p">,</span> <span class="n">naxis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="n">wcs</span> <span class="o">=</span> <span class="n">WCS</span><span class="p">(</span><span class="n">sci</span><span class="o">.</span><span class="n">header</span><span class="p">,</span> <span class="n">naxis</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">relax</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="n">corners</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">wcs</span><span class="o">.</span><span class="n">calc_footprint</span><span class="p">(</span><span class="n">center</span><span class="o">=</span><span class="kc">False</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+            <span class="n">pgons</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Polygon</span><span class="p">(</span><span class="n">corners</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">pgons</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="edit_visits_groups">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.edit_visits_groups">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">edit_visits_groups</span><span class="p">(</span><span class="n">table</span><span class="p">:</span> <span class="n">Table</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Renumber visits and assign spatial ``group`` IDs from footprint overlap.</span>
+
+<span class="sd">    Groups are derived from the union of ``S_REGION`` polygons; visits spanning</span>
+<span class="sd">    multiple groups are collapsed to the minimum group index.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    table : astropy.table.Table</span>
+<span class="sd">        Observation table with ``visit`` and ``image`` columns.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    astropy.table.Table</span>
+<span class="sd">        Copy of ``table`` with reindexed ``visit`` and new ``group`` column.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">unique_visits</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">])</span>
+    <span class="n">visit_mapping</span> <span class="o">=</span> <span class="p">{</span><span class="n">old</span><span class="p">:</span> <span class="n">new</span> <span class="k">for</span> <span class="n">new</span><span class="p">,</span> <span class="n">old</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">unique_visits</span><span class="p">)}</span>
+    <span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">visit_mapping</span><span class="p">[</span><span class="n">v</span><span class="p">]</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]]</span>
+
+    <span class="n">table</span><span class="o">.</span><span class="n">add_column</span><span class="p">(</span><span class="n">Column</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">&#39;group&#39;</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">[</span><span class="kc">None</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">table</span><span class="p">)))</span>
+    <span class="n">pgons</span> <span class="o">=</span> <span class="n">get_sky_pgons</span><span class="p">(</span><span class="n">table</span><span class="p">)</span>
+
+    <span class="n">net_field</span> <span class="o">=</span> <span class="n">shapely</span><span class="o">.</span><span class="n">unary_union</span><span class="p">(</span><span class="n">pgons</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">net_field</span><span class="p">,</span> <span class="n">shapely</span><span class="o">.</span><span class="n">geometry</span><span class="o">.</span><span class="n">polygon</span><span class="o">.</span><span class="n">Polygon</span><span class="p">):</span>
+        <span class="n">net_field</span> <span class="o">=</span> <span class="n">shapely</span><span class="o">.</span><span class="n">MultiPolygon</span><span class="p">([</span><span class="n">net_field</span><span class="p">])</span>
+
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">component</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">net_field</span><span class="o">.</span><span class="n">geoms</span><span class="p">):</span>
+        <span class="n">int_area</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span>
+            <span class="n">poly</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="n">component</span><span class="p">)</span><span class="o">.</span><span class="n">area</span> <span class="o">/</span> <span class="n">poly</span><span class="o">.</span><span class="n">area</span> <span class="k">for</span> <span class="n">poly</span> <span class="ow">in</span> <span class="n">pgons</span>
+        <span class="p">])</span>
+        <span class="n">table</span><span class="p">[</span><span class="s1">&#39;group&#39;</span><span class="p">][</span><span class="n">int_area</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">i</span>
+
+    <span class="k">for</span> <span class="n">visit</span> <span class="ow">in</span> <span class="n">np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]):</span>
+        <span class="n">groups</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">table</span><span class="p">[</span><span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">visit</span><span class="p">][</span><span class="s1">&#39;group&#39;</span><span class="p">])</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">groups</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">table</span><span class="p">[</span><span class="s1">&#39;group&#39;</span><span class="p">][</span><span class="n">table</span><span class="p">[</span><span class="s1">&#39;visit&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">visit</span><span class="p">]</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">groups</span><span class="p">)</span>
+
+    <span class="n">unique_groups</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">table</span><span class="p">[</span><span class="s1">&#39;group&#39;</span><span class="p">])</span>
+    <span class="n">group_mapping</span> <span class="o">=</span> <span class="p">{</span><span class="n">old</span><span class="p">:</span> <span class="n">new</span> <span class="k">for</span> <span class="n">new</span><span class="p">,</span> <span class="n">old</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">unique_groups</span><span class="p">)}</span>
+    <span class="n">table</span><span class="p">[</span><span class="s1">&#39;group&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">group_mapping</span><span class="p">[</span><span class="n">g</span><span class="p">]</span> <span class="k">for</span> <span class="n">g</span> <span class="ow">in</span> <span class="n">table</span><span class="p">[</span><span class="s1">&#39;group&#39;</span><span class="p">]]</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">sort</span><span class="p">([</span><span class="s1">&#39;visit&#39;</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">table</span></div>
+
+
+
+<div class="viewcode-block" id="input_list">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.input_list">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">input_list</span><span class="p">(</span><span class="n">input_images</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="n">Path</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Table</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Build an observation metadata table from existing FITS paths.</span>
+
+<span class="sd">    Reads exposure time, datetime, filter, instrument, module, chip, zero</span>
+<span class="sd">    point, visit, and pupil from headers, then assigns visits/groups via</span>
+<span class="sd">    :func:`edit_visits_groups`.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    input_images : list of str or Path</span>
+<span class="sd">        Science FITS paths; missing files are skipped.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    astropy.table.Table</span>
+<span class="sd">        Sorted observation table with columns ``image``, ``exptime``,</span>
+<span class="sd">        ``datetime``, ``filter``, ``instrument``, ``module``, ``zeropoint``,</span>
+<span class="sd">        ``chip``, ``imagenumber``, ``visit``, and ``pupil``.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        When no input paths exist on disk.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">img</span> <span class="o">=</span> <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">input_images</span> <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">image</span><span class="p">)]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">img</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="s1">&#39;No existing input images found. Check --base-dir points at the &#39;</span>
+            <span class="s1">&#39;dataset root (…/&lt;object&gt;) or reduction workdir containing jhat/.&#39;</span>
+        <span class="p">)</span>
+
+    <span class="k">with</span> <span class="n">fits</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">img</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="k">as</span> <span class="n">hdu</span><span class="p">:</span>
+        <span class="n">primary</span> <span class="o">=</span> <span class="n">hdu</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">header</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_exptime</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+        <span class="n">hdr</span> <span class="o">=</span> <span class="n">fits</span><span class="o">.</span><span class="n">getheader</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;EFFEXPTM&#39;</span><span class="p">,</span> <span class="s1">&#39;EXPTIME&#39;</span><span class="p">,</span> <span class="s1">&#39;TEXPTIME&#39;</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">hdr</span> <span class="ow">and</span> <span class="n">hdr</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">hdr</span><span class="p">[</span><span class="n">key</span><span class="p">])</span>
+                <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">):</span>
+                    <span class="k">continue</span>
+        <span class="k">return</span> <span class="mf">0.0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_visit_id</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="n">hdr</span> <span class="o">=</span> <span class="n">fits</span><span class="o">.</span><span class="n">getheader</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="c1"># JWST: VISIT_ID. HST: ROOTNAME[:6] (ipppssoot visit stem), else ASN_ID.</span>
+        <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;VISIT_ID&#39;</span><span class="p">,</span> <span class="s1">&#39;ROOTNAME&#39;</span><span class="p">,</span> <span class="s1">&#39;ASN_ID&#39;</span><span class="p">):</span>
+            <span class="n">val</span> <span class="o">=</span> <span class="n">hdr</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="nb">str</span><span class="p">(</span><span class="n">val</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">==</span> <span class="s1">&#39;&#39;</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">token</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">val</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">key</span> <span class="o">==</span> <span class="s1">&#39;ROOTNAME&#39;</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">token</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">6</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">token</span><span class="p">[:</span><span class="mi">6</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">token</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">path</span><span class="p">)[:</span><span class="mi">6</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="n">exp</span> <span class="o">=</span> <span class="p">[</span><span class="n">_exptime</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="k">if</span> <span class="s1">&#39;DATE-OBS&#39;</span> <span class="ow">in</span> <span class="n">primary</span> <span class="ow">and</span> <span class="s1">&#39;TIME-OBS&#39;</span> <span class="ow">in</span> <span class="n">primary</span><span class="p">:</span>
+        <span class="n">dat</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;DATE-OBS&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">T</span><span class="si">{</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;TIME-OBS&#39;</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span>
+        <span class="p">]</span>
+    <span class="k">elif</span> <span class="s1">&#39;EXPSTART&#39;</span> <span class="ow">in</span> <span class="n">primary</span><span class="p">:</span>
+        <span class="n">dat</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="n">Time</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="s1">&#39;EXPSTART&#39;</span><span class="p">),</span> <span class="nb">format</span><span class="o">=</span><span class="s1">&#39;mjd&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">strftime</span><span class="p">(</span>
+                <span class="s1">&#39;%Y-%m-</span><span class="si">%d</span><span class="s1">T%H:%M:%S&#39;</span>
+            <span class="p">)</span>
+            <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span>
+        <span class="p">]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Mixed JWST/HST tables: probe each file for a usable time keyword.</span>
+        <span class="n">dat</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">:</span>
+            <span class="n">hdr</span> <span class="o">=</span> <span class="n">fits</span><span class="o">.</span><span class="n">getheader</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s1">&#39;DATE-OBS&#39;</span> <span class="ow">in</span> <span class="n">hdr</span> <span class="ow">and</span> <span class="s1">&#39;TIME-OBS&#39;</span> <span class="ow">in</span> <span class="n">hdr</span><span class="p">:</span>
+                <span class="n">dat</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;DATE-OBS&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">T</span><span class="si">{</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;TIME-OBS&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">elif</span> <span class="s1">&#39;EXPSTART&#39;</span> <span class="ow">in</span> <span class="n">hdr</span><span class="p">:</span>
+                <span class="n">dat</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                    <span class="n">Time</span><span class="p">(</span><span class="n">hdr</span><span class="p">[</span><span class="s1">&#39;EXPSTART&#39;</span><span class="p">],</span> <span class="nb">format</span><span class="o">=</span><span class="s1">&#39;mjd&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">strftime</span><span class="p">(</span>
+                        <span class="s1">&#39;%Y-%m-</span><span class="si">%d</span><span class="s1">T%H:%M:%S&#39;</span>
+                    <span class="p">)</span>
+                <span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s1">&#39;Cannot determine observation time from headers of </span><span class="si">{</span><span class="n">image</span><span class="si">}</span><span class="s1">&#39;</span>
+                <span class="p">)</span>
+
+    <span class="n">fil</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_filter</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="n">ins</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_instrument</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="n">module</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_module</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="n">chip</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_chip</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="k">for</span> <span class="n">image</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="n">zpt</span> <span class="o">=</span> <span class="p">[</span><span class="n">get_zpt</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">ccdchip</span><span class="o">=</span><span class="n">c</span><span class="p">,</span> <span class="n">zptype</span><span class="o">=</span><span class="s1">&#39;abmag&#39;</span><span class="p">)</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">img</span><span class="p">,</span> <span class="n">chip</span><span class="p">)]</span>
+    <span class="n">visit</span> <span class="o">=</span> <span class="p">[</span><span class="n">_visit_id</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">img</span><span class="p">]</span>
+    <span class="c1"># MIRI (and some HST) products omit PUPIL; treat as clear / unused.</span>
+    <span class="n">pupil</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="n">img</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">pupil</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">fits</span><span class="o">.</span><span class="n">getval</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s1">&#39;PUPIL&#39;</span><span class="p">,</span> <span class="n">ext</span><span class="o">=</span><span class="mi">0</span><span class="p">)))</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="n">pupil</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s1">&#39;CLEAR&#39;</span><span class="p">)</span>
+    <span class="n">image_number</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">img</span><span class="p">)</span>
+
+    <span class="n">obstable</span> <span class="o">=</span> <span class="n">Table</span><span class="p">(</span>
+        <span class="p">[</span><span class="n">img</span><span class="p">,</span> <span class="n">exp</span><span class="p">,</span> <span class="n">dat</span><span class="p">,</span> <span class="n">fil</span><span class="p">,</span> <span class="n">ins</span><span class="p">,</span> <span class="n">module</span><span class="p">,</span> <span class="n">zpt</span><span class="p">,</span> <span class="n">chip</span><span class="p">,</span> <span class="n">image_number</span><span class="p">,</span> <span class="n">visit</span><span class="p">,</span> <span class="n">pupil</span><span class="p">],</span>
+        <span class="n">names</span><span class="o">=</span><span class="p">[</span>
+            <span class="s1">&#39;image&#39;</span><span class="p">,</span> <span class="s1">&#39;exptime&#39;</span><span class="p">,</span> <span class="s1">&#39;datetime&#39;</span><span class="p">,</span> <span class="s1">&#39;filter&#39;</span><span class="p">,</span> <span class="s1">&#39;instrument&#39;</span><span class="p">,</span> <span class="s1">&#39;module&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;zeropoint&#39;</span><span class="p">,</span> <span class="s1">&#39;chip&#39;</span><span class="p">,</span> <span class="s1">&#39;imagenumber&#39;</span><span class="p">,</span> <span class="s1">&#39;visit&#39;</span><span class="p">,</span> <span class="s1">&#39;pupil&#39;</span><span class="p">,</span>
+        <span class="p">],</span>
+    <span class="p">)</span>
+    <span class="n">obstable</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="s1">&#39;datetime&#39;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">edit_visits_groups</span><span class="p">(</span><span class="n">obstable</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="create_filter_table">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.create_filter_table">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">create_filter_table</span><span class="p">(</span><span class="n">tables</span><span class="p">:</span> <span class="n">Table</span><span class="p">,</span> <span class="n">filters</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Table</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Create a dictionary of (filter, table) pairs for the full observation set.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    tables : astropy.table.Table</span>
+<span class="sd">        Observation table with a ``filter`` column.</span>
+<span class="sd">    filters : list of str</span>
+<span class="sd">        Filter names to extract.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    dict</span>
+<span class="sd">        Mapping of filter name to subtable.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="p">{</span><span class="n">flt</span><span class="p">:</span> <span class="n">tables</span><span class="p">[</span><span class="n">tables</span><span class="p">[</span><span class="s1">&#39;filter&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">flt</span><span class="p">]</span> <span class="k">for</span> <span class="n">flt</span> <span class="ow">in</span> <span class="n">filters</span><span class="p">}</span></div>
+
+
+
+<div class="viewcode-block" id="xmatch_common">
+<a class="viewcode-back" href="../../../api.html#st123.utils.helpers.xmatch_common">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">xmatch_common</span><span class="p">(</span>
+    <span class="n">skycrd_1</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span>
+    <span class="n">skycrd_2</span><span class="p">:</span> <span class="n">SkyCoord</span><span class="p">,</span>
+    <span class="n">dist_limit</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Cross-match sources between two SkyCoord objects.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    skycrd_1 : SkyCoord</span>
+<span class="sd">        Positions of sources in catalog 1.</span>
+<span class="sd">    skycrd_2 : SkyCoord</span>
+<span class="sd">        Positions of sources in catalog 2.</span>
+<span class="sd">    dist_limit : float, optional</span>
+<span class="sd">        Maximum distance for a match, in arcsec.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    pandas.DataFrame</span>
+<span class="sd">        Columns ``idx_1``, ``idx_2``, and ``d2d`` (arcsec).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">idx</span><span class="p">,</span> <span class="n">d2d</span><span class="p">,</span> <span class="n">_d3d</span> <span class="o">=</span> <span class="n">skycrd_1</span><span class="o">.</span><span class="n">match_to_catalog_sky</span><span class="p">(</span><span class="n">skycrd_2</span><span class="p">)</span>
+    <span class="n">xmatch_df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span>
+        <span class="p">{</span>
+            <span class="s1">&#39;idx_1&#39;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">skycrd_1</span><span class="p">)),</span>
+            <span class="s1">&#39;idx_2&#39;</span><span class="p">:</span> <span class="n">idx</span><span class="p">,</span>
+            <span class="s1">&#39;d2d&#39;</span><span class="p">:</span> <span class="n">d2d</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">arcsec</span><span class="p">)</span><span class="o">.</span><span class="n">value</span><span class="p">,</span>
+        <span class="p">}</span>
+    <span class="p">)</span>
+    <span class="n">matched_df</span> <span class="o">=</span> <span class="n">xmatch_df</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">xmatch_df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s1">&#39;idx_2&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">d2d</span><span class="o">.</span><span class="n">idxmin</span><span class="p">()]</span>
+    <span class="k">return</span> <span class="n">matched_df</span><span class="p">[</span><span class="n">matched_df</span><span class="p">[</span><span class="s1">&#39;d2d&#39;</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">dist_limit</span><span class="p">]</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025–2026, C. D. Kilpatrick &amp; A. Suresh.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
