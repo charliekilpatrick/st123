@@ -46,11 +46,41 @@ def is_number(num: Any) -> bool:
     return True
 
 
+# Quotes that bash does not strip (Unicode curly/smart quotes) and ASCII
+# quotes sometimes left inside exported shell values (issue #3).
+_COORD_QUOTE_CHARS = (
+    '"',
+    "'",
+    '\u201c',  # “
+    '\u201d',  # ”
+    '\u2018',  # ‘
+    '\u2019',  # ’
+    '\u00ab',  # «
+    '\u00bb',  # »
+)
+
+
+def _normalize_coord_token(value: str | float) -> str | float:
+    """Strip surrounding whitespace/quotes from a coordinate token."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    # Peel matching or mixed quote wrappers; also drop stray leading/trailing
+    # curly quotes that shell exports leave inside the value.
+    while text and text[0] in _COORD_QUOTE_CHARS:
+        text = text[1:].lstrip()
+    while text and text[-1] in _COORD_QUOTE_CHARS:
+        text = text[:-1].rstrip()
+    return text.strip()
+
+
 def parse_coord(ra: str | float, dec: str | float) -> SkyCoord | None:
     """
     Parse RA/Dec into an ICRS :class:`~astropy.coordinates.SkyCoord`.
 
     Accepts decimal degrees or sexagesimal strings (``':'`` in both values).
+    Surrounding ASCII or curly/smart quotes are stripped so shell exports like
+    ``export RA=”09:53:42.00”`` (Unicode quotes) still parse.
 
     Parameters
     ----------
@@ -64,6 +94,9 @@ def parse_coord(ra: str | float, dec: str | float) -> SkyCoord | None:
     SkyCoord or None
         Parsed coordinate, or ``None`` when parsing fails.
     """
+    ra = _normalize_coord_token(ra)
+    dec = _normalize_coord_token(dec)
+
     if (not (is_number(ra) and is_number(dec)) and
             (':' not in str(ra) and ':' not in str(dec))):
         logger.error('cannot interpret: %s %s', ra, dec)

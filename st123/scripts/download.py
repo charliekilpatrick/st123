@@ -268,9 +268,8 @@ def _download_one_telescope(
 
     Returns
     -------
-    int or MastDownloadResult
-        HST returns an int product count. JWST returns
-        :class:`~st123.mast.download.MastDownloadResult`.
+    MastDownloadResult
+        Observation count / skip / failure flags from the MAST helpers.
     """
     radius = float(args.radius) * u.arcmin
     logger.info(
@@ -280,17 +279,15 @@ def _download_one_telescope(
         radius,
     )
     if telescope == 'hst':
-        return int(
-            query_mast_hst(
-                coord,
-                outdir=outdir,
-                radius=radius,
-                token=args.token,
-                instruments=list(instruments),
-                layout=args.layout,
-                dry_run=args.dry_run,
-                allowed_filters=allowed_filters,
-            )
+        return query_mast_hst(
+            coord,
+            outdir=outdir,
+            radius=radius,
+            token=args.token,
+            instruments=list(instruments),
+            layout=args.layout,
+            dry_run=args.dry_run,
+            allowed_filters=allowed_filters,
         )
 
     mirimage_only = bool(args.mirimage_only)
@@ -417,6 +414,11 @@ def main(argv=None) -> int:
             for t, n in counts.items()
             if _count_n(n) == 0 and t not in skipped_miri_only
         ]
+        incomplete = [
+            t
+            for t, n in counts.items()
+            if getattr(n, 'incomplete', False)
+        ]
         if failed:
             logger.error(
                 'No matching products for: %s '
@@ -429,6 +431,15 @@ def main(argv=None) -> int:
             partial_fail = True
         else:
             partial_fail = False
+
+        if incomplete:
+            logger.error(
+                'Incomplete MAST download for: %s '
+                '(some observations failed after retries; '
+                'mosaics may miss filters)',
+                ', '.join(t.upper() for t in incomplete),
+            )
+            partial_fail = True
 
         # Mirror link-raw per requested instrument (never instrument=ALL —
         # that would re-link leftover trees like WFPC2 from earlier runs).

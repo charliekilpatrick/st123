@@ -346,6 +346,109 @@ def test_download_hst_skips_product_list_when_local(tmp_path: Path, caplog):
     assert 'skipping mast product list' in caplog.text.lower()
 
 
+def test_is_transient_mast_error_detects_timeouts():
+    from st123.mast.mast import _is_transient_mast_error
+
+    assert _is_transient_mast_error(TimeoutError('Timeout limit of 600 exceeded'))
+    assert _is_transient_mast_error(ConnectionError('reset'))
+    assert _is_transient_mast_error(RuntimeError('Timeout limit of 600 exceeded'))
+    assert not _is_transient_mast_error(ValueError('bad product row'))
+
+
+def test_download_hst_retries_transient_product_list(tmp_path: Path, monkeypatch):
+    """Transient get_product_list failures retry then succeed (issue #4)."""
+    from st123.mast.download import MastDownloadResult
+    from st123.mast import mast as mast_mod
+
+    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
+    obs = Table(
+        {
+            'obsid': [101],
+            'obs_id': ['jey335010'],
+            'filters': ['F814W'],
+            'obs_collection': ['HST'],
+            'instrument_name': ['ACS/WFC'],
+            'project': ['HST'],
+        }
+    )
+    products = Table(
+        {
+            'type': ['S'],
+            'productFilename': ['jey335elq_flc.fits'],
+            'productType': ['SCIENCE'],
+        }
+    )
+    calls = {'n': 0}
+
+    def _plist(_obs_row):
+        calls['n'] += 1
+        if calls['n'] < 3:
+            raise TimeoutError('Timeout limit of 600 exceeded')
+        return products
+
+    with (
+        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+        patch('st123.mast.mast.time.sleep'),
+    ):
+        result = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
+
+    assert isinstance(result, MastDownloadResult)
+    assert result.n_observations == 1
+    assert result.n_failed == 0
+    assert calls['n'] == 3
+    mock_dl.assert_called_once()
+
+
+def test_download_hst_marks_failed_after_product_list_retries(
+    tmp_path: Path, monkeypatch, caplog
+):
+    """Exhausted product-list retries count as incomplete (issue #4)."""
+    from st123.mast.download import MastDownloadResult
+    from st123.mast import mast as mast_mod
+
+    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
+    obs = Table(
+        {
+            'obsid': [101, 102],
+            'obs_id': ['a', 'b'],
+            'filters': ['F555W', 'F814W'],
+            'obs_collection': ['HST', 'HST'],
+            'instrument_name': ['ACS/WFC', 'ACS/WFC'],
+            'project': ['HST', 'HST'],
+        }
+    )
+    products = Table(
+        {
+            'type': ['S'],
+            'productFilename': ['ok_flc.fits'],
+            'productType': ['SCIENCE'],
+        }
+    )
+
+    def _plist(obs_row):
+        if int(obs_row['obsid']) == 101:
+            raise TimeoutError('Timeout limit of 600 exceeded')
+        return products
+
+    with (
+        caplog.at_level(logging.ERROR, logger='st123.mast.mast'),
+        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.mast.mast.Observations.download_products') as mock_dl,
+        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+        patch('st123.mast.mast.time.sleep'),
+    ):
+        result = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
+
+    assert isinstance(result, MastDownloadResult)
+    assert result.n_observations == 1
+    assert result.n_failed == 1
+    assert result.incomplete
+    assert mock_dl.call_count == 1
+    assert 'incomplete' in caplog.text.lower()
+
+
 def test_resolve_mast_token_explicit():
     assert resolve_mast_token('x') == 'x'
 

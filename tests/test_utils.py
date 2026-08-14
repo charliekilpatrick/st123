@@ -139,6 +139,25 @@ def test_is_number_and_parse_coord():
     assert helpers.parse_coord('not-a-coord', 'also-bad') is None
 
 
+def test_parse_coord_strips_curly_and_ascii_quotes():
+    """Shell exports with curly quotes must still parse (issue #3)."""
+    plain = helpers.parse_coord('09:53:42.00', '+01:34:06.00')
+    assert plain is not None
+
+    curly = helpers.parse_coord('\u201c09:53:42.00\u201d', '\u201c+01:34:06.00\u201d')
+    assert curly is not None
+    assert curly.ra.degree == pytest.approx(plain.ra.degree)
+    assert curly.dec.degree == pytest.approx(plain.dec.degree)
+
+    ascii_q = helpers.parse_coord('"09:53:42.00"', '"+01:34:06.00"')
+    assert ascii_q is not None
+    assert ascii_q.ra.degree == pytest.approx(plain.ra.degree)
+
+    mixed = helpers.parse_coord("\u201809:53:42.00\u2019", "'+01:34:06.00'")
+    assert mixed is not None
+    assert mixed.dec.degree == pytest.approx(plain.dec.degree)
+
+
 # --- helpers: FITS metadata ---------------------------------------------------
 
 
