@@ -3,11 +3,12 @@ Photometry helpers for individual images and combined catalogs.
 
 Submodules
 ----------
-- :mod:`st123.photometry.aperture` — forced EE aperture photometry on coadds
-- :mod:`st123.photometry.catalog` — DOLPHOT column mapping and combined catalogs
-- :mod:`st123.photometry.dolphot` — mask / calcsky / paramfile prep
-- :mod:`st123.photometry.dolphot_split` — split / merge large DOLPHOT runs
-- :mod:`st123.photometry.warmstart` — NIRCam→MIRI warm-start run setup
+- :mod:`st123.stages.photometry.aperture` - forced EE aperture photometry on coadds
+- :mod:`st123.stages.photometry.catalog` - DOLPHOT column mapping and combined catalogs
+- :mod:`st123.stages.photometry.dolphot` - mask / calcsky / paramfile prep
+- :mod:`st123.stages.photometry.dolphot_split` - split / merge large DOLPHOT runs
+- :mod:`st123.stages.photometry.megacatalog` - free NIRCam + warmstart mega catalogs
+- :mod:`st123.stages.photometry.warmstart` - NIRCam->MIRI warm-start run setup
 
 Exports are lazy so ``dolphot-prep`` need not load aperture / catalog code at
 import time.
@@ -74,6 +75,12 @@ _SPLIT_EXPORTS = frozenset(
         'write_split_paramfiles',
     }
 )
+_MEGACATALOG_EXPORTS = frozenset(
+    {
+        'build_megacatalog',
+        'discover_megacatalog_phot_files',
+    }
+)
 _WARMSTART_EXPORTS = frozenset(
     {
         'WarmStartResult',
@@ -89,29 +96,34 @@ __all__ = sorted(
     | _CATALOG_EXPORTS
     | _DOLPHOT_EXPORTS
     | _SPLIT_EXPORTS
+    | _MEGACATALOG_EXPORTS
     | _WARMSTART_EXPORTS
 )
 
 
 def __getattr__(name: str) -> Any:
     if name in _APERTURE_EXPORTS:
-        from st123.photometry import aperture as _mod
+        from st123.stages.photometry import aperture as _mod
 
         return getattr(_mod, name)
     if name in _CATALOG_EXPORTS:
-        from st123.photometry import catalog as _mod
+        from st123.stages.photometry import catalog as _mod
 
         return getattr(_mod, name)
     if name in _DOLPHOT_EXPORTS:
-        from st123.photometry import dolphot as _mod
+        from st123.stages.photometry import dolphot as _mod
 
         return getattr(_mod, name)
     if name in _SPLIT_EXPORTS:
-        from st123.photometry import dolphot_split as _mod
+        from st123.stages.photometry import dolphot_split as _mod
+
+        return getattr(_mod, name)
+    if name in _MEGACATALOG_EXPORTS:
+        from st123.stages.photometry import megacatalog as _mod
 
         return getattr(_mod, name)
     if name in _WARMSTART_EXPORTS:
-        from st123.photometry import warmstart as _mod
+        from st123.stages.photometry import warmstart as _mod
 
         return getattr(_mod, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

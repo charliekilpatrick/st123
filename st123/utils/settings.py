@@ -17,10 +17,10 @@ Reference-image preference
 MAST defaults
     Product rules, default instruments/filters, download layout.
 Alignment quality holds
-    Per-filter MIRI REFERENCE→MIRI_REL dispersion thresholds.
+    Per-filter MIRI REFERENCE->MIRI_REL dispersion thresholds.
 JHAT / DOLPHOT parameter dictionaries
     Merged into JHAT runs and DOLPHOT paramfiles by
-    :mod:`st123.alignment.align` and :mod:`st123.photometry.dolphot`.
+    :mod:`st123.stages.alignment.align` and :mod:`st123.stages.photometry.dolphot`.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from __future__ import annotations
 # Telescope is documented on each instrument group. Some bandpasses are shared
 # across instruments (e.g. HST ``F606W`` on WFPC2, ACS, and WFC3).
 
-# Hubble Space Telescope — WFPC2 imaging (legacy; ``FILTER`` / ``FILTNAM1``)
+# Hubble Space Telescope - WFPC2 imaging (legacy; ``FILTER`` / ``FILTNAM1``)
 WFPC2_FILTERS: tuple[str, ...] = (
     'F122M', 'F160BW', 'F185W', 'F218W', 'F255W', 'F300W', 'F336W', 'F375N',
     'F380W', 'F390N', 'F437N', 'F439W', 'F450W', 'F467M', 'F469N', 'F487N',
@@ -46,7 +46,7 @@ WFPC2_FILTERS: tuple[str, ...] = (
     'F850LP', 'F953N', 'F1042M',
 )
 
-# Hubble Space Telescope — ACS (WFC / HRC / SBC imaging)
+# Hubble Space Telescope - ACS (WFC / HRC / SBC imaging)
 ACS_FILTERS: tuple[str, ...] = (
     # ACS/WFC + ACS/HRC broadband / medium / narrow
     'F220W', 'F250W', 'F330W', 'F344N', 'F435W', 'F475W', 'F502N', 'F550M',
@@ -56,7 +56,7 @@ ACS_FILTERS: tuple[str, ...] = (
     'F115LP', 'F122M', 'F125LP', 'F140LP', 'F150LP', 'F165LP',
 )
 
-# Hubble Space Telescope — WFC3 (UVIS + IR imaging)
+# Hubble Space Telescope - WFC3 (UVIS + IR imaging)
 WFC3_FILTERS: tuple[str, ...] = (
     # WFC3/UVIS
     'F200LP', 'F218W', 'F225W', 'F275W', 'F280N', 'F300X', 'F336W', 'F343N',
@@ -70,7 +70,7 @@ WFC3_FILTERS: tuple[str, ...] = (
     'F132N', 'F139M', 'F140W', 'F153M', 'F160W', 'F164N', 'F167N',
 )
 
-# James Webb Space Telescope — NIRCam imaging (FILTER / FILTER2)
+# James Webb Space Telescope - NIRCam imaging (FILTER / FILTER2)
 NIRCAM_FILTERS: tuple[str, ...] = (
     # Short-wavelength channel
     'F070W', 'F090W', 'F115W', 'F140M', 'F150W', 'F150W2', 'F162M', 'F164N',
@@ -82,7 +82,7 @@ NIRCAM_FILTERS: tuple[str, ...] = (
     'CLEAR',
 )
 
-# James Webb Space Telescope — MIRI imaging / coronagraph
+# James Webb Space Telescope - MIRI imaging / coronagraph
 MIRI_FILTERS: tuple[str, ...] = (
     # Imager (MIRIM) broadband
     'F560W', 'F770W', 'F1000W', 'F1130W', 'F1280W', 'F1500W', 'F1800W',
@@ -91,13 +91,13 @@ MIRI_FILTERS: tuple[str, ...] = (
     'F1065C', 'F1140C', 'F1550C', 'F2300C',
 )
 
-# Nancy Grace Roman Space Telescope — WFI imaging elements (``FILTER``)
+# Nancy Grace Roman Space Telescope - WFI imaging elements (``FILTER``)
 ROMAN_WFI_FILTERS: tuple[str, ...] = (
     'F062', 'F087', 'F106', 'F129', 'F146', 'F158', 'F184', 'F213',
 )
 
-# Euclid — VIS + NISP photometric bands
-# Product headers may use instrument names (YE/JE/HE) or mosaic tags (NIR_Y/…).
+# Euclid - VIS + NISP photometric bands
+# Product headers may use instrument names (YE/JE/HE) or mosaic tags (NIR_Y/...).
 EUCLID_FILTERS: tuple[str, ...] = (
     'VIS',
     'YE', 'JE', 'HE',
@@ -105,7 +105,7 @@ EUCLID_FILTERS: tuple[str, ...] = (
     'Y', 'J', 'H',
 )
 
-# Instrument → telescope metadata and filter tuple (for docs / introspection).
+# Instrument -> telescope metadata and filter tuple (for docs / introspection).
 FILTERS_BY_INSTRUMENT: dict[str, dict[str, object]] = {
     'WFPC2': {
         'telescope': 'HST',
@@ -183,7 +183,7 @@ BEST_REFERENCE_FILTERS: tuple[str, ...] = (
 )
 
 # Preferred filter-name suffixes when no ``BEST_REFERENCE_FILTERS`` band is
-# available (long-pass → wide → … → narrow).
+# available (long-pass -> wide -> ... -> narrow).
 BEST_FILTER_TYPES: tuple[str, ...] = ('lp', 'w', 'x', 'm', 'n')
 
 # =============================================================================
@@ -212,7 +212,7 @@ DEFAULT_HST_FILTERS: tuple[str, ...] | None = None
 DEFAULT_HST_INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC3', 'WFPC2')
 DEFAULT_JWST_INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI')
 
-# Default filter lists for multi-instrument ``mosaic --instruments …`` finals.
+# Default filter lists for multi-instrument ``mosaic --instruments ...`` finals.
 DEFAULT_NIRCAM_MOSAIC_FILTERS: tuple[str, ...] = (
     'F150W',
     'F150W2',
@@ -248,11 +248,11 @@ ALL_PIPELINE_INSTRUMENTS: tuple[str, ...] = (
 
 # Relative subdirectory pattern under the download root.
 DEFAULT_DOWNLOAD_LAYOUT: str = 'telescope/instrument/filter/obsid'
-# MAST products land under ``<base-dir>/<DOWNLOAD_DIR_NAME>/…``.
+# MAST products land under ``<base-dir>/<DOWNLOAD_DIR_NAME>/...``.
 DOWNLOAD_DIR_NAME: str = 'download'
 
 # =============================================================================
-# Alignment quality-hold defaults (REFERENCE → MIRI_REL)
+# Alignment quality-hold defaults (REFERENCE -> MIRI_REL)
 # =============================================================================
 
 # Per-filter REFERENCE absolute-dispersion ceilings (mas). Empirically, MIRI_REL
@@ -443,7 +443,7 @@ long_params = {
     'apsky': '20 35',
 }
 
-# MIRI per-image params for FitSky=2 (dolphotMIRI.pdf §4.1).
+# MIRI per-image params for FitSky=2 (dolphotMIRI.pdf Sec.4.1).
 # RAper/RPSF cannot exceed 24 for MIRI.
 miri_params = {
     'shift': '0 0',
@@ -465,7 +465,7 @@ miri_base_params = {
     'RCentroid': '1',
 }
 
-# calcsky: NIRCam (mosaic defaults) vs MIRI (dolphotMIRI.pdf §3.4).
+# calcsky: NIRCam (mosaic defaults) vs MIRI (dolphotMIRI.pdf Sec.3.4).
 nircam_calcsky_params = {
     'rin': 15,
     'rout': 25,
@@ -483,7 +483,7 @@ miri_calcsky_params = {
 }
 
 # -----------------------------------------------------------------------------
-# HST DOLPHOT (ACS / WFC3 / WFPC2) — ported from hst123 detector_defaults
+# HST DOLPHOT (ACS / WFC3 / WFPC2) - ported from hst123 detector_defaults
 # -----------------------------------------------------------------------------
 
 # Global DOLPHOT knobs for HST runs (JHAT-aligned FLT/FLC + drizzle img0).
@@ -515,7 +515,7 @@ hst_base_params = {
     'PSFres': '0',
 }
 
-# Per-image geometry (img_*_raper / img_*_rpsf, …). Keys match write_paramfile.
+# Per-image geometry (img_*_raper / img_*_rpsf, ...). Keys match write_paramfile.
 acs_params = {
     'shift': '0 0',
     'xform': '1 0 0',
@@ -645,13 +645,23 @@ hst_crpars = {
 # Bit value written into DQ / WFPC2 c1m for astroscrappy CR pixels.
 HST_CR_DQ_BIT = 4096
 
+# WFC3/IR: calwf3 already flags CRs (bit 512 is allowed in final_bits=576).
+# AstroDrizzle ``driz_cr`` on undersampled IR often false-rejects real stars
+# when one frame has a native negative spike / depressed halo (CTX->0 holes).
+WFC3_IR_DRIZ_CR = False
+# Pre-drizzle: mask extreme negative SCI (+ grow) so they never enter median/blot.
+# Bit must NOT be in hst_driz_bits['wfc3_ir'] = 576.
+WFC3_IR_SCI_FLOOR = -50.0
+WFC3_IR_BAD_GROW_PIX = 2
+WFC3_IR_BAD_DQ_BIT = 4096
+
 # WFPC2 calibrated c0m chips retain bad overscan / pyramid-edge sectors.
 # Mask these in c1m before AstroDrizzle (bit must NOT be in
 # hst_driz_bits['wfpc2'] = 1032). Left edge is worst (A/D overscan bleed);
 # all four chip borders project into the coadd near the pyramid intersection.
 # Tuned on SN2026dix F606W at the four-chip intersection to keep ~70%+ of
 # science pixels while cutting median local scatter (~10%) vs an unmasked
-# coadd — less aggressive than a max-S/N edge mask that dropped to ~34%.
+# coadd - less aggressive than a max-S/N edge mask that dropped to ~34%.
 WFPC2_OVERSCAN_EDGE_PIX = 32
 WFPC2_OVERSCAN_LEFT_EXTRA = 20  # total left mask width = EDGE + LEFT_EXTRA
 WFPC2_OVERSCAN_DQ_BIT = 256
@@ -662,7 +672,7 @@ WFPC2_BAD_GROW_PIX = 2
 # Kill entire columns in the left half when this fraction of pixels are < floor.
 WFPC2_BAD_COL_FRAC = 0.50
 # Within this outer band, mask rows/columns whose adjacent-pixel noise exceeds
-# VAR_SIGMA × the inner-chip noise (scene-resistant; see hst_drizzle).
+# VAR_SIGMA x the inner-chip noise (scene-resistant; see hst_drizzle).
 WFPC2_VAR_EDGE_PIX = 48
 WFPC2_VAR_SIGMA = 5.0
 # After AstroDrizzle, drop only *edge* single-bit CTX pixels (exactly one

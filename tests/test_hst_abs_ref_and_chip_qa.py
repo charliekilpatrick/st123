@@ -8,11 +8,11 @@ from unittest.mock import patch
 import numpy as np
 from astropy.io import fits
 
-from st123.alignment.hst_jhat import (
+from st123.stages.alignment.hst_jhat import (
     refine_hst_wcs_per_chip_from_refcat,
     validate_hst_multi_sci_chip_refine,
 )
-from st123.mosaic.hst_drizzle import _pick_coadd_abs_ref
+from st123.stages.mosaic.hst_drizzle import _pick_coadd_abs_ref
 
 
 def _touch_coadd(path: Path, size_bytes: int = 600_000) -> Path:
@@ -113,6 +113,69 @@ def test_validate_hst_multi_sci_chip_refine_fails_partial(tmp_path: Path):
     assert qa['n_failed'] == 1
 
 
+def test_heal_hst_partial_chip_refine_copies_sibling(tmp_path: Path):
+    """Recover 1/2 UVIS refine by copying SCI-ERR CRPIX delta onto the sibling."""
+    from st123.stages.alignment.hst_jhat import heal_hst_partial_chip_refine
+
+    path = tmp_path / 'iejn01gsq_jhat.fits'
+    d = np.zeros((100, 100), dtype=np.float32)
+
+    def _hdr(crpix1, crpix2, *, chip: int, comment: str | None = None):
+        h = fits.Header()
+        h['CCDCHIP'] = chip
+        h['CTYPE1'] = 'RA---TAN'
+        h['CTYPE2'] = 'DEC--TAN'
+        h['CRPIX1'] = crpix1
+        h['CRPIX2'] = crpix2
+        if comment:
+            h.comments['CRPIX1'] = comment
+            h.comments['CRPIX2'] = comment.replace('dx', 'dy')
+        h['CRVAL1'] = 185.7
+        h['CRVAL2'] = 15.8
+        h['CD1_1'] = -1.0e-5
+        h['CD1_2'] = 0.0
+        h['CD2_1'] = 0.0
+        h['CD2_2'] = 1.0e-5
+        return h
+
+    pri = fits.PrimaryHDU()
+    pri.header['INSTRUME'] = 'WFC3'
+    pri.header['ST123CHP'] = True
+    pri.header['ST123CNU'] = 1
+    fits.HDUList(
+        [
+            pri,
+            fits.ImageHDU(
+                d,
+                header=_hdr(
+                    2047.33, 1026.56, chip=2, comment='st123: per-SCI refine dx'
+                ),
+                name='SCI',
+                ver=1,
+            ),
+            fits.ImageHDU(
+                d, header=_hdr(2048.0, 1026.0, chip=2), name='ERR', ver=1
+            ),
+            fits.ImageHDU(
+                d, header=_hdr(2048.0, 1026.0, chip=1), name='SCI', ver=2
+            ),
+            fits.ImageHDU(
+                d, header=_hdr(2048.0, 1026.0, chip=1), name='ERR', ver=2
+            ),
+        ]
+    ).writeto(path, overwrite=True)
+
+    assert validate_hst_multi_sci_chip_refine([path])['ok'] is False
+    heal = heal_hst_partial_chip_refine([path])
+    assert heal['n_healed'] == 1
+    assert validate_hst_multi_sci_chip_refine([path])['ok'] is True
+    with fits.open(path) as hdul:
+        assert int(hdul[0].header['ST123CNU']) == 2
+        assert hdul[0].header.get('ST123CAF') is True
+        assert abs(float(hdul[3].header['CRPIX1']) - (2048.0 - 0.67)) < 0.02
+        assert 'sibling heal' in str(hdul[3].header.comments['CRPIX1'])
+
+
 def test_validate_hst_multi_sci_chip_refine_ok_complete(tmp_path: Path):
     path = _dual_sci_frame(tmp_path / 'complete_jhat.fits')
     with fits.open(path, mode='update') as hdul:
@@ -125,15 +188,15 @@ def test_validate_hst_multi_sci_chip_refine_ok_complete(tmp_path: Path):
 
 
 def test_per_chip_refine_copies_sibling_shift(tmp_path: Path):
-    """When only one SCI matches the refcat, copy CRPIX Δ onto the other."""
+    """When only one SCI matches the refcat, copy CRPIX Delta onto the other."""
     path = _dual_sci_frame(tmp_path / 'ieec43abq_jhat.fits')
     # Sky position of the chip2 star at pixel (55, 52) with CRPIX=(50,50):
-    # Δpix = (+5, +2) → CRVAL at that pixel ≈ CRVAL + CD·(pix-CRPIX).
+    # Deltapix = (+5, +2) -> CRVAL at that pixel ~ CRVAL + CD*(pix-CRPIX).
     refcat = tmp_path / 'ref.phot.txt'
-    # Place several catalog stars near the chip2 detection so matches ≥ min.
+    # Place several catalog stars near the chip2 detection so matches >= min.
     lines = ['ra dec mag\n']
     # Chip2 CRVAL=(196.30, -49.54), CD1_1=-1e-5, CD2_2=1e-5, star at (55,52)
-    # world ≈ (196.30 + (-1e-5)*(55-50), -49.54 + (1e-5)*(52-50))
+    # world ~ (196.30 + (-1e-5)*(55-50), -49.54 + (1e-5)*(52-50))
     ra0 = 196.30 + (-1.0e-5) * 5.0
     dec0 = -49.54 + (1.0e-5) * 2.0
     for i in range(12):
@@ -171,7 +234,7 @@ def test_per_chip_refine_copies_sibling_shift(tmp_path: Path):
 
 
 def test_visit_cross_filter_applies_to_all_frames(tmp_path: Path):
-    from st123.alignment.hst_jhat import harmonize_hst_visits_across_filters
+    from st123.stages.alignment.hst_jhat import harmonize_hst_visits_across_filters
 
     f814 = _dual_sci_frame(tmp_path / 'ieec43abq_jhat.fits')
     f555 = _dual_sci_frame(
@@ -198,11 +261,11 @@ def test_visit_cross_filter_applies_to_all_frames(tmp_path: Path):
     }
     with (
         patch(
-            'st123.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
             return_value=fake_off,
         ),
         patch(
-            'st123.alignment.hst_jhat.apply_common_abs_shift_vs_ref',
+            'st123.stages.alignment.hst_jhat.apply_common_abs_shift_vs_ref',
             return_value={
                 'ok': True,
                 'applied': True,

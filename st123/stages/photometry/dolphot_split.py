@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
-from astropy.io import fits
+from st123.datamodels import as_datamodel
 
 PathLike = Union[str, os.PathLike]
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Compiled hard limit (MAXNIMG-1 with MAXNIMG=501).
 DOLPHOT_COMPILE_MAX_NIMG = 500
-# Soft staging limit — appreciably below the compile ceiling.
+# Soft staging limit - appreciably below the compile ceiling.
 DOLPHOT_MAX_NIMG = 400
 
 SPLIT_MANIFEST_NAME = 'dolphot_split.json'
@@ -182,7 +182,7 @@ def image_filter_key(path: PathLike) -> str:
     """Return ``INSTRUMENT_FILTER`` from a FITS header, or the basename."""
     p = Path(path)
     try:
-        with fits.open(p, memmap=True) as hdul:
+        with as_datamodel(p).open(memmap=True) as hdul:
             filt = None
             det = None
             for hdu in hdul:
@@ -230,7 +230,7 @@ def write_split_paramfiles(
     layout). Otherwise writes ``dolphot_partXX.param`` plus
     :data:`SPLIT_MANIFEST_NAME`, keeping the same reference / ``xytfile``.
     """
-    from st123.photometry.dolphot import write_paramfile
+    from st123.stages.photometry.dolphot import write_paramfile
 
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -372,7 +372,7 @@ def _parse_columns_file(columns_path: Path) -> list[str]:
 
 
 def _classify_columns(names: Sequence[str]) -> tuple[list[int], dict[str, list[int]], dict[str, list[int]]]:
-    """Return object indices, combined filter→indices, per-image base→indices."""
+    """Return object indices, combined filter->indices, per-image base->indices."""
     object_idx = list(range(min(OBJECT_NCOLS, len(names))))
     combined: dict[str, list[int]] = {}
     per_image: dict[str, list[int]] = {}
@@ -400,7 +400,7 @@ def _classify_columns(names: Sequence[str]) -> tuple[list[int], dict[str, list[i
             combined[filt] = block
             i += len(block)
             continue
-        # Unknown trailing column — attach to object section.
+        # Unknown trailing column - attach to object section.
         object_idx.append(i)
         i += 1
     return object_idx, combined, per_image
@@ -559,7 +559,7 @@ def merge_dolphot_phot_catalogs(
         for i, name in enumerate(out_names, start=1):
             fh.write(f'{i}. {name}\n')
     logger.info(
-        'Merged %d catalogs → %s (%d stars, %d columns)',
+        'Merged %d catalogs -> %s (%d stars, %d columns)',
         len(paths),
         out_path,
         len(out_rows),

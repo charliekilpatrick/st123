@@ -39,7 +39,7 @@ def requested_miri(instruments: Sequence[str] | None) -> bool:
 def explicit_miri_only(instruments: Sequence[str] | None) -> bool:
     """True when the caller requested MIRI and not NIRCam."""
     inst = _norm_instruments(instruments)
-    # Defaults are NIRCAM+MIRI — that is not "explicit MIRI-only".
+    # Defaults are NIRCAM+MIRI - that is not "explicit MIRI-only".
     if instruments is None:
         return False
     return bool(inst & _MIRI_TOKENS) and not bool(inst & _NIRCAM_TOKENS)

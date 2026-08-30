@@ -8,9 +8,9 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from st123.photometry.cosmic import run_cosmic, wfpc2_c1m_path
-from st123.photometry.dolphot import _wfpc2_dq_companion
-from st123.alignment.hst_reference import (
+from st123.stages.photometry.cosmic import run_cosmic, wfpc2_c1m_path
+from st123.stages.photometry.dolphot import _wfpc2_dq_companion
+from st123.stages.alignment.hst_reference import (
     Level3GaiaScore,
     _illuminated_mask,
     _local_detectable,
@@ -130,6 +130,53 @@ def test_run_cosmic_preserves_extra_hdus(tmp_path: Path):
     assert path.stat().st_size >= size_before * 0.98
 
 
+def test_wfc3_ir_skips_cosmic_and_clears_dq(tmp_path: Path):
+    from st123.stages.photometry.cosmic import (
+        clear_st123_cr_flags,
+        is_wfc3_ir_frame,
+        run_cosmic,
+        should_skip_cosmic,
+    )
+
+    ny = nx = 32
+    sci = np.ones((ny, nx), dtype=np.float32) * 10.0
+    dq = np.zeros((ny, nx), dtype=np.int16)
+    dq[10, 10] = HST_CR_DQ_BIT
+    dq[11, 11] = HST_CR_DQ_BIT | 32
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFC3'
+    primary.header['DETECTOR'] = 'IR'
+    primary.header['APERTURE'] = 'IR-FIX'
+    primary.header['FILTER'] = 'F160W'
+    primary.header['ST123CR'] = True
+    path = tmp_path / 'idkv31njq_flt.fits'
+    fits.HDUList(
+        [
+            primary,
+            fits.ImageHDU(sci, name='SCI'),
+            fits.ImageHDU(np.ones_like(sci), name='ERR'),
+            fits.ImageHDU(dq, name='DQ'),
+        ]
+    ).writeto(path)
+
+    assert is_wfc3_ir_frame(path)
+    assert should_skip_cosmic(path)
+    skipped = run_cosmic(path, instrument='wfc3', add_crmask=True, inplace=True)
+    assert skipped.get('skipped') is True
+    assert skipped.get('reason') == 'wfc3_ir'
+    with fits.open(path) as hdul:
+        assert hdul[0].header.get('ST123CR') is True
+        assert int(hdul['DQ'].data[10, 10]) == HST_CR_DQ_BIT
+
+    cleared = clear_st123_cr_flags(path)
+    assert cleared['n_dq_cleared'] == 2
+    assert cleared['st123cr_cleared'] is True
+    with fits.open(path) as hdul:
+        assert 'ST123CR' not in hdul[0].header
+        assert int(hdul['DQ'].data[10, 10]) == 0
+        assert int(hdul['DQ'].data[11, 11]) == 32
+
+
 def test_illuminated_and_detectable_helpers():
     sci = np.full((32, 32), 10.0, dtype=float)
     sci[10, 10] = 50.0
@@ -162,7 +209,7 @@ def test_pick_best_level3_ranks_detectable(tmp_path: Path, monkeypatch):
         return Level3GaiaScore(path, 10, 9, 7, 'wfc3', 'f625w')
 
     monkeypatch.setattr(
-        'st123.alignment.hst_reference.score_level3_gaia', fake_score
+        'st123.stages.alignment.hst_reference.score_level3_gaia', fake_score
     )
     best, scores = pick_best_level3(candidates=[a, b])
     assert best is not None
@@ -203,8 +250,8 @@ def test_write_detection_refcat_dense(tmp_path: Path):
 
 
 def test_list_level3_and_find_hst_abs_ref_boxed(tmp_path: Path):
-    from st123.alignment.hst_jhat import find_hst_abs_ref_image
-    from st123.alignment.hst_reference import list_level3_products
+    from st123.stages.alignment.hst_jhat import find_hst_abs_ref_image
+    from st123.stages.alignment.hst_reference import list_level3_products
 
     ref = tmp_path / 'reference'
     boxed = ref / 'group_0' / 'ref_5'

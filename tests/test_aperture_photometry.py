@@ -10,7 +10,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
 
-from st123.photometry import aperture as ap
+from st123.stages.photometry import aperture as ap
 from st123.scripts import coadd_phot as coadd_phot_script
 
 
@@ -73,7 +73,7 @@ def test_default_ee_fraction():
 
 
 def test_mjy_sr_to_ujy_arcsec2_roundtrip_scalar():
-    # 1 MJy/sr = 1e12 μJy / sr; 1 sr = (206265 arcsec)^2
+    # 1 MJy/sr = 1e12 uJy / sr; 1 sr = (206265 arcsec)^2
     value = 1.0
     sb = ap.mjy_sr_to_ujy_arcsec2(value)
     expected = 1e12 / (206264.80624709636**2)
@@ -81,7 +81,7 @@ def test_mjy_sr_to_ujy_arcsec2_roundtrip_scalar():
 
 
 def test_ujy_to_abmag_and_error():
-    # ZP 23.9 → 1 μJy is AB = 23.9
+    # ZP 23.9 -> 1 uJy is AB = 23.9
     mag, mag_err = ap.ujy_to_abmag(1.0, 0.1)
     assert mag == pytest.approx(23.9)
     assert mag_err == pytest.approx((2.5 / np.log(10.0)) * 0.1)

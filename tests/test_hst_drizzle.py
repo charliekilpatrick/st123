@@ -8,19 +8,25 @@ import numpy as np
 import pytest
 from astropy.io import fits
 
-from st123.mosaic.hst_drizzle import (
+from st123.stages.mosaic.hst_drizzle import (
     _assert_drizzle_product_nonempty,
     _finalize_drizzle_product,
     _header_exptime,
     _repair_zero_exptime,
     fill_drizzle_uncovered_with_sky,
     group_hst_frames,
+    mask_wfc3_ir_bad_pixels,
     mask_wfpc2_overscan,
 )
 from st123.scripts import dolphot as dolphot_script
 from st123.scripts import mosaic as mosaic_script
 from st123.utils import helpers
-from st123.utils.settings import WFPC2_OVERSCAN_DQ_BIT
+from st123.utils.settings import (
+    WFPC2_OVERSCAN_DQ_BIT,
+    WFC3_IR_BAD_DQ_BIT,
+    WFC3_IR_DRIZ_CR,
+    hst_driz_bits,
+)
 
 
 def _write_hst_frame(
@@ -170,6 +176,44 @@ def test_mask_wfpc2_overscan_flags_edges_and_floor(tmp_path: Path):
         assert int(dq[40, 40]) == 0
 
 
+def test_wfc3_ir_driz_cr_disabled_and_floor_bit_excluded():
+    assert WFC3_IR_DRIZ_CR is False
+    assert (WFC3_IR_BAD_DQ_BIT & hst_driz_bits['wfc3_ir']) == 0
+
+
+def test_mask_wfc3_ir_bad_pixels_floor_and_grow(tmp_path: Path):
+    ny = nx = 32
+    sci = np.full((ny, nx), 10.0, dtype=np.float32)
+    sci[15, 15] = -236.0  # native MAST-like spike
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFC3'
+    primary.header['DETECTOR'] = 'IR'
+    primary.header['FILTER'] = 'F160W'
+    path = tmp_path / 'iejn62apq_flt.fits'
+    fits.HDUList(
+        [
+            primary,
+            fits.ImageHDU(sci.copy(), name='SCI'),
+            fits.ImageHDU(np.ones((ny, nx), dtype=np.float32), name='ERR'),
+            fits.ImageHDU(np.zeros((ny, nx), dtype=np.int16), name='DQ'),
+        ]
+    ).writeto(path)
+
+    summary = mask_wfc3_ir_bad_pixels(
+        path, sci_floor=-50.0, bad_grow=1, dq_bit=WFC3_IR_BAD_DQ_BIT
+    )
+    assert summary['n_floor'] == 1
+    assert summary['n_grown'] >= 1
+
+    with fits.open(path) as hdul:
+        assert float(hdul['SCI'].data[15, 15]) == 0.0
+        assert int(hdul['DQ'].data[15, 15]) & WFC3_IR_BAD_DQ_BIT
+        # Grown neighbor also flagged / zeroed.
+        assert int(hdul['DQ'].data[15, 16]) & WFC3_IR_BAD_DQ_BIT
+        assert float(hdul['SCI'].data[20, 20]) == 10.0
+        assert int(hdul['DQ'].data[20, 20]) == 0
+
+
 def test_mask_wfpc2_overscan_left_extra_and_grow(tmp_path: Path):
     ny = nx = 64
     sci = np.full((ny, nx), 10.0, dtype=np.float32)
@@ -211,7 +255,7 @@ def test_mask_wfpc2_high_variance_edge_columns(tmp_path: Path):
     ny = nx = 128
     rng = np.random.default_rng(1)
     sci = rng.normal(10.0, 0.5, size=(ny, nx)).astype(np.float32)
-    # High-noise sector just outside an 8-px uniform edge (cols 10–18).
+    # High-noise sector just outside an 8-px uniform edge (cols 10-18).
     # Add a bright "star" column deeper in so raw scatter alone would false-flag.
     sci[:, 10:18] = rng.normal(10.0, 20.0, size=(ny, 8)).astype(np.float32)
     sci[40:48, 50] = 500.0
@@ -242,7 +286,7 @@ def test_mask_wfpc2_high_variance_edge_columns(tmp_path: Path):
     with fits.open(c1m) as hdul:
         dq = hdul[1].data
         assert int(dq[64, 12]) & WFPC2_OVERSCAN_DQ_BIT
-        # Deep interior (incl. bright column) stays clean — scene ≠ noise.
+        # Deep interior (incl. bright column) stays clean - scene != noise.
         assert int(dq[64, 64]) == 0
         assert int(dq[44, 50]) == 0
 
@@ -405,13 +449,13 @@ def test_astrodrizzle_wcs_kwargs_from_shared_box():
     """Boxed HST drizzle must pin final_* geometry to the shared stamp."""
     from astropy.wcs import WCS
 
-    from st123.mosaic.hst_drizzle import (
+    from st123.stages.mosaic.hst_drizzle import (
         _wcs_orientat_deg,
         astrodrizzle_wcs_kwargs_from_header,
         build_boxed_drizzle_wcs,
         recenter_wcs_on_array,
     )
-    from st123.mosaic.mosaic import slice_box_wcs
+    from st123.stages.mosaic.mosaic import slice_box_wcs
     import shapely
 
     group = WCS(naxis=2)
@@ -447,7 +491,7 @@ def test_astrodrizzle_wcs_kwargs_from_shared_box():
 def test_filter_frames_overlapping_box_drops_nonoverlap(tmp_path: Path):
     from astropy.wcs import WCS
 
-    from st123.mosaic.mosaic import filter_frames_overlapping_box
+    from st123.stages.mosaic.mosaic import filter_frames_overlapping_box
     import shapely
 
     def _write(path: Path, ra: float, dec: float) -> Path:

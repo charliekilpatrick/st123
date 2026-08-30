@@ -24,8 +24,8 @@ from astropy.io import fits
 from astropy.table import Table
 from gwcs import FITSImagingWCSTransform
 
-from st123.mosaic.mosaic import create_coadd_mosaic, create_gwcs
-from st123.photometry.dolphot import apply_nircammask, science_fits_paths
+from st123.stages.mosaic.mosaic import create_coadd_mosaic, create_gwcs
+from st123.stages.photometry.dolphot import apply_nircammask, science_fits_paths
 from st123.scripts import mosaic as mosaic_script
 from st123.scripts.utils.options import resolve_reduction_dir
 from st123.utils.helpers import input_list
@@ -105,7 +105,7 @@ def test_mosaic_main_finds_jhat_under_reduction_not_project_root(tmp_path: Path)
     fake.write_text('x')
 
     with patch(
-        'st123.mosaic.mosaic.plan_mosaic_boxes',
+        'st123.stages.mosaic.mosaic.plan_mosaic_boxes',
         side_effect=RuntimeError('STOP'),
     ) as mock_plan:
         with pytest.raises(RuntimeError, match='STOP'):
@@ -141,7 +141,7 @@ def test_mosaic_main_returns_1_when_jhat_missing(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 3–4. GWCS / Image3 output_wcs
+# 3-4. GWCS / Image3 output_wcs
 # ---------------------------------------------------------------------------
 
 
@@ -167,10 +167,10 @@ def test_create_coadd_mosaic_always_sets_output_wcs(tmp_path: Path):
     image3.skymatch = MagicMock()
     image3.source_catalog = MagicMock()
     with (
-        patch('st123.mosaic.mosaic.patch_jwst_for_photutils3'),
-        patch('st123.mosaic.mosaic.asn_from_list') as asn_mod,
+        patch('st123.stages.mosaic.mosaic.patch_jwst_for_photutils3'),
+        patch('st123.stages.mosaic.mosaic.asn_from_list') as asn_mod,
         patch(
-            'st123.mosaic.mosaic.calwebb_image3.Image3Pipeline',
+            'st123.stages.mosaic.mosaic.calwebb_image3.Image3Pipeline',
             return_value=image3,
         ),
     ):
@@ -201,7 +201,7 @@ def test_create_coadd_mosaic_rejects_missing_gwcs_file(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 5–6. DOLPHOT prep flags / sky exclusion
+# 5-6. DOLPHOT prep flags / sky exclusion
 # ---------------------------------------------------------------------------
 
 
@@ -215,7 +215,7 @@ def test_science_fits_paths_excludes_sky_products(tmp_path: Path):
     assert names == {'a_jhat.fits', 'coadd_0_0_f150w2_i2d.fits'}
 
 
-@patch('st123.photometry.dolphot.run_logged_subprocess')
+@patch('st123.stages.photometry.dolphot.run_logged_subprocess')
 def test_apply_nircammask_command_has_no_etctime(mock_run, tmp_path: Path):
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -280,7 +280,7 @@ def test_ngc3310_jhat_inventory_for_mosaic():
 
 @requires_ngc3310
 def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
-    from st123.mosaic.mosaic import is_nircam_sw_broadband, split_observations
+    from st123.stages.mosaic.mosaic import is_nircam_sw_broadband, split_observations
 
     # NIRCam-only: historical SW coadd selection for this field.
     nircam = sorted(

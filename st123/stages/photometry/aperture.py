@@ -4,7 +4,7 @@ Forced aperture photometry on JWST Level-3 / coadd images.
 Uses photutils circular apertures sized from CRDS APCORR at the highest
 tabulated encircled-energy fraction per instrument (NIRCam EE=0.90, MIRI
 EE=0.80), applies the matching aperture correction and background annulus,
-and converts ``MJy/sr`` → μJy/arcsec² → μJy → AB mag with uncertainty
+and converts ``MJy/sr`` -> uJy/arcsec^2 -> uJy -> AB mag with uncertainty
 propagation. Centers are supplied by the caller (forced photometry only).
 """
 
@@ -19,6 +19,7 @@ from typing import Sequence
 import numpy as np
 from astropy import units as u
 from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.stats import sigma_clipped_stats
 from astropy.table import Table
 from astropy.wcs import WCS
@@ -31,9 +32,9 @@ from st123.utils.compatibility import (
 
 logger = logging.getLogger(__name__)
 
-# AB magnitude zeropoint for flux in μJy:
+# AB magnitude zeropoint for flux in uJy:
 #   m_AB = -2.5 log10(f_Jy) + 8.90
-#   f_uJy = f_Jy * 1e6  →  ZP = 8.90 + 2.5 * 6 = 23.9
+#   f_uJy = f_Jy * 1e6  ->  ZP = 8.90 + 2.5 * 6 = 23.9
 AB_ZEROPOINT_UJY = 23.9
 _LN10 = math.log(10.0)
 
@@ -77,7 +78,7 @@ def default_ee_fraction(instrument: str | None) -> float:
 
 def _header_instrument_filter(image: str) -> tuple[str, str]:
     """Return ``(INSTRUME, FILTER)`` from a FITS primary/SCI header."""
-    with fits.open(image) as hdul:
+    with as_datamodel(image).open() as hdul:
         hdr = hdul[0].header
         sci = hdul['SCI'].header if 'SCI' in hdul else hdr
     instrument = str(
@@ -114,7 +115,7 @@ def get_aperture_params(
         ee_fraction = default_ee_fraction(instrument)
     ee_fraction = float(ee_fraction)
     if ee_fraction > 1.0:
-        # Allow CLI-style percentages (90 → 0.90).
+        # Allow CLI-style percentages (90 -> 0.90).
         ee_fraction /= 100.0
     if not (0.0 < ee_fraction <= 1.0):
         raise ValueError(f'ee_fraction must be in (0, 1], got {ee_fraction}')
@@ -126,7 +127,7 @@ def get_aperture_params(
     from jwst.source_catalog import reference_data
     from jwst.source_catalog.source_catalog_step import SourceCatalogStep
 
-    # SourceCatalogStep expects EE percentages as ints (30, 40, 70, …).
+    # SourceCatalogStep expects EE percentages as ints (30, 40, 70, ...).
     ee_pct = int(round(ee_fraction * 100.0))
     # Provide two lower anchors so ReferenceData can build its EE ladder;
     # the last entry is the science aperture.
@@ -178,7 +179,7 @@ def pixel_scale_arcsec(wcs: WCS) -> float:
 
 def mjy_sr_to_ujy_arcsec2(data: np.ndarray | float) -> np.ndarray | float:
     """
-    Convert surface brightness from ``MJy/sr`` to ``μJy/arcsec²``.
+    Convert surface brightness from ``MJy/sr`` to ``uJy/arcsec^2``.
 
     Parameters
     ----------
@@ -203,19 +204,19 @@ def surface_brightness_to_ujy(
     area_arcsec2: np.ndarray | float,
 ) -> np.ndarray | float:
     """
-    Convert surface brightness × solid angle to integrated μJy.
+    Convert surface brightness x solid angle to integrated uJy.
 
     Parameters
     ----------
     sb_ujy_arcsec2 : array or float
-        Surface brightness in μJy/arcsec².
+        Surface brightness in uJy/arcsec^2.
     area_arcsec2 : array or float
-        Solid angle in arcsec².
+        Solid angle in arcsec^2.
 
     Returns
     -------
     array or float
-        Flux density in μJy.
+        Flux density in uJy.
     """
     return np.asarray(sb_ujy_arcsec2, dtype=float) * np.asarray(
         area_arcsec2, dtype=float
@@ -227,14 +228,14 @@ def ujy_to_abmag(
     flux_err_ujy: np.ndarray | float | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[float, float]:
     """
-    Convert μJy flux (and optional error) to AB magnitude.
+    Convert uJy flux (and optional error) to AB magnitude.
 
     Parameters
     ----------
     flux_ujy : array or float
-        Flux density in μJy.
+        Flux density in uJy.
     flux_err_ujy : array or float, optional
-        1σ flux uncertainty in μJy.
+        1sigma flux uncertainty in uJy.
 
     Returns
     -------
@@ -272,7 +273,7 @@ def load_sci_extensions(
         Science array (float), error array or ``None``, WCS, and SCI header.
     """
     image = str(Path(image).expanduser().resolve())
-    with fits.open(image) as hdul:
+    with as_datamodel(image).open() as hdul:
         if 'SCI' in hdul and hdul['SCI'].data is not None:
             hdu = hdul['SCI']
         else:
@@ -364,14 +365,14 @@ def resolve_positions(
 
     if has_xy and not has_sky:
         if wcs is None:
-            raise ValueError('wcs is required to convert (x, y) → (ra, dec)')
+            raise ValueError('wcs is required to convert (x, y) -> (ra, dec)')
         sky = wcs.pixel_to_world(x_arr, y_arr)
         ra_arr = np.atleast_1d(np.asarray(sky.ra.deg, dtype=float))
         dec_arr = np.atleast_1d(np.asarray(sky.dec.deg, dtype=float))
     elif has_sky and not has_xy:
         if wcs is None:
-            raise ValueError('wcs is required to convert (ra, dec) → (x, y)')
-        world = wcs.pixel_to_world_values  # noqa: F841 — clarity
+            raise ValueError('wcs is required to convert (ra, dec) -> (x, y)')
+        world = wcs.pixel_to_world_values  # noqa: F841 - clarity
         xy = wcs.world_to_pixel_values(ra_arr, dec_arr)
         x_arr = np.atleast_1d(np.asarray(xy[0], dtype=float))
         y_arr = np.atleast_1d(np.asarray(xy[1], dtype=float))
@@ -436,7 +437,7 @@ def forced_aperture_photometry(
     Returns
     -------
     astropy.table.Table
-        Forced-photometry catalog with fluxes in μJy and AB magnitudes.
+        Forced-photometry catalog with fluxes in uJy and AB magnitudes.
     """
     image = str(Path(image).expanduser().resolve())
     data, err, wcs, _header = load_sci_extensions(image)
@@ -475,8 +476,8 @@ def forced_aperture_photometry(
     else:
         flux_err_native = bkg_std * math.sqrt(aper_area_pix)
 
-    # Native aperture_sum is Σ(MJy/sr) over pixels. Convert via mean SB ×
-    # solid angle (equivalent to sum × pixel_area_sr × 1e12 → μJy).
+    # Native aperture_sum is Sum(MJy/sr) over pixels. Convert via mean SB x
+    # solid angle (equivalent to sum x pixel_area_sr x 1e12 -> uJy).
     area_arcsec2 = aper_area_pix * (pixscale**2)
     with np.errstate(divide='ignore', invalid='ignore'):
         mean_sb = np.where(

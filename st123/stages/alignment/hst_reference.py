@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 
 import numpy as np
 from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.table import Table
 from astropy.wcs import WCS
 
@@ -75,7 +76,7 @@ def _local_detectable(
     half: int = 4,
     snr: float = 5.0,
 ) -> bool:
-    """True when a Gaia position shows a local peak above *snr* × sky RMS."""
+    """True when a Gaia position shows a local peak above *snr* x sky RMS."""
     ny, nx = sci.shape
     xi, yi = int(round(x)), int(round(y))
     if xi < half or yi < half or xi >= nx - half or yi >= ny - half:
@@ -111,7 +112,7 @@ def score_level3_gaia(
     """
     Count Gaia sources on illuminated, locally detectable pixels in *image*.
     """
-    from st123.alignment.gaia_catalog import query_gaia
+    from st123.stages.alignment.gaia_catalog import query_gaia
     from st123.utils.helpers import get_filter, get_instrument
 
     path = Path(image).expanduser().resolve()
@@ -124,7 +125,7 @@ def score_level3_gaia(
         logger.warning('Gaia query failed for %s: %s', path.name, exc)
         return Level3GaiaScore(path, 0, 0, 0, inst, filt)
 
-    with fits.open(path, memmap=True) as hdul:
+    with as_datamodel(path).open(memmap=True) as hdul:
         idx = _sci_hdu_index(hdul)
         sci = np.asarray(hdul[idx].data, dtype=np.float64)
         hdr = hdul[idx].header
@@ -237,7 +238,7 @@ def write_detection_refcat(
     out = Path(output).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    with fits.open(src, memmap=True) as hdul:
+    with as_datamodel(src).open(memmap=True) as hdul:
         idx = _sci_hdu_index(hdul)
         data = np.asarray(hdul[idx].data, dtype=float)
         if data.ndim > 2:
@@ -302,7 +303,7 @@ def write_detection_refcat(
             )
     n = count_phot_sources(out)
     logger.info(
-        'Wrote L3 detection refcat %s (%d sources, thr=%.1fσ fwhm=%.1f)',
+        'Wrote L3 detection refcat %s (%d sources, thr=%.1fsigma fwhm=%.1f)',
         out.name,
         n,
         nsigma,
@@ -378,10 +379,10 @@ def pick_best_level3(
     )
     scores: list[Level3GaiaScore] = []
     for i, path in enumerate(uniq, start=1):
-        logger.info('  [%d/%d] Gaia score %s …', i, len(uniq), path.name)
+        logger.info('  [%d/%d] Gaia score %s ...', i, len(uniq), path.name)
         scores.append(score_level3_gaia(path, snr=snr))
         logger.info(
-            '  [%d/%d] %s → detectable=%d illuminated=%d fov=%d',
+            '  [%d/%d] %s -> detectable=%d illuminated=%d fov=%d',
             i,
             len(uniq),
             path.name,
@@ -390,7 +391,7 @@ def pick_best_level3(
             scores[-1].n_gaia_fov,
         )
     # Rank: detectable desc, illuminated desc, prefer non-WFPC2, then FOV
-    # count, then redder broadband filters (F814W over F555W) — deeper
+    # count, then redder broadband filters (F814W over F555W) - deeper
     # continuum usually yields tighter Gaia centroids on sparse fields.
     def _filter_rank(filt: str) -> int:
         key = str(filt or '').strip().lower()
@@ -460,7 +461,7 @@ def ensure_preliminary_level3s(
     instruments : sequence of str or None, optional
         If set, only drizzle these instruments (e.g. ``ACS``, ``WFC3``).
     """
-    from st123.mosaic.hst_drizzle import (
+    from st123.stages.mosaic.hst_drizzle import (
         drizzle_filter_group,
         group_hst_frames,
         _drizzle_suffix,
@@ -484,7 +485,7 @@ def ensure_preliminary_level3s(
         before = len(groups)
         groups = {key: vals for key, vals in groups.items() if key[0] in allow}
         logger.info(
-            'Preliminary L3 instrument filter %s: %d → %d group(s)',
+            'Preliminary L3 instrument filter %s: %d -> %d group(s)',
             sorted(allow),
             before,
             len(groups),

@@ -11,7 +11,7 @@ from typing import Optional, Sequence
 from astropy.coordinates import SkyCoord
 from astropy.units import Quantity
 
-from st123.mast.mast import (
+from st123.stages.download.mast import (
     DEFAULT_DOWNLOAD_LAYOUT,
     DEFAULT_HST_INSTRUMENTS,
     download_hst_observations,
@@ -133,13 +133,14 @@ def query_mast_jwst(
     instruments: Sequence[str] | None = None,
     *,
     layout: str = DEFAULT_DOWNLOAD_LAYOUT,
-    mirimage_only: bool = False,
     dry_run: bool = False,
     allowed_filters: Optional[Sequence[str]] = None,
     force_miri: bool = False,
 ) -> MastDownloadResult:
     """
     Query MAST and download available JWST imaging.
+
+    MIRI downloads always keep imager ``*mirimage*`` products only.
 
     Parameters
     ----------
@@ -163,8 +164,6 @@ def query_mast_jwst(
         ``telescope/instrument/filter/obsid``
         (``JWST/MIRI/F560W/<obsid>``). Also accepts ``filter/obsid`` and
         ``filter_obsid``.
-    mirimage_only : bool, optional
-        Restrict products to MIRI imager ``*mirimage*`` files.
     dry_run : bool, optional
         List matching products without downloading.
     allowed_filters : sequence of str or None, optional
@@ -235,7 +234,6 @@ def query_mast_jwst(
             stage=stage,
             token=token,
             layout=layout,
-            mirimage_only=mirimage_only,
             dry_run=dry_run,
         )
     return MastDownloadResult(int(n))
@@ -287,7 +285,7 @@ def query_mast_hst(
         ``n_observations`` ready for the pipeline (newly downloaded /
         listed, or already fully present on disk). ``n_failed`` counts
         observations that still failed after product-list / download
-        retries (partial inventory → incomplete).
+        retries (partial inventory -> incomplete).
     """
     outdir_s = str(outdir)
     os.makedirs(outdir_s, exist_ok=True)
@@ -386,7 +384,6 @@ def query_and_download_miri(
         token=token,
         instruments=['MIRI'],
         layout='telescope/instrument/filter/obsid',
-        mirimage_only=True,
         dry_run=dry_run,
         allowed_filters=allowed_filters,
         force_miri=True,

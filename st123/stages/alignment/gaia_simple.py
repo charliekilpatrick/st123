@@ -16,6 +16,7 @@ from typing import Optional, Union
 
 import numpy as np
 from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.stats import sigma_clip
 from astropy.table import Table
 from astropy.wcs import WCS
@@ -229,7 +230,7 @@ def align_image_to_gaia_simple(
 
     Returns stats including ``dx_total``, ``dy_total``, ``n_match``.
     """
-    from st123.alignment.gaia_catalog import query_gaia
+    from st123.stages.alignment.gaia_catalog import query_gaia
 
     src = Path(image).expanduser().resolve()
     dst = Path(output).expanduser().resolve()
@@ -244,7 +245,7 @@ def align_image_to_gaia_simple(
 
         shutil.copy2(src, dst)
 
-    with fits.open(dst, mode='update', memmap=False) as hdul:
+    with as_datamodel(dst).open(mode='update', memmap=False) as hdul:
         idx = _sci_index(hdul)
         data = np.asarray(hdul[idx].data, dtype=float)
         bad = _bad_mask(hdul, data.shape[-2:])
@@ -312,7 +313,7 @@ def rewrite_phot_radec(
     df = pd.read_csv(phot, sep=r'\s+', engine='python')
     if 'x' not in df.columns or 'y' not in df.columns:
         raise ValueError(f'{phot.name} missing x/y columns')
-    with fits.open(img, memmap=True) as hdul:
+    with as_datamodel(img).open(memmap=True) as hdul:
         idx = _sci_index(hdul)
         w = WCS(hdul[idx].header, hdul, naxis=2)
     ra, dec = w.pixel_to_world_values(

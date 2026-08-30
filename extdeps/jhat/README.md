@@ -9,7 +9,7 @@ Docs: https://jhat.readthedocs.io/
 
 ## Why this fork exists
 
-st123’s MIRI↔NIRCam relative alignment pipeline (`st123.alignment`,
+st123’s MIRI↔NIRCam relative alignment pipeline (`st123.stages.alignment`,
 filter-specific calibrators, iterative refine, and `jhat_params` overrides)
 depends on a JHAT install that:
 

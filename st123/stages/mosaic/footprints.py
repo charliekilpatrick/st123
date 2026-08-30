@@ -15,10 +15,10 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import shapely
-from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.wcs import WCS
 
-from st123.mast import parse_s_region
+from st123.stages.download import parse_s_region
 from st123.utils.helpers import get_instrument
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def sky_polygons_from_fits(path: PathLike) -> list[shapely.Polygon]:
     path = Path(path)
     pgons: list[shapely.Polygon] = []
     try:
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             for hdu in hdul:
                 if getattr(hdu, 'name', '') != 'SCI':
                     continue
@@ -99,7 +99,7 @@ def project_sky_polygons_to_wcs(
             if pix.is_valid and pix.area > 0:
                 out.append(pix)
         except Exception as exc:
-            logger.debug('Skip sky→pix projection: %s', exc)
+            logger.debug('Skip sky->pix projection: %s', exc)
     return out
 
 

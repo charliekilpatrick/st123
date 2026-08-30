@@ -3,11 +3,11 @@ Shared utilities, CLI helpers, link helpers, and JHAT/DOLPHOT parameter sets.
 
 Submodules
 ----------
-- :mod:`st123.utils.helpers` — coordinates, FITS bookkeeping, visits, xmatch
-- :mod:`st123.utils.link` — symlink helpers for reduction ``raw/`` trees
-- :mod:`st123.utils.settings` — filters, MAST/alignment defaults, JHAT/DOLPHOT params
-- :mod:`st123.utils.compatibility` — cross-package compatibility adapters
-- :mod:`st123.utils.logging` — console/file logging; captures external stdout
+- :mod:`st123.utils.helpers` - coordinates, FITS bookkeeping, visits, xmatch
+- :mod:`st123.utils.link` - symlink helpers for reduction ``raw/`` trees
+- :mod:`st123.utils.settings` - filters, MAST/alignment defaults, JHAT/DOLPHOT params
+- :mod:`st123.utils.compatibility` - cross-package compatibility adapters
+- :mod:`st123.utils.logging` - console/file logging; captures external stdout
 
 Exports are resolved lazily so ``import st123.utils.logging`` does not pull in
 ``helpers`` (and its MAST/shapely dependency chain).

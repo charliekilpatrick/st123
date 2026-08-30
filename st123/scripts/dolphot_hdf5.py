@@ -126,9 +126,10 @@ def create_parser() -> argparse.ArgumentParser:
     parser = build_parser(
         description=(
             'Parse finished DOLPHOT photometry catalogs into compressed HDF5 '
-            'files (one per reference / mosaic box), matching the hst123 '
-            'catalog layout. Skips directories that already have a .h5 sidecar '
-            'unless --force is set.'
+            'files (one per reference / mosaic box by default), matching the '
+            'hst123 catalog layout. With --merge, build one mega catalog from '
+            'free NIRCam (master star list) plus MIRI/HST warmstarts. Skips '
+            'directories that already have a .h5 sidecar unless --force is set.'
         ),
     )
     add_base_dir(
@@ -143,9 +144,9 @@ def create_parser() -> argparse.ArgumentParser:
         parser,
         default=['all'],
         help=(
-            'Limit which finished runs to convert. Mission aliases: hst, jwst '
-            '(→ nircam), all (default), or explicit nircam|miri|acs|wfc3|wfpc2. '
-            'Alias: --instrument.'
+            'Limit which finished runs to convert (non-merge mode). Mission '
+            'aliases: hst, jwst (-> nircam), all (default), or explicit '
+            'nircam|miri|acs|wfc3|wfpc2. Alias: --instrument.'
         ),
     )
     parser.add_argument(
@@ -166,6 +167,39 @@ def create_parser() -> argparse.ArgumentParser:
         nargs='+',
         default=None,
         help='Explicit DOLPHOT working directories (skip auto-discovery).',
+    )
+    parser.add_argument(
+        '--merge',
+        action='store_true',
+        help=(
+            'Build one mega catalog: free NIRCam master star list plus '
+            'MIRI/HST warmstart columns matched by reference XY. Requires '
+            '--outfile. Auto-discovers inputs unless --phot is given.'
+        ),
+    )
+    parser.add_argument(
+        '--outfile',
+        type=str,
+        default=None,
+        help=(
+            'Mega-catalog HDF5 path (--merge). Sibling .phot/.columns use the '
+            'same stem in the same directory.'
+        ),
+    )
+    parser.add_argument(
+        '--phot',
+        nargs='+',
+        default=None,
+        help=(
+            'Explicit .phot paths for --merge (primary = first; typically '
+            'free NIRCam, then nircam_miri, then nircam_hst).'
+        ),
+    )
+    parser.add_argument(
+        '--match-tol-pix',
+        type=float,
+        default=0.05,
+        help='XY match tolerance in pixels for --merge (default: 0.05).',
     )
     parser.add_argument(
         '--force',
@@ -250,19 +284,58 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     configure_logging_from_args(args, 'dolphot-hdf5')
     try:
-        from st123.photometry.dolphot_catalog_hdf5 import (
+        from st123.stages.photometry.dolphot_catalog_hdf5 import (
             ensure_dolphot_catalog_hdf5,
             hdf5_path_for_phot_base,
         )
+
+        if args.verbose:
+            logger.info('Dataset: %s', dataset_label(args.base_dir))
+
+        compression = not bool(args.no_compression)
+
+        if bool(args.merge):
+            from st123.stages.photometry.megacatalog import (
+                build_megacatalog,
+                discover_megacatalog_phot_files,
+            )
+
+            if not args.outfile:
+                logger.error('--merge requires --outfile PATH.h5')
+                return 2
+            if args.dirs:
+                logger.error('--dir is for non-merge mode; use --phot with --merge')
+                return 2
+            try:
+                if args.phot:
+                    phot_files = [Path(p).expanduser().resolve() for p in args.phot]
+                else:
+                    phot_files = discover_megacatalog_phot_files(
+                        args.base_dir,
+                        group=args.group,
+                        box=None if args.box is None else args.box,
+                    )
+                out = build_megacatalog(
+                    phot_files,
+                    args.outfile,
+                    match_tol_pix=float(args.match_tol_pix),
+                    force=bool(args.force),
+                    compression=compression,
+                    dry_run=bool(args.dry_run),
+                )
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                logger.error('%s', exc)
+                return 1
+            if args.dry_run:
+                return 0
+            logger.info('Mega catalog ready: %s', out)
+            return 0
 
         try:
             jobs = _jobs_from_args(args)
         except (FileNotFoundError, ValueError) as exc:
             logger.error('%s', exc)
             return 1
-
-        if args.verbose:
-            logger.info('Dataset: %s', dataset_label(args.base_dir))
 
         if not jobs:
             logger.error(
@@ -273,7 +346,6 @@ def main(argv=None) -> int:
             return 1
 
         logger.info('Found %d DOLPHOT catalog(s)', len(jobs))
-        compression = not bool(args.no_compression)
         n_wrote = 0
         n_skip = 0
         n_fail = 0
@@ -286,7 +358,7 @@ def main(argv=None) -> int:
                     if exists and args.force
                     else ('skip (exists)' if exists else 'write')
                 )
-                logger.info('  [%s] %s → %s', job.label, action, h5.name)
+                logger.info('  [%s] %s -> %s', job.label, action, h5.name)
                 continue
             if exists and not args.force:
                 logger.info('  [%s] skip existing %s', job.label, h5.name)

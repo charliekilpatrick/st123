@@ -39,9 +39,9 @@ _HST_INSTRUMENT_NAMES = frozenset(
 
 def parse_telescopes(raw: Sequence[str] | str | None) -> list[str]:
     """
-    Normalize ``--telescope`` values to a de-duplicated ``['hst'|'jwst', …]``.
+    Normalize ``--telescope`` values to a de-duplicated ``['hst'|'jwst', ...]``.
 
-    Accepts space- and/or comma-separated tokens. ``None`` / empty → ``['jwst']``.
+    Accepts space- and/or comma-separated tokens. ``None`` / empty -> ``['jwst']``.
     """
     if raw is None:
         return ['jwst']
@@ -68,7 +68,7 @@ def infer_telescopes_from_instruments(
     instruments: Sequence[str],
 ) -> list[str]:
     """
-    Infer ``['hst'|'jwst', …]`` from known instrument names (order of first hit).
+    Infer ``['hst'|'jwst', ...]`` from known instrument names (order of first hit).
     """
     out: list[str] = []
     for inst in instruments:
@@ -82,8 +82,8 @@ def infer_telescopes_from_instruments(
     if not out:
         raise ValueError(
             'Cannot infer --telescope from instruments '
-            f'{list(instruments)}; use known HST (ACS, WFC3, …) or '
-            'JWST (NIRCAM, MIRI, …) names, or pass --telescope explicitly'
+            f'{list(instruments)}; use known HST (ACS, WFC3, ...) or '
+            'JWST (NIRCAM, MIRI, ...) names, or pass --telescope explicitly'
         )
     return out
 
@@ -149,8 +149,8 @@ def partition_instruments_by_telescope(
             raise ValueError(
                 'Cannot assign instrument(s) '
                 f'{unknown} with multiple --telescope values; '
-                'use known HST (ACS, WFC3, WFPC2, …) or JWST '
-                '(NIRCAM, MIRI, …) names'
+                'use known HST (ACS, WFC3, WFPC2, ...) or JWST '
+                '(NIRCAM, MIRI, ...) names'
             )
     return by_tel
 
@@ -162,7 +162,7 @@ def create_parser():
             'MAST_API_TOKEN) to authenticate and include proprietary data. '
             'Canonical layout is '
             '<base-dir>/download/<telescope>/<instrument>/<filter>/<obsid>/'
-            '<filename> (e.g. …/download/HST/ACS/F814W/<obsid>/'
+            '<filename> (e.g. .../download/HST/ACS/F814W/<obsid>/'
             'jey335ehq_flc.fits). Nested mastDownload/ trees are flattened. '
             'After a successful download, symlinks products into '
             '<base-dir>/reduction/raw (same as link-raw). '
@@ -181,7 +181,7 @@ def create_parser():
         ),
         help=(
             'Project / dataset root (object name = basename). Products go '
-            'under <base-dir>/download/…. Aliases: --basedir, --workdir, '
+            'under <base-dir>/download/.... Aliases: --basedir, --workdir, '
             '--data-dir, --download-dir, --outdir.'
         ),
     )
@@ -194,7 +194,7 @@ def create_parser():
         help=(
             'Optional mission filter: hst and/or jwst. Omit when '
             '--instruments already imply the mission(s) '
-            '(hst / ACS/WFC3/WFPC2 → HST; jwst / NIRCAM/MIRI → JWST). '
+            '(hst / ACS/WFC3/WFPC2 -> HST; jwst / NIRCAM/MIRI -> JWST). '
             'With neither --telescope nor --instruments, defaults to jwst.'
         ),
     )
@@ -206,8 +206,8 @@ def create_parser():
         help=(
             'Instruments or mission aliases (also selects telescope when '
             '--telescope is omitted): hst (= ACS WFC3 WFPC2), jwst (= NIRCAM '
-            'MIRI), all, or explicit names. Defaults: JWST→NIRCAM MIRI; '
-            'HST→ACS WFC3 WFPC2. Alias: --instrument.'
+            'MIRI), all, or explicit names. Defaults: JWST->NIRCAM MIRI; '
+            'HST->ACS WFC3 WFPC2. Alias: --instrument.'
         ),
     )
     parser.add_argument(
@@ -224,11 +224,6 @@ def create_parser():
         ),
     )
     add_filters(parser)
-    parser.add_argument(
-        '--mirimage-only',
-        action='store_true',
-        help='Keep only MIRI imager (*mirimage*) products (JWST only).',
-    )
     parser.add_argument(
         '--force-miri',
         action='store_true',
@@ -290,18 +285,6 @@ def _download_one_telescope(
             allowed_filters=allowed_filters,
         )
 
-    mirimage_only = bool(args.mirimage_only)
-    layout = args.layout
-    if (
-        instruments is not None
-        and len(instruments) == 1
-        and str(instruments[0]).upper() == 'MIRI'
-    ):
-        if layout in (
-            'telescope/instrument/filter/obsid',
-            'filter/obsid',
-        ):
-            mirimage_only = True
     return query_mast_jwst(
         coord,
         outdir=outdir,
@@ -309,8 +292,7 @@ def _download_one_telescope(
         stage=args.stage,
         token=args.token,
         instruments=list(instruments),
-        layout=layout,
-        mirimage_only=mirimage_only,
+        layout=args.layout,
         dry_run=args.dry_run,
         allowed_filters=allowed_filters,
         force_miri=bool(getattr(args, 'force_miri', False)),
@@ -325,12 +307,12 @@ def main(argv=None) -> int:
         # Deferred: astroquery / MAST stack.
         from astropy import units as u
 
-        from st123.mast.download import (
+        from st123.stages.download.download import (
             query_mast_hst,
             query_mast_jwst,
             resolve_outdir,
         )
-        from st123.mast.mast import normalize_filter_name
+        from st123.stages.download.mast import normalize_filter_name
         from st123.scripts.link_raw import link_raw_tree
         from st123.utils.helpers import parse_coord
 
@@ -380,7 +362,7 @@ def main(argv=None) -> int:
         try:
             for telescope, tel_instruments in active:
                 logger.info(
-                    'Downloading %s instruments=%s → %s',
+                    'Downloading %s instruments=%s -> %s',
                     telescope.upper(),
                     ', '.join(tel_instruments),
                     outdir,
@@ -441,7 +423,7 @@ def main(argv=None) -> int:
             )
             partial_fail = True
 
-        # Mirror link-raw per requested instrument (never instrument=ALL —
+        # Mirror link-raw per requested instrument (never instrument=ALL -
         # that would re-link leftover trees like WFPC2 from earlier runs).
         if args.dry_run:
             logger.info('Dry run: skipping link-raw into reduction/raw')

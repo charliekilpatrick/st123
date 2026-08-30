@@ -1,4 +1,4 @@
-"""Tests for catalog script and st123.photometry.catalog helpers."""
+"""Tests for catalog script and st123.stages.photometry.catalog helpers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from st123.photometry.catalog import get_filters, map_columns
+from st123.stages.photometry.catalog import get_filters, map_columns
 from st123.scripts import catalog as catalog_script
 
 
@@ -61,7 +61,7 @@ def test_catalog_main_calls_create_common(tmp_path: Path):
     csv_path = tmp_path / 'rsg_f115w.csv'
     pd.DataFrame({'idx': [1, 2], 'x': [10.0, 11.0]}).to_csv(csv_path, index=False)
     outfile = tmp_path / 'combined.csv'
-    with patch('st123.photometry.catalog.create_common_catalog') as mock_create:
+    with patch('st123.stages.photometry.catalog.create_common_catalog') as mock_create:
         rc = catalog_script.main(['--photdir', str(tmp_path), '--outfile', str(outfile)])
     assert rc == 0
     mock_create.assert_called_once()

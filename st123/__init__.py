@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - editable/source tree without build
     except PackageNotFoundError:
         __version__ = '0.0.0+unknown'
 
-# Public names historically re-exported from :mod:`st123.alignment`.
+# Public names historically re-exported from :mod:`st123.stages.alignment`.
 _ALIGNMENT_EXPORTS = frozenset(
     {
         'add_bin_dq',
@@ -48,7 +48,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name in _ALIGNMENT_EXPORTS:
-        from st123 import alignment as _alignment
+        from st123.stages import alignment as _alignment
 
         return getattr(_alignment, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

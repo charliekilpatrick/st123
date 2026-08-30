@@ -3,10 +3,10 @@ Image footprints, overlap scoring, and Level-3 mosaic / coadd helpers.
 
 Submodules
 ----------
-- :mod:`st123.mosaic.region` — illuminated footprints and ``S_REGION`` polygons
-- :mod:`st123.mosaic.image_overlap` — science vs reference footprint overlap
-- :mod:`st123.mosaic.mosaic` — overlap splitting, PSF matching, coadds, GWCS
-- :mod:`st123.mosaic.hst_drizzle` — HST AstroDrizzle helpers
+- :mod:`st123.stages.mosaic.region` - illuminated footprints and ``S_REGION`` polygons
+- :mod:`st123.stages.mosaic.image_overlap` - science vs reference footprint overlap
+- :mod:`st123.stages.mosaic.mosaic` - overlap splitting, PSF matching, coadds, GWCS
+- :mod:`st123.stages.mosaic.hst_drizzle` - HST AstroDrizzle helpers
 
 All public symbols are lazy so console scripts can import a single submodule
 (e.g. ``hst_drizzle``) without loading DrizzlePac / JWST resample stacks.
@@ -89,10 +89,15 @@ _MOSAIC_EXPORTS = frozenset(
         'plan_mosaic_boxes',
         'plan_existing_box',
         'plan_centered_box',
+        'resolve_existing_box_dir',
+        'box_coadd_i2d_paths',
         'build_centered_stamp_wcs',
         'rescale_wcs_to_pixel_scale',
+        'run_jwst_filter_image3_jobs',
+        'jwst_filter_image3_worker',
         'slice_box_wcs',
         'filter_frames_overlapping_box',
+        'filter_frames_covering_point',
         'STAMP_WCS_BASENAME',
         'assign_stable_box_ids',
         'ensure_box_stamp_wcs',
@@ -117,19 +122,19 @@ __all__ = sorted(
 
 def __getattr__(name: str) -> Any:
     if name in _HST_EXPORTS:
-        from st123.mosaic import hst_drizzle as _mod
+        from st123.stages.mosaic import hst_drizzle as _mod
 
         return getattr(_mod, name)
     if name in _OVERLAP_EXPORTS:
-        from st123.mosaic import image_overlap as _mod
+        from st123.stages.mosaic import image_overlap as _mod
 
         return getattr(_mod, name)
     if name in _REGION_EXPORTS:
-        from st123.mosaic import region as _mod
+        from st123.stages.mosaic import region as _mod
 
         return getattr(_mod, name)
     if name in _MOSAIC_EXPORTS:
-        from st123.mosaic import mosaic as _mod
+        from st123.stages.mosaic import mosaic as _mod
 
         return getattr(_mod, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

@@ -30,7 +30,7 @@ def _write_minimal_catalog(outdir: Path, *, name: str | None = None) -> Path:
 
 
 def test_hdf5_path_for_phot_base():
-    from st123.photometry.dolphot_catalog_hdf5 import hdf5_path_for_phot_base
+    from st123.stages.photometry.dolphot_catalog_hdf5 import hdf5_path_for_phot_base
 
     assert hdf5_path_for_phot_base('/tmp/phot_0_0.phot').name == 'phot_0_0.h5'
     assert hdf5_path_for_phot_base('/tmp/dp0000').name == 'dp0000.h5'
@@ -38,7 +38,7 @@ def test_hdf5_path_for_phot_base():
 
 def test_ensure_dolphot_catalog_hdf5_roundtrip(tmp_path: Path):
     h5py = pytest.importorskip('h5py')
-    from st123.photometry.dolphot_catalog_hdf5 import (
+    from st123.stages.photometry.dolphot_catalog_hdf5 import (
         ensure_dolphot_catalog_hdf5,
         read_dolphot_catalog_hdf5,
     )
@@ -68,7 +68,7 @@ def test_ensure_dolphot_catalog_hdf5_roundtrip(tmp_path: Path):
 def test_ensure_uses_dolphot_param(tmp_path: Path):
     """st123 run dirs store the input param as dolphot.param, not <base>.param."""
     pytest.importorskip('h5py')
-    from st123.photometry.dolphot_catalog_hdf5 import (
+    from st123.stages.photometry.dolphot_catalog_hdf5 import (
         ensure_dolphot_catalog_hdf5,
         _load_json_payload,
     )
@@ -170,3 +170,185 @@ def test_dolphot_hdf5_parser_help():
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(['--help'])
     assert exc.value.code == 0
+
+
+def _write_filter_catalog(
+    outdir: Path,
+    *,
+    name: str | None = None,
+    filt: str,
+    xy_mags: list[tuple[float, float, str]],
+) -> Path:
+    """Write a minimal DOLPHOT .phot with one combined-filter block."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    label = name or outdir.name
+    base = outdir / f'{label}.phot'
+    (outdir / 'dolphot.param').write_text('Nimg = 1\nFitSky = 2\n', encoding='utf-8')
+    obj = [
+        'Extension',
+        'Chip',
+        'Object X position',
+        'Object Y position',
+        'Chi for fit',
+        'Signal-to-noise',
+        'Object sharpness',
+        'Object roundness',
+        'Direction of major axis',
+        'Crowding',
+        'Object type',
+        'Pass Detected',
+    ]
+    block = [
+        f'Total counts, {filt}',
+        f'Total sky level, {filt}',
+        f'Normalized count rate, {filt}',
+        f'Normalized count rate uncertainty, {filt}',
+        f'Instrumental ABMAG magnitude, {filt}',
+        f'Transformed UBVRI magnitude, {filt}',
+        f'Magnitude uncertainty, {filt}',
+        f'Chi, {filt}',
+        f'Signal-to-noise, {filt}',
+        f'Sharpness, {filt}',
+        f'Roundness, {filt}',
+        f'Crowding, {filt}',
+        f'Photometry quality flag, {filt}',
+    ]
+    Path(str(base) + '.columns').write_text(
+        ''.join(f'{i}. {n}\n' for i, n in enumerate(obj + block, start=1)),
+        encoding='utf-8',
+    )
+    lines = []
+    for x, y, mag in xy_mags:
+        obj_vals = [
+            '0',
+            '1',
+            f'{x:.3f}',
+            f'{y:.3f}',
+            '1.0',
+            '10.0',
+            '0.0',
+            '0.0',
+            '0.0',
+            '0.0',
+            '1',
+            '1',
+        ]
+        phot_vals = ['100'] * 4 + [mag, '99.999', '0.01'] + ['0'] * 6
+        lines.append(' '.join(obj_vals + phot_vals))
+    base.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    Path(str(base) + '.info').write_text('1 sets of output data\n', encoding='utf-8')
+    Path(str(base) + '.data').write_text('WCS image 1: 1\n', encoding='utf-8')
+    Path(str(base) + '.warnings').write_text('', encoding='utf-8')
+    return base
+
+
+def test_discover_megacatalog_phot_files(tmp_path: Path):
+    from st123.stages.photometry.megacatalog import discover_megacatalog_phot_files
+
+    project = tmp_path / 'SN'
+    nircam = _write_filter_catalog(
+        project / 'reduction' / 'phot_0_sn',
+        filt='NIRCAM_F150W',
+        xy_mags=[(10.0, 20.0, '20.0'), (11.0, 21.0, '21.0')],
+    )
+    miri = _write_filter_catalog(
+        project / 'dolphot' / 'nircam_miri_0_sn',
+        filt='MIRI_F770W',
+        xy_mags=[(10.0, 20.0, '18.0')],
+    )
+    hst = _write_filter_catalog(
+        project / 'dolphot' / 'nircam_hst_0_sn',
+        filt='WFC3_F814W',
+        xy_mags=[(10.0, 20.0, '19.0')],
+    )
+    found = discover_megacatalog_phot_files(project, group=0, box='sn')
+    assert found == [nircam, miri, hst]
+
+
+def test_build_megacatalog_nircam_master_fill(tmp_path: Path):
+    pytest.importorskip('h5py')
+    from st123.stages.photometry.megacatalog import build_megacatalog
+
+    project = tmp_path / 'SN'
+    nircam = _write_filter_catalog(
+        project / 'reduction' / 'phot_0_sn',
+        filt='NIRCAM_F150W',
+        xy_mags=[(10.0, 20.0, '20.0'), (11.0, 21.0, '21.0')],
+    )
+    miri = _write_filter_catalog(
+        project / 'dolphot' / 'nircam_miri_0_sn',
+        filt='MIRI_F770W',
+        xy_mags=[(10.0, 20.0, '18.5')],
+    )
+    hst = _write_filter_catalog(
+        project / 'dolphot' / 'nircam_hst_0_sn',
+        filt='WFC3_F814W',
+        xy_mags=[(10.0, 20.0, '19.5')],
+    )
+    out_h5 = project / 'dolphot' / 'megacatalog_0_sn' / 'megacatalog_0_sn.h5'
+    written = build_megacatalog(
+        [nircam, miri, hst],
+        out_h5,
+        compression=False,
+        force=True,
+    )
+    assert written == out_h5.resolve()
+    assert out_h5.is_file()
+    phot = out_h5.with_suffix('.phot')
+    cols = Path(str(phot) + '.columns')
+    assert phot.is_file() and cols.is_file()
+    text = cols.read_text()
+    assert 'NIRCAM_F150W' in text
+    assert 'MIRI_F770W' in text
+    assert 'WFC3_F814W' in text
+    rows = [ln.split() for ln in phot.read_text().splitlines() if ln.strip()]
+    assert len(rows) == 2
+    # Combined blocks are 13 cols each after 12 object cols; mag is index 4 in block.
+    assert float(rows[0][16]) == pytest.approx(20.0)  # F150W mag
+    assert float(rows[0][16 + 13]) == pytest.approx(18.5)  # F770W
+    assert float(rows[0][16 + 26]) == pytest.approx(19.5)  # F814W
+    assert float(rows[1][16 + 13]) == pytest.approx(99.999)
+    assert float(rows[1][16 + 26]) == pytest.approx(99.999)
+
+
+def test_dolphot_hdf5_merge_requires_outfile(tmp_path: Path):
+    from st123.scripts import dolphot_hdf5 as dh
+
+    project = tmp_path / 'SN'
+    project.mkdir()
+    rc = dh.main(['--base-dir', str(project), '--merge', '-v'])
+    assert rc == 2
+
+
+def test_dolphot_hdf5_merge_cli(tmp_path: Path):
+    pytest.importorskip('h5py')
+    from st123.scripts import dolphot_hdf5 as dh
+
+    project = tmp_path / 'SN'
+    nircam = _write_filter_catalog(
+        project / 'reduction' / 'phot_0_sn',
+        filt='NIRCAM_F150W',
+        xy_mags=[(10.0, 20.0, '20.0')],
+    )
+    miri = _write_filter_catalog(
+        project / 'dolphot' / 'nircam_miri_0_sn',
+        filt='MIRI_F770W',
+        xy_mags=[(10.0, 20.0, '18.0')],
+    )
+    out_h5 = project / 'dolphot' / 'megacatalog_0_sn' / 'megacatalog_0_sn.h5'
+    rc = dh.main(
+        [
+            '--base-dir',
+            str(project),
+            '--merge',
+            '--phot',
+            str(nircam),
+            str(miri),
+            '--outfile',
+            str(out_h5),
+            '--no-compression',
+            '-v',
+        ]
+    )
+    assert rc == 0
+    assert out_h5.is_file()

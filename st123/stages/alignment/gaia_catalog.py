@@ -15,7 +15,7 @@ from typing import Literal, Sequence
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.table import Table
 from astropy.wcs import WCS
 
@@ -29,10 +29,10 @@ VIZIER_GAIA_DR2 = 'I/345/gaia2'
 GAIA_CACHE_DIRNAME = 'gaia'
 
 # Floor on field-cone radius so sparse / small-FOV HST visits still pull enough
-# Gaia for gaia_simple and absolute checks (NGC 3913-like fields need ~0.1°).
+# Gaia for gaia_simple and absolute checks (NGC 3913-like fields need ~0.1 deg).
 GAIA_MIN_CONE_RADIUS_DEG = 0.1
 
-# Map common VizieR column names → TAP / JHAT-style names used elsewhere.
+# Map common VizieR column names -> TAP / JHAT-style names used elsewhere.
 _VIZIER_COLMAP = (
     ('RA_ICRS', 'ra'),
     ('DE_ICRS', 'dec'),
@@ -68,7 +68,7 @@ def cut_gaia_sources(image: str, table_gaia: Table) -> Table:
     """
     if len(table_gaia) == 0:
         return table_gaia
-    with fits.open(image, memmap=True) as im:
+    with as_datamodel(image).open(memmap=True) as im:
         hdr = im['SCI'].header
         w = WCS(hdr)
         nx, ny = hdr['NAXIS1'], hdr['NAXIS2']
@@ -84,7 +84,7 @@ def cut_gaia_sources(image: str, table_gaia: Table) -> Table:
 
 
 def _normalize_vizier_gaia(table: Table) -> Table:
-    """Rename Vizier columns to TAP-style ``ra`` / ``dec`` / … names."""
+    """Rename Vizier columns to TAP-style ``ra`` / ``dec`` / ... names."""
     out = table.copy()
     for src, dest in _VIZIER_COLMAP:
         if src in out.colnames and dest not in out.colnames:
@@ -108,7 +108,7 @@ def _image_cone(
     telescope: str = 'jwst',
 ) -> tuple[SkyCoord, u.Quantity]:
     """Return cone center and radius covering the science footprint."""
-    with fits.open(image, memmap=True) as im:
+    with as_datamodel(image).open(memmap=True) as im:
         hdr = im['SCI'].header
         nx = hdr['NAXIS1']
         ny = hdr['NAXIS2']
@@ -199,7 +199,7 @@ def _union_cone(
         dec=np.rad2deg(np.arcsin(np.clip(z.mean(), -1.0, 1.0))) * u.deg,
         frame='icrs',
     )
-    # Radius = max(distance to corner of each image) ≈ center sep + image radius.
+    # Radius = max(distance to corner of each image) ~ center sep + image radius.
     need = 0.0
     for c, r in zip(centers, radii):
         need = max(need, float(mean.separation(c).deg) + r)
@@ -332,7 +332,7 @@ def _save_gaia_cache(
             header='ra dec',
         )
     logger.info(
-        'Wrote field Gaia cache %s (%d sources, r=%.3f deg) → %s',
+        'Wrote field Gaia cache %s (%d sources, r=%.3f deg) -> %s',
         ecsv.name,
         len(table),
         radius.to_value(u.deg),
@@ -459,7 +459,7 @@ def fetch_gaia_cone(
 def _block_gaia_tap(*_args, **_kwargs):
     raise RuntimeError(
         'ESA Gaia TAP is disabled in st123. Use Vizier via '
-        'st123.alignment.gaia_catalog (JHAT is patched to do so automatically).'
+        'st123.stages.alignment.gaia_catalog (JHAT is patched to do so automatically).'
     )
 
 
@@ -625,7 +625,11 @@ def install_jhat_gaia_vizier_patch() -> None:
       remaining TAP path fails loudly instead of hanging on ESA.
     """
     try:
-        from astroquery.gaia import Gaia
+        # GaiaClass() prints ESA status banners on import; discard that noise.
+        from st123.utils.logging import capture_output
+
+        with capture_output(discard=True):
+            from astroquery.gaia import Gaia
 
         for name in ('launch_job', 'launch_job_async'):
             fn = getattr(Gaia, name, None)
@@ -648,7 +652,7 @@ def install_jhat_gaia_vizier_patch() -> None:
         return
 
     sjp.get_GAIA_sources = jhat_get_gaia_sources
-    logger.info('Installed JHAT Gaia→Vizier patch (ESA TAP disabled)')
+    logger.info('Installed JHAT Gaia->Vizier patch (ESA TAP disabled)')
 
 
 def ensure_gaia_catalog(
@@ -666,7 +670,7 @@ def ensure_gaia_catalog(
 
     Downloads once via Vizier into ``<cache_dir>/<dr>.ecsv`` (default
     ``<reduction>/gaia/``) and reuses it when the cached cone already covers
-    all footprints. Cone radius is at least *min_radius_deg* (default 0.1°).
+    all footprints. Cone radius is at least *min_radius_deg* (default 0.1 deg).
     """
     paths = [Path(p).expanduser() for p in images]
     if not paths:
@@ -697,7 +701,7 @@ def ensure_gaia_catalog(
         return ecsv
 
     logger.info(
-        'Fetching field Gaia catalog for %d image(s) → %s',
+        'Fetching field Gaia catalog for %d image(s) -> %s',
         len(paths),
         cache_dir,
     )
@@ -751,7 +755,7 @@ def write_gaia_refcat(
         mag = np.asarray(gaia['mag'], dtype=float)
     else:
         mag = np.full(len(gaia), np.nan)
-    with fits.open(image_s, memmap=True) as hdul:
+    with as_datamodel(image_s).open(memmap=True) as hdul:
         hdr = hdul['SCI'].header
         w = WCS(hdr)
     x, y = w.all_world2pix(ra, dec, 0)

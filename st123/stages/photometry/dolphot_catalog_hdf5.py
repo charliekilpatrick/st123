@@ -141,7 +141,7 @@ def find_column_index_0based(
 
     *key* must appear in the column description. If *image* is non-empty, it must
     appear in the description (after stripping a ``.fits`` suffix). If *image* is
-    empty, any column whose description contains *key* may match—the first such
+    empty, any column whose description contains *key* may match-the first such
     column is returned (same as substring ``"" in line`` being true for every line).
     """
     img = image.replace(".fits", "")
@@ -176,7 +176,7 @@ def load_dolphot_catalog_array(path: PathLike) -> np.ndarray:
     read once per scrape.
     """
     path = Path(path)
-    return np.loadtxt(path, dtype=np.float64)
+    return np.loadtxt(path, dtype=np.float64, ndmin=2)
 
 
 def dolphot_columns_to_astropy_table(
@@ -672,7 +672,7 @@ def _write_photometry_matrix_hdf5(
     photometry_path: str,
     compression: bool,
 ) -> None:
-    """Write catalog as ``photometry/data`` (n×m float64) + ``column_names``."""
+    """Write catalog as ``photometry/data`` (nxm float64) + ``column_names``."""
     import h5py
 
     out_path = Path(out_path)
@@ -1060,7 +1060,7 @@ def hdf5_path_for_phot_base(base: PathLike) -> Path:
     """
     Map a DOLPHOT catalog base to its default ``.h5`` sidecar.
 
-    ``phot_0_0.phot`` → ``phot_0_0.h5`` (hst123-style ``<base>.h5`` without the
+    ``phot_0_0.phot`` -> ``phot_0_0.h5`` (hst123-style ``<base>.h5`` without the
     ``.phot`` suffix). Any other basename keeps ``.h5`` via :meth:`Path.with_suffix`.
     """
     base = Path(base)

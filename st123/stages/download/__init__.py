@@ -3,10 +3,10 @@ MAST query, filter, and download helpers for HST and JWST imaging.
 
 Submodules
 ----------
-- :mod:`st123.mast.mast` — MAST auth, region queries, product filters, S_REGION
-- :mod:`st123.mast.download` — high-level download orchestration
+- :mod:`st123.stages.download.mast` - MAST auth, region queries, product filters, S_REGION
+- :mod:`st123.stages.download.download` - high-level download orchestration
 
-Exports are lazy so importing :mod:`st123.mast.mast` (e.g. ``parse_s_region``)
+Exports are lazy so importing :mod:`st123.stages.download.mast` (e.g. ``parse_s_region``)
 does not pull the download orchestration module.
 """
 
@@ -65,11 +65,11 @@ __all__ = sorted(_DOWNLOAD_EXPORTS | _MAST_EXPORTS)
 
 def __getattr__(name: str) -> Any:
     if name in _DOWNLOAD_EXPORTS:
-        from st123.mast import download as _mod
+        from st123.stages.download import download as _mod
 
         return getattr(_mod, name)
     if name in _MAST_EXPORTS:
-        from st123.mast import mast as _mod
+        from st123.stages.download import mast as _mod
 
         return getattr(_mod, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

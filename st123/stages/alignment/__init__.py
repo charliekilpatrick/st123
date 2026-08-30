@@ -2,8 +2,8 @@
 JWST / HST alignment drivers: JHAT relative align, MIRI pipeline, visit
 alignment, and HST Gaia alignment.
 
-Imports are lazy so ``import st123.alignment.hst_jhat`` (HST CLI path) does not
-pull in the JWST Image3 / CRDS stack from :mod:`st123.alignment.align`.
+Imports are lazy so ``import st123.stages.alignment.hst_jhat`` (HST CLI path) does not
+pull in the JWST Image3 / CRDS stack from :mod:`st123.stages.alignment.align`.
 """
 
 from __future__ import annotations
@@ -21,10 +21,14 @@ __all__ = [
     'HST_ABS_OFFSET_MAX_ARCSEC',
     'HST_INTERNAL_ALIGN_MAX_ARCSEC',
     'HST_L3_ALIGN_MAX_ARCSEC',
+    'FRAME_ABS_TOL_ARCSEC',
+    'FRAME_INTERNAL_TOL_ARCSEC',
+    'FRAME_SPARSE_TOL_ARCSEC',
     'align_hst_image',
     'align_hst_raw_dir',
     'align_jwst_image',
     'align_to_mosaic',
+    'build_frame_qa',
     'ensure_wfpc2_jhat_patch',
     'find_hst_abs_ref_image',
     'find_hst_l3_refcat',
@@ -58,6 +62,7 @@ __all__ = [
     'query_gaia',
     'rank_fallback_parents',
     'read_dispersion_mas',
+    'read_frame_qa',
     'refine_alignment_iteratively',
     'run_alignment',
     'run_jhat',
@@ -65,9 +70,11 @@ __all__ = [
     'run_overlaps',
     'run_reference_align_job',
     'select_fallback_parent',
+    'stamp_quality_headers',
     'wfpc2_filter_key_and_name',
     'write_alignment_provenance',
     'write_alignment_summary',
+    'write_frame_qa',
     'write_hst_alignment_summary',
 ]
 
@@ -91,20 +98,36 @@ _HST_EXPORTS = frozenset(
     }
 )
 
+_FRAME_QA_EXPORTS = frozenset(
+    {
+        'FRAME_ABS_TOL_ARCSEC',
+        'FRAME_INTERNAL_TOL_ARCSEC',
+        'FRAME_SPARSE_TOL_ARCSEC',
+        'build_frame_qa',
+        'read_frame_qa',
+        'stamp_quality_headers',
+        'write_frame_qa',
+    }
+)
+
 _GAIA_EXPORTS = frozenset({'query_gaia'})
 
 
 def __getattr__(name: str) -> Any:
     if name in _HST_EXPORTS:
-        from st123.alignment import hst_jhat as _hst
+        from st123.stages.alignment import hst_jhat as _hst
 
         return getattr(_hst, name)
+    if name in _FRAME_QA_EXPORTS:
+        from st123.stages.alignment import frame_qa as _fq
+
+        return getattr(_fq, name)
     if name in _GAIA_EXPORTS:
-        from st123.alignment import gaia_catalog as _gaia
+        from st123.stages.alignment import gaia_catalog as _gaia
 
         return getattr(_gaia, name)
     if name in __all__:
-        from st123.alignment import align as _align
+        from st123.stages.alignment import align as _align
 
         return getattr(_align, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
