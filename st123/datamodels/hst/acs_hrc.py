@@ -1,0 +1,19 @@
+"""HST ACS/HRC science-product datamodel."""
+
+from __future__ import annotations
+
+from st123.datamodels.hst.hst import HSTDataModel
+
+__all__ = ['ACSHRCDataModel']
+
+
+class ACSHRCDataModel(HSTDataModel):
+    """ACS/HRC ``flt`` / JHAT science product."""
+
+    instrument = 'ACS'
+    detector = 'HRC'
+    science_suffixes = ('_flt.fits', '_jhat.fits')
+
+    @property
+    def image_kind(self) -> str:
+        return 'acs'

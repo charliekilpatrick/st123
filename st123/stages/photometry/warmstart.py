@@ -3,8 +3,8 @@ Warm-start DOLPHOT runs seeded from an existing NIRCam catalog.
 
 Supports:
 
-* NIRCam → MIRI (``setup_miri_warmstart``; ``dolphotMIRI.pdf``)
-* NIRCam reference/catalog → HST science (``setup_hst_warmstart``;
+* NIRCam -> MIRI (``setup_miri_warmstart``; ``dolphotMIRI.pdf``)
+* NIRCam reference/catalog -> HST science (``setup_hst_warmstart``;
   ``hst_base_params`` / JHAT-aligned ACS/WFC3/WFPC2)
 
 Uses ``xytfile`` from a prior ``.phot`` catalog (DOLPHOT manual warm-start).
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
-from astropy.io import fits
+from st123.datamodels import as_datamodel
 
 from st123.utils.helpers import is_full_frame_miri
 
@@ -28,7 +28,7 @@ is_mirimask_compatible = is_full_frame_miri
 
 logger = logging.getLogger(__name__)
 
-from st123.photometry.dolphot import (
+from st123.stages.photometry.dolphot import (
     HST_WARMSTART_CROWD_MAX,
     HST_WARMSTART_MIN_SEP_ARCSEC,
     HST_WARMSTART_SHARP2_MAX,
@@ -46,7 +46,7 @@ from st123.photometry.dolphot import (
     prepare_frames,
     prepare_hst_frames,
 )
-from st123.photometry.dolphot_split import (
+from st123.stages.photometry.dolphot_split import (
     DOLPHOT_MAX_NIMG,
     DolphotRunPlan,
     write_split_paramfiles,
@@ -75,7 +75,7 @@ class WarmStartResult:
     miri_images : list of str
         Basenames of staged MIRI ``*_jhat.fits`` frames.
     hst_images : list of str
-        Basenames of staged HST science frames (NIRCam→HST warmstart).
+        Basenames of staged HST science frames (NIRCam->HST warmstart).
     command : str
         Shell command for a single-part run (empty when split; see *commands*).
     plan : DolphotRunPlan or None
@@ -386,12 +386,12 @@ def setup_miri_warmstart(
         Reference-pixel coordinates that must be retained (e.g. the SN).
     xyt_max_radius_arcsec : float or None, optional
         Keep only seeds within this radius of *xyt_center_xy* (or the first
-        ``xyt_force_xy`` point). Use ~5″ for single-target NGC3310 runs.
+        ``xyt_force_xy`` point). Use ~5" for single-target NGC3310 runs.
     xyt_center_xy : (x, y) or None, optional
         Center for the radius cut when not using ``xyt_force_xy``.
     prune_xyt_for_miri : bool, optional
-        If True, apply the recommended MIRI seed cuts (type=1, SNR≥10,
-        crowd≤0.5, sharp²≤0.01, minsep=0.30″) unless overridden above.
+        If True, apply the recommended MIRI seed cuts (type=1, SNR>=10,
+        crowd<=0.5, sharp^2<=0.01, minsep=0.30") unless overridden above.
     ncores : int, optional
         ``MaxThreads`` for the generated DOLPHOT launch command.
     max_nimg : int, optional
@@ -497,7 +497,7 @@ def setup_miri_warmstart(
         from astropy.wcs import WCS
         import astropy.units as u
 
-        with fits.open(ref_dst) as hdul:
+        with as_datamodel(ref_dst).open() as hdul:
             sci = hdul['SCI'] if 'SCI' in hdul else hdul[0]
             pixscale = float(
                 abs(WCS(sci.header).proj_plane_pixel_scales()[0].to(u.arcsec).value)
@@ -559,7 +559,7 @@ def setup_miri_warmstart(
     if plan.needs_merge:
         launch_lines += (
             '\n\nAfter all parts finish, merge with:\n'
-            '  python -c "from st123.photometry.dolphot_split import '
+            '  python -c "from st123.stages.photometry.dolphot_split import '
             f'finalize_split_outdir; finalize_split_outdir(r\'{out}\')"\n'
         )
     readme = out / 'WARMSTART_README.txt'
@@ -674,7 +674,12 @@ def discover_hst_jhat(
                 seen.add(p.resolve())
         if seen:
             break
-    return sorted(seen, key=lambda p: (str(p).lower(), p.name))
+    from st123.datamodels.hst import filter_paths_for_stage
+
+    return filter_paths_for_stage(
+        sorted(seen, key=lambda p: (str(p).lower(), p.name)),
+        stage='warmstart-discover',
+    )
 
 
 def setup_hst_warmstart(
@@ -741,7 +746,7 @@ def setup_hst_warmstart(
         Hardlink NIRCam products when possible.
     xyt_* / prune_xyt_for_hst :
         Seed catalog cuts (see :func:`phot_to_xyt`). When
-        *prune_xyt_for_hst* is True, apply HST defaults (type=1, SNR≥5, …)
+        *prune_xyt_for_hst* is True, apply HST defaults (type=1, SNR>=5, ...)
         unless overridden.
     ncores : int, optional
         Parallelism for HST prep and ``MaxThreads`` on the launch command.
@@ -839,7 +844,7 @@ def setup_hst_warmstart(
         from astropy.wcs import WCS
         import astropy.units as u
 
-        with fits.open(ref_dst) as hdul:
+        with as_datamodel(ref_dst).open() as hdul:
             sci = hdul['SCI'] if 'SCI' in hdul else hdul[0]
             pixscale = float(
                 abs(WCS(sci.header).proj_plane_pixel_scales()[0].to(u.arcsec).value)
@@ -914,7 +919,7 @@ def setup_hst_warmstart(
             param_path.write_text(text)
         # Optionally append NIRCam science frames to the param image list.
         if include_nircam_science and nircam_staged:
-            from st123.photometry.dolphot import write_paramfile
+            from st123.stages.photometry.dolphot import write_paramfile
 
             # Re-parse science chips produced by prepare_hst_frames.
             _, hst_bases = parse_param_image_list(param_path)
@@ -932,7 +937,7 @@ def setup_hst_warmstart(
         # Prefer user phot_out name in the launch command even if param
         # still lists the default staging name.
     else:
-        from st123.photometry.dolphot import write_paramfile
+        from st123.stages.photometry.dolphot import write_paramfile
 
         write_paramfile(
             out / 'dolphot.param',
@@ -959,7 +964,7 @@ def setup_hst_warmstart(
     n_xyt = sum(1 for _ in xyt_path.open())
     readme = out / 'WARMSTART_README.txt'
     readme.write_text(
-        'DOLPHOT NIRCam→HST warm-start run\n'
+        'DOLPHOT NIRCam->HST warm-start run\n'
         f'NIRCam source: {nircam_dir}\n'
         f'Photometry seed: {phot_src}\n'
         f'Reference (img0): {ref_dst.name}\n'

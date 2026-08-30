@@ -11,7 +11,7 @@ import pytest
 from astropy.io import fits
 from astropy.table import Table
 
-from st123.alignment.align import (
+from st123.stages.alignment.align import (
     create_dirs,
     get_input_images,
     pick_deepest_image,
@@ -79,9 +79,9 @@ def _fits_with_s_region(path: Path, offset: float = 0.0) -> Path:
     return path
 
 
-def test_visit_filter_dict(tmp_path: Path):
+def test_visit_filter_dict_prefers_f200w_over_larger_f150w(tmp_path: Path):
+    """Deep-filter rank beats a larger but lower-rank footprint."""
     image_small = _fits_with_s_region(tmp_path / 'small_footprint.fits', offset=0.0)
-    # Larger polygon → should be preferred for alignment
     image_large = _fits_with_s_region(tmp_path / 'large_footprint.fits', offset=0.0)
     coords = [150.0, 2.0, 150.05, 2.0, 150.05, 2.05, 150.0, 2.05]
     region = 'POLYGON ICRS  ' + ' '.join(str(c) for c in coords)
@@ -94,10 +94,11 @@ def test_visit_filter_dict(tmp_path: Path):
             'filter': ['F200W', 'F150W'],
             'image': [str(image_small), str(image_large)],
             'pupil': ['CLEAR', 'CLEAR'],
+            'exptime': [100.0, 100.0],
         }
     )
     result = visit_filter_dict(table)
-    assert result['v1'] == 'F150W'
+    assert result['v1'] == 'F200W'
 
 
 def test_align_parser():
@@ -135,7 +136,7 @@ def test_run_jhat_passes_absolute_outrootdir(tmp_path: Path):
     phot = tmp_path / 'ref.phot.txt'
     phot.write_text('ra dec\n')
 
-    with patch('st123.alignment.align.st_wcs_align') as mock_cls:
+    with patch('st123.stages.alignment.align.st_wcs_align') as mock_cls:
         instance = mock_cls.return_value
         run_jhat(
             align_image=str(tmp_path / 'img_cal.fits'),
@@ -153,10 +154,10 @@ def test_align_main_empty_workdir(tmp_path: Path):
     """Visit-mode align with no images should create dirs and exit cleanly."""
     empty = Table({'group': np.array([], dtype=int), 'visit': np.array([], dtype='U8')})
     with (
-        patch('st123.alignment.align.get_input_images', return_value=[]),
+        patch('st123.stages.alignment.align.get_input_images', return_value=[]),
         patch('st123.scripts.align.input_list', return_value=empty),
-        patch('st123.alignment.align.visit_filter_dict', return_value={}),
-        patch('st123.alignment.align.create_dirs', return_value=str(tmp_path)),
+        patch('st123.stages.alignment.align.visit_filter_dict', return_value={}),
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
     ):
         rc = align_script.main(
             ['--workdir', str(tmp_path), '--ncores', '1']
@@ -168,11 +169,11 @@ def test_align_main_visit_mode_explicit(tmp_path: Path):
     empty = Table({'group': np.array([], dtype=int), 'visit': np.array([], dtype='U8')})
     with (
         patch(
-            'st123.alignment.align.get_input_images', return_value=[]
+            'st123.stages.alignment.align.get_input_images', return_value=[]
         ) as get_imgs,
         patch('st123.scripts.align.input_list', return_value=empty),
-        patch('st123.alignment.align.visit_filter_dict', return_value={}),
-        patch('st123.alignment.align.create_dirs', return_value=str(tmp_path)),
+        patch('st123.stages.alignment.align.visit_filter_dict', return_value={}),
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
     ):
         rc = align_script.main(
             [
@@ -287,6 +288,21 @@ def test_align_parser_instruments_and_all():
     assert args.instruments == ['NIRCAM', 'MIRI', 'ACS', 'WFC3']
     assert args.skip_intermediate_mosaic is True
     assert args.nmax == 150
+    assert args.existing_box is None
+
+    args_box = parser.parse_args(
+        [
+            '--base-dir',
+            '/tmp/p',
+            '--mode',
+            'reference',
+            '--instruments',
+            'MIRI',
+            '--existing-box',
+            'group_0/ref_sn',
+        ]
+    )
+    assert args_box.existing_box == 'group_0/ref_sn'
 
     args_all = parser.parse_args(
         ['--base-dir', '/tmp/p', '--instruments', 'ALL']
@@ -295,7 +311,7 @@ def test_align_parser_instruments_and_all():
 
 
 def test_orchestrated_alignment_stage_order(tmp_path: Path):
-    """NIRCam → HST → mosaic → MIRI, in that order."""
+    """NIRCam -> HST -> mosaic -> MIRI, in that order."""
     calls: list[str] = []
 
     def _nircam(**kwargs):
@@ -375,7 +391,7 @@ def test_orchestrated_alignment_stage_order(tmp_path: Path):
 
 
 def test_orchestrated_align_skips_miri_only_jwst(tmp_path: Path):
-    """MIRI-only on disk → skip JWST stages; HST still runs."""
+    """MIRI-only on disk -> skip JWST stages; HST still runs."""
     import argparse
 
     calls: list[str] = []
@@ -471,6 +487,103 @@ def test_orchestrated_align_skips_miri_only_jwst(tmp_path: Path):
     assert 'nircam' in calls
 
 
+def _miri_orch_ns(tmp_path: Path, **kwargs):
+    import argparse
+
+    ns = argparse.Namespace(
+        base_dir=str(tmp_path),
+        ncores=1,
+        verbose=False,
+        skip_intermediate_mosaic=False,
+        existing_box=None,
+        force_miri=False,
+        nmax=150,
+        filters=None,
+        plot=False,
+        nbright=800,
+        match_radius=0.1,
+        no_clip_footprint=False,
+        no_refine=False,
+        refine_sigma=2.0,
+        refine_max_iter=5,
+        no_filter_calibrators=False,
+        no_fallback=False,
+        max_nircam_dispersion_mas=None,
+        min_ref_overlap_frac=0.02,
+        overlap_only=False,
+        align_only=False,
+        overlap_json=None,
+        overlap_outdir=None,
+        limit=None,
+        repo=None,
+        data_root=None,
+        legacy_overlap_file=None,
+        legacy_outdir=None,
+        _default_reference_data_dir=str(tmp_path),
+    )
+    for key, value in kwargs.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def test_orchestrated_miri_skips_mosaic_when_existing_box_has_coadds(tmp_path: Path):
+    """Stamp coadds (--existing-box) skip the full-field intermediate mosaic."""
+    box = tmp_path / 'reduction' / 'reference' / 'group_0' / 'ref_sn'
+    box.mkdir(parents=True)
+    (box / 'coadd_0_sn_f150w_i2d.fits').write_bytes(b'x')
+    calls: list[str] = []
+
+    def _mosaic(**kwargs):
+        calls.append('mosaic')
+        return 0
+
+    def _miri(args):
+        calls.append('miri')
+        assert args.existing_box == 'group_0/ref_sn'
+        return 0
+
+    ns = _miri_orch_ns(tmp_path, existing_box='group_0/ref_sn')
+    with (
+        patch.object(align_script, 'run_intermediate_nircam_mosaic', side_effect=_mosaic),
+        patch.object(align_script, 'run_reference_alignment', side_effect=_miri),
+        patch(
+            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            return_value=(4, 2),
+        ),
+    ):
+        rc = align_script.run_orchestrated_alignment(ns, ['MIRI'])
+    assert rc == 0
+    assert calls == ['miri']
+
+
+def test_orchestrated_miri_existing_box_without_coadds_fails(tmp_path: Path):
+    box = tmp_path / 'reduction' / 'reference' / 'group_0' / 'ref_sn'
+    box.mkdir(parents=True)
+    (box / 'stamp_wcs.fits').write_bytes(b'x')
+    calls: list[str] = []
+
+    def _mosaic(**kwargs):
+        calls.append('mosaic')
+        return 0
+
+    def _miri(args):
+        calls.append('miri')
+        return 0
+
+    ns = _miri_orch_ns(tmp_path, existing_box='group_0/ref_sn')
+    with (
+        patch.object(align_script, 'run_intermediate_nircam_mosaic', side_effect=_mosaic),
+        patch.object(align_script, 'run_reference_alignment', side_effect=_miri),
+        patch(
+            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            return_value=(4, 2),
+        ),
+    ):
+        rc = align_script.run_orchestrated_alignment(ns, ['MIRI'])
+    assert rc == 1
+    assert calls == []
+
+
 def test_align_main_instruments_dispatches_orchestrator(tmp_path: Path):
     with patch.object(
         align_script, 'run_orchestrated_alignment', return_value=0
@@ -498,13 +611,13 @@ def test_align_main_instruments_nircam_only_skips_orchestrator(tmp_path: Path):
     with (
         patch.object(align_script, 'run_orchestrated_alignment') as mock_orch,
         patch(
-            'st123.alignment.align.get_input_images', return_value=[]
+            'st123.stages.alignment.align.get_input_images', return_value=[]
         ),
         patch('st123.scripts.align.input_list', return_value=empty),
         patch(
-            'st123.alignment.align.visit_filter_dict', return_value={}
+            'st123.stages.alignment.align.visit_filter_dict', return_value={}
         ),
-        patch('st123.alignment.align.create_dirs', return_value=str(tmp_path)),
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
     ):
         rc = align_script.main(
             [
@@ -529,29 +642,54 @@ def test_run_visit_alignment_nonzero_on_worker_failure(tmp_path: Path):
             'filter': ['F200W'],
             'image': [str(tmp_path / 'a_cal.fits')],
             'pupil': ['CLEAR'],
+            'exptime': [100.0],
         }
     )
     filter_table = {'F200W': table}
 
     with (
-        patch('st123.alignment.align.get_input_images', return_value=['a.fits']),
+        patch('st123.stages.alignment.align.get_input_images', return_value=['a.fits']),
         patch('st123.scripts.align.input_list', return_value=table),
         patch(
-            'st123.alignment.align.visit_filter_dict', return_value={'v1': 'F200W'}
+            'st123.stages.alignment.align.visit_filter_dict', return_value={'v1': 'F200W'}
         ),
         patch(
-            'st123.alignment.align.get_visit_geoms', return_value={'v1': object()}
+            'st123.stages.alignment.align.get_visit_geoms',
+            return_value={'v1': type('G', (), {'area': 1.0})()},
         ),
-        patch('st123.alignment.align.pick_visit', return_value=('v1', 0.5)),
+        patch(
+            'st123.stages.alignment.align.rank_visits_as_abs_hubs', return_value=['v1']
+        ),
+        patch(
+            'st123.stages.alignment.align.mosaic_abs_quality',
+            return_value={
+                'ok': True,
+                'dispersion_mas': 10.0,
+                'n_calibrators': 100,
+                'max_mas': 40.0,
+                'path': 'mosaic.fits',
+            },
+        ),
+        patch('st123.stages.alignment.align.pick_visit', return_value=('v1', 0.5)),
         patch('st123.scripts.align.create_filter_table', return_value=filter_table),
         patch(
-            'st123.alignment.align.create_alignment_mosaic',
+            'st123.stages.alignment.align.create_alignment_mosaic',
             return_value=('mosaic.fits', (0.0, 0.0), 1),
         ),
-        patch('st123.alignment.align.fix_phot', return_value='mosaic.phot.txt'),
-        patch('st123.alignment.align.update_refcat', return_value=None),
-        patch('st123.alignment.align.align_to_mosaic', return_value=0),
-        patch('st123.alignment.align.create_dirs', return_value=str(tmp_path)),
+        patch('st123.stages.alignment.align.fix_phot', return_value='mosaic.phot.txt'),
+        patch('st123.stages.alignment.align.update_refcat', return_value=None),
+        patch('st123.stages.alignment.align.align_to_mosaic', return_value=0),
+        patch(
+            'st123.stages.alignment.align.retie_jwst_jhat_to_abs_ref',
+            return_value={
+                'ok': True,
+                'n_shifted': 0,
+                'n_ok': 0,
+                'n_fail_measure': 0,
+                'max_abs_arcsec': 0.0,
+            },
+        ),
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
     ):
         rc = align_script.run_visit_alignment(
             base_dir=tmp_path,
@@ -570,29 +708,55 @@ def test_run_visit_alignment_zero_when_workers_ok(tmp_path: Path):
             'filter': ['F200W'],
             'image': [str(tmp_path / 'a_cal.fits')],
             'pupil': ['CLEAR'],
+            'exptime': [100.0],
         }
     )
     filter_table = {'F200W': table}
+    # Area attribute used when scoring/logging hub footprint.
+    geom = type('G', (), {'area': 1.0})()
 
     with (
-        patch('st123.alignment.align.get_input_images', return_value=['a.fits']),
+        patch('st123.stages.alignment.align.get_input_images', return_value=['a.fits']),
         patch('st123.scripts.align.input_list', return_value=table),
         patch(
-            'st123.alignment.align.visit_filter_dict', return_value={'v1': 'F200W'}
+            'st123.stages.alignment.align.visit_filter_dict', return_value={'v1': 'F200W'}
         ),
         patch(
-            'st123.alignment.align.get_visit_geoms', return_value={'v1': object()}
+            'st123.stages.alignment.align.get_visit_geoms', return_value={'v1': geom}
         ),
-        patch('st123.alignment.align.pick_visit', return_value=('v1', 0.5)),
+        patch(
+            'st123.stages.alignment.align.rank_visits_as_abs_hubs', return_value=['v1']
+        ),
+        patch(
+            'st123.stages.alignment.align.mosaic_abs_quality',
+            return_value={
+                'ok': True,
+                'dispersion_mas': 10.0,
+                'n_calibrators': 100,
+                'max_mas': 40.0,
+                'path': 'mosaic.fits',
+            },
+        ),
+        patch('st123.stages.alignment.align.pick_visit', return_value=('v1', 0.5)),
         patch('st123.scripts.align.create_filter_table', return_value=filter_table),
         patch(
-            'st123.alignment.align.create_alignment_mosaic',
+            'st123.stages.alignment.align.create_alignment_mosaic',
             return_value=('mosaic.fits', (0.0, 0.0), 0),
         ),
-        patch('st123.alignment.align.fix_phot', return_value='mosaic.phot.txt'),
-        patch('st123.alignment.align.update_refcat', return_value=None),
-        patch('st123.alignment.align.align_to_mosaic', return_value=0),
-        patch('st123.alignment.align.create_dirs', return_value=str(tmp_path)),
+        patch('st123.stages.alignment.align.fix_phot', return_value='mosaic.phot.txt'),
+        patch('st123.stages.alignment.align.update_refcat', return_value=None),
+        patch('st123.stages.alignment.align.align_to_mosaic', return_value=0),
+        patch(
+            'st123.stages.alignment.align.retie_jwst_jhat_to_abs_ref',
+            return_value={
+                'ok': True,
+                'n_shifted': 0,
+                'n_ok': 0,
+                'n_fail_measure': 0,
+                'max_abs_arcsec': 0.0,
+            },
+        ),
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
     ):
         rc = align_script.run_visit_alignment(
             base_dir=tmp_path,
@@ -601,3 +765,98 @@ def test_run_visit_alignment_zero_when_workers_ok(tmp_path: Path):
             verbose=False,
         )
     assert rc == 0
+
+
+def test_run_visit_alignment_batches_filters_into_one_align(tmp_path: Path):
+    """All visit filters share one align_to_mosaic job pool."""
+    img_a = str(tmp_path / 'a_cal.fits')
+    img_b = str(tmp_path / 'b_cal.fits')
+    table = Table(
+        {
+            'group': [0, 0],
+            'visit': ['v1', 'v1'],
+            'filter': ['F200W', 'F150W'],
+            'image': [img_a, img_b],
+            'pupil': ['CLEAR', 'CLEAR'],
+            'exptime': [100.0, 80.0],
+        }
+    )
+    filter_table = {
+        'F200W': table[table['filter'] == 'F200W'],
+        'F150W': table[table['filter'] == 'F150W'],
+    }
+    geom = type('G', (), {'area': 1.0})()
+    mosaic = tmp_path / 'hub_mosaic.fits'
+    fits.PrimaryHDU(np.zeros((4, 4), dtype=np.float32)).writeto(mosaic)
+    phot = tmp_path / 'mosaic.phot.txt'
+    phot.write_text('ra dec\n')
+    jhat_jwst = tmp_path / 'jhat_jwst'
+    jhat_jwst.mkdir()
+    fits.PrimaryHDU(np.zeros((4, 4), dtype=np.float32)).writeto(
+        jhat_jwst / 'jw_dummy_jhat.fits'
+    )
+
+    with (
+        patch('st123.stages.alignment.align.get_input_images', return_value=['a.fits']),
+        patch('st123.scripts.align.input_list', return_value=table),
+        patch(
+            'st123.stages.alignment.align.visit_filter_dict', return_value={'v1': 'F200W'}
+        ),
+        patch('st123.stages.alignment.align.get_visit_geoms', return_value={'v1': geom}),
+        patch(
+            'st123.stages.alignment.align.rank_visits_as_abs_hubs', return_value=['v1']
+        ),
+        patch(
+            'st123.stages.alignment.align.mosaic_abs_quality',
+            return_value={
+                'ok': True,
+                'dispersion_mas': 10.0,
+                'n_calibrators': 100,
+                'max_mas': 40.0,
+                'path': str(mosaic),
+            },
+        ),
+        patch('st123.stages.alignment.align.pick_visit', return_value=('v1', 0.5)),
+        patch('st123.scripts.align.create_filter_table', return_value=filter_table),
+        patch(
+            'st123.stages.alignment.align.create_alignment_mosaic',
+            return_value=(str(mosaic), (0.0, 0.0), 0),
+        ),
+        patch('st123.stages.alignment.align.fix_phot', return_value=str(phot)),
+        patch('st123.stages.alignment.align.update_refcat', return_value=None),
+        patch(
+            'st123.stages.alignment.align.align_to_mosaic', return_value=0
+        ) as mock_align,
+        patch(
+            'st123.stages.alignment.align.select_jwst_jhats_for_abs_redo',
+            return_value=[],
+        ) as mock_select,
+        patch(
+            'st123.stages.alignment.align.retie_jwst_jhat_to_abs_ref',
+            return_value={
+                'ok': True,
+                'n_shifted': 0,
+                'n_ok': 0,
+                'n_fail_measure': 0,
+                'n_skip_large': 0,
+                'n_weak_peak': 0,
+                'n_skipped_non_jwst': 0,
+                'max_abs_arcsec': 0.0,
+                'frames': [],
+            },
+        ) as mock_retie,
+        patch('st123.stages.alignment.align.create_dirs', return_value=str(tmp_path)),
+    ):
+        rc = align_script.run_visit_alignment(
+            base_dir=tmp_path,
+            instrument='NIRCAM',
+            ncores=4,
+            verbose=False,
+        )
+    assert rc == 0
+    assert mock_align.call_count == 1
+    queued = list(mock_align.call_args.args[1])
+    assert set(queued) == {img_a, img_b}
+    assert mock_align.call_args.kwargs.get('ncores') == 4
+    assert mock_select.call_args.kwargs.get('measure_abs') is False
+    assert mock_retie.call_args.kwargs.get('ncores') == 4

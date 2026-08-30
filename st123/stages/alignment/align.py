@@ -4,13 +4,13 @@ Unified JWST alignment library.
 Everything needed to align JWST imaging lives here, ordered from low-level
 knobs to high-level orchestration:
 
-1. Calibrator settings — per-filter JHAT / refine tuning and quality-hold cuts
-2. Fallback helpers — MIRI→MIRI parent ranking, provenance headers
-3. JHAT core — photometry, dispersion, ``align_jwst_image``, visit mosaics
-4. Relative API — ``run_alignment`` plus reference-catalog construction
-5. Overlap discovery — footprint matching and alignment summary tables
-6. Parallel workers — spawn-safe visit / REFERENCE / MIRI_REL jobs
-7. Orchestration — ``align_from_frames`` / ``run_overlaps``
+1. Calibrator settings - per-filter JHAT / refine tuning and quality-hold cuts
+2. Fallback helpers - MIRI->MIRI parent ranking, provenance headers
+3. JHAT core - photometry, dispersion, ``align_jwst_image``, visit mosaics
+4. Relative API - ``run_alignment`` plus reference-catalog construction
+5. Overlap discovery - footprint matching and alignment summary tables
+6. Parallel workers - spawn-safe visit / REFERENCE / MIRI_REL jobs
+7. Orchestration - ``align_from_frames`` / ``run_overlaps``
 
 Visit and reference modes share the same parallel runner
 (``_run_jobs_parallel``), logging contract (``capture_output`` for JHAT /
@@ -64,6 +64,7 @@ import shapely  # noqa: E402
 from astropy import units as u  # noqa: E402
 from astropy.coordinates import SkyCoord  # noqa: E402
 from astropy.io import fits  # noqa: E402
+from st123.datamodels import DataModelLike, as_datamodel
 from astropy.stats import sigma_clipped_stats  # noqa: E402
 from astropy.table import Column, Row, Table, vstack  # noqa: E402
 from astropy.wcs import WCS  # noqa: E402
@@ -84,15 +85,14 @@ with suppress_output():
     from jwst.associations.lib.rules_level3_base import (  # noqa: E402
         DMS_Level3_Base,
     )
-    from jwst.datamodels import ImageModel  # noqa: E402
     from jwst.pipeline import calwebb_image3  # noqa: E402
 
 # JHAT's stock Gaia path uses ESA TAP; force Vizier for all JWST align paths.
-from st123.alignment.gaia_catalog import install_jhat_gaia_vizier_patch  # noqa: E402
+from st123.stages.alignment.gaia_catalog import install_jhat_gaia_vizier_patch  # noqa: E402
 
 install_jhat_gaia_vizier_patch()
 
-from st123.mosaic.region import SRegionPolygon  # noqa: E402
+from st123.stages.mosaic.region import SRegionPolygon  # noqa: E402
 from st123.utils.helpers import (  # noqa: E402
     input_list,
     is_full_frame_miri,
@@ -117,7 +117,7 @@ from st123.utils.settings import (  # noqa: E402
 #
 # F770W fields often yield hundreds of detections (PAH / arm structure). Across
 # frames, higher ``n_calibrators`` correlates with worse dispersion because busy
-# fields are harder — but *within* a frame the brightest JHAT matches are
+# fields are harder - but *within* a frame the brightest JHAT matches are
 # typically the most coherent calibrators. Severely trimming ``Nbright`` and
 # hard-clipping refine residuals therefore improves F770W solutions more than
 # magnitude / morphology cuts that reject bright sources.
@@ -193,13 +193,13 @@ class CalibratorSettings:
         }
 
 
-# Default (non-F770W) pipeline settings — use CLI / strict_jwst_params defaults.
+# Default (non-F770W) pipeline settings - use CLI / strict_jwst_params defaults.
 DEFAULT_CALIBRATOR_SETTINGS = CalibratorSettings()
 
 # F770W: prefer bright calibrators but do *not* over-clip to a tiny residual
 # floor. Hard 80 mas residuals with min_calibrators=15 previously produced
 # ~20-star solutions that looked good vs the refined subset (JWDISPM ~25 mas)
-# while destroying dither-to-dither consistency (~300–600 mas peer offsets).
+# while destroying dither-to-dither consistency (~300-600 mas peer offsets).
 # Pre-align pipeline WCSs already agree at ~20 mas; peer QA below recovers
 # that when REFERENCE overfits. Crowded/bright nuclei (e.g. M82) additionally
 # use the ``crowded_jwst_params`` retry in :func:`align_jwst_image`.
@@ -294,27 +294,13 @@ def describe_calibrator_settings(settings: CalibratorSettings) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2. Fallback (MIRI→MIRI relative) helpers
+# 2. Fallback (MIRI->MIRI relative) helpers
 # ---------------------------------------------------------------------------
 #
 # When direct reference alignment fails, align the failed frame to a
 # successfully aligned MIRI image that is closest in wavelength and has the
 # largest footprint overlap. Absolute dispersion is the quadrature sum of the
 # parent absolute dispersion and the new relative dispersion.
-
-
-# Approximate MIRI filter central wavelengths (microns), blue → red.
-MIRI_FILTER_WAVELENGTH_UM: dict[str, float] = {
-    'F560W': 5.6,
-    'F770W': 7.7,
-    'F1000W': 10.0,
-    'F1130W': 11.3,
-    'F1280W': 12.8,
-    'F1500W': 15.0,
-    'F1800W': 18.0,
-    'F2100W': 21.0,
-    'F2550W': 25.5,
-}
 
 
 @dataclass
@@ -348,67 +334,57 @@ F770W_MEAN_MEDIAN_SKEW_RATIO: float = 1.5
 F770W_SKEW_MEAN_FLOOR_FRAC: float = 0.7
 
 
-def filter_wavelength_um(filter_name: str) -> float:
+def filter_wavelength_um(image: DataModelLike) -> float:
     """
-    Return the central wavelength of a MIRI filter.
+    Return the pivot wavelength of a science frame in microns.
+
+    Reads photometric header cards on the datamodel (``PHOTPLAM`` in
+    Angstroms on HST / JWST imaging). Filter-name tables are not used.
 
     Parameters
     ----------
-    filter_name : str
-        Filter name such as ``'F1130W'``.
+    image
+        Datamodel or FITS path.
 
     Returns
     -------
     float
-        Central wavelength in microns, or ``inf`` when unparseable.
+        Pivot wavelength in microns, or ``inf`` when the header has no
+        usable wavelength card.
     """
-    key = str(filter_name).upper()
-    if key in MIRI_FILTER_WAVELENGTH_UM:
-        return MIRI_FILTER_WAVELENGTH_UM[key]
-    # Parse FnnnnW / FnnnW names when not in the table.
-    token = key.split('_', 1)[0]
-    if token.startswith('F') and token.endswith('W'):
-        digits = ''.join(ch for ch in token[1:-1] if ch.isdigit())
-        if digits:
-            # F560W → 5.60, F1000W → 10.00, F1130W → 11.30
-            val = float(digits)
-            return val / 100.0 if val >= 100 else val / 10.0
-    return float('inf')
+    return float(as_datamodel(image).wavelength_um)
 
 
-def sort_frames_blue_to_red(frames: list, *, filter_from_path) -> list:
+def sort_frames_blue_to_red(frames: list) -> list:
     """
-    Sort overlap frames by increasing filter wavelength, then path.
+    Sort overlap frames by increasing header wavelength, then path.
 
     Parameters
     ----------
     frames : list
         Overlap frames (``FrameOverlaps`` instances or dicts).
-    filter_from_path : callable
-        Maps a MIRI path to a filter name.
 
     Returns
     -------
     list
-        Frames ordered blue → red.
+        Frames ordered blue -> red.
     """
 
     def key(frame) -> tuple:
         path = frame['miri_path'] if isinstance(frame, dict) else frame.miri_path
-        filt = filter_from_path(path) or 'UNKNOWN'
-        return (filter_wavelength_um(filt), str(path))
+        return (filter_wavelength_um(path), str(path))
 
     return sorted(frames, key=key)
 
 
-def load_s_region(fits_path: str) -> SRegionPolygon:
+def load_s_region(image) -> SRegionPolygon:
     """
-    Parse ``S_REGION`` from the first HDU that defines it.
+    Parse ``S_REGION`` from a science datamodel.
 
     Parameters
     ----------
-    fits_path : str
-        FITS file to read.
+    image
+        Datamodel or FITS path.
 
     Returns
     -------
@@ -420,11 +396,11 @@ def load_s_region(fits_path: str) -> SRegionPolygon:
     KeyError
         If no HDU carries an ``S_REGION`` keyword.
     """
-    with fits.open(fits_path) as hdul:
-        for hdu in hdul:
-            if 'S_REGION' in hdu.header:
-                return SRegionPolygon.parse(hdu.header['S_REGION'])
-    raise KeyError(f'No S_REGION in {fits_path}')
+    model = as_datamodel(image)
+    text = model.s_region
+    if not text:
+        raise KeyError(f'No S_REGION in {model.path}')
+    return SRegionPolygon.parse(text)
 
 
 def sky_overlap_fraction(miri_a: str, miri_b: str) -> float:
@@ -501,9 +477,11 @@ def rank_fallback_parents(
     miri_path : str
         Frame that needs a parent.
     filter_name : str
-        Filter of ``miri_path``.
+        Filter of ``miri_path`` (same-filter ranking and dispersion cuts).
     successes : list of SuccessfulAlignment
-        Candidate parents.
+        Candidate parents. Wavelength ranking uses each parent's stored
+        ``wavelength_um`` (from that frame's photometric headers) and the
+        target frame's datamodel.
     min_overlap_fraction : float, optional
         Minimum sky overlap fraction to consider a parent.
     assume_relative_mas : float, optional
@@ -522,10 +500,17 @@ def rank_fallback_parents(
         return []
 
     target_filt = str(filter_name or '').upper().split('_', 1)[0]
-    target_wl = filter_wavelength_um(filter_name)
+    target_wl = filter_wavelength_um(miri_path)
     thr = max_reference_dispersion_mas(filter_name)
     has_finalized = any(not p.provisional for p in successes)
-    f770_wl = filter_wavelength_um('F770W')
+    f770_parents = [
+        p
+        for p in successes
+        if str(p.filter or '').upper().split('_', 1)[0] == 'F770W'
+    ]
+    f770_wl = (
+        float(f770_parents[0].wavelength_um) if f770_parents else float('nan')
+    )
     ranked: list[tuple[float, float, float, SuccessfulAlignment]] = []
     for parent in successes:
         if parent.miri_path == miri_path:
@@ -537,7 +522,7 @@ def rank_fallback_parents(
         if frac < min_overlap_fraction:
             continue
         # Skip provisional parents above the filter threshold when a finalized
-        # SUCCESS parent exists — avoids inheriting inflated absolute scores.
+        # SUCCESS parent exists - avoids inheriting inflated absolute scores.
         if (
             parent.provisional
             and has_finalized
@@ -554,7 +539,11 @@ def rank_fallback_parents(
         if parent_filt == target_filt:
             score += _SAME_FILTER_PARENT_BONUS_MAS
         # Redder-than-F770W frames should prefer an F770W absolute seed.
-        if target_wl > f770_wl + 0.05:
+        if (
+            math.isfinite(target_wl)
+            and math.isfinite(f770_wl)
+            and target_wl > f770_wl + 0.05
+        ):
             if parent_filt == 'F770W':
                 score += _F770W_SEED_BONUS_MAS
             elif parent.wavelength_um + 0.05 < f770_wl:
@@ -637,10 +626,10 @@ def repropagate_miri_rel_absolutes(
     Recompute MIRI_REL absolute dispersions after parent absolutes improve.
 
     Children that aligned to a provisional / early parent keep an inflated
-    ``JWDISPM`` = √(parent₀² + rel²) even after the parent later lands a better
+    ``JWDISPM`` = sqrt(parent0^2 + rel^2) even after the parent later lands a better
     absolute. This rewrites headers, summary rows, and ``successes`` from the
     stored ``JWDISPR`` / ``relative_dispersion_mas`` and the parent's current
-    absolute — WCS is unchanged.
+    absolute - WCS is unchanged.
 
     Parameters
     ----------
@@ -663,7 +652,7 @@ def repropagate_miri_rel_absolutes(
         by_miri[parent.miri_path] = parent
 
     n_updated = 0
-    # Iterate to convergence for short MIRI_REL chains (parent→child→…).
+    # Iterate to convergence for short MIRI_REL chains (parent->child->...).
     for _ in range(max(1, len(successes))):
         changed = False
         for child in list(successes):
@@ -675,7 +664,7 @@ def repropagate_miri_rel_absolutes(
             rel = float(child.relative_dispersion_mas)
             # Prefer JWDISPR from the product when present.
             try:
-                with fits.open(child.jhat_path, memmap=True) as hdul:
+                with as_datamodel(child.jhat_path).open(memmap=True) as hdul:
                     jwdispr = hdul[0].header.get('JWDISPR')
                 if jwdispr is not None:
                     rel_hdr = float(jwdispr) * 1000.0
@@ -720,7 +709,7 @@ def repropagate_miri_rel_absolutes(
             changed = True
             logger.info(
                 f'Repropagated MIRI_REL absolute {Path(child.miri_path).name}: '
-                f'{old_abs:.2f} → {new_abs:.2f} mas '
+                f'{old_abs:.2f} -> {new_abs:.2f} mas '
                 f'(parent {Path(parent.miri_path).name} '
                 f'abs={parent.dispersion_mas:.2f}, rel={rel:.2f})'
             )
@@ -854,7 +843,7 @@ def find_dispersion_refcat(jhat_path: str) -> str | None:
     """
     Locate the reference catalog used for the final dispersion measurement.
 
-    Preference order (per-frame ``alignment_output`` only — never shared
+    Preference order (per-frame ``alignment_output`` only - never shared
     cache paths, so parallel workers cannot cross-pollute counts):
 
     1. ``JWCAT`` basename beside the JHAT product
@@ -874,7 +863,7 @@ def find_dispersion_refcat(jhat_path: str) -> str | None:
     jhat = Path(jhat_path)
     parent = jhat.parent
     try:
-        with fits.open(jhat) as hdul:
+        with as_datamodel(jhat).open() as hdul:
             jwcat = hdul[0].header.get('JWCAT')
     except Exception:
         jwcat = None
@@ -963,7 +952,7 @@ def jwncal_is_plausible(n_cal: int, jhat_path: str | None = None) -> bool:
     # Soft-fail / empty match sets legitimately write 0.
     if n_cal == 0:
         return True
-    # Master F150W2-style catalogs are ~1e4–1e5; real MIRI/NIRCam match
+    # Master F150W2-style catalogs are ~1e4-1e5; real MIRI/NIRCam match
     # counts for a single frame are orders of magnitude smaller.
     if n_cal >= 5000:
         return False
@@ -1067,11 +1056,11 @@ def write_alignment_provenance(
         combination of the parent absolute and relative terms.
     n_calibrators : int, optional
         Number of calibrators used for the final alignment dispersion
-        (clipped science↔reference matches that produce ``JWDISPM``).
+        (clipped science<->reference matches that produce ``JWDISPM``).
         Stored in ``JWNCAL``. Pass the value written by :func:`jwst_dispersion`;
         do not pass JHAT ``*.refcat.txt`` row counts.
     """
-    with fits.open(jhat_path, mode='update') as hdul:
+    with as_datamodel(jhat_path).open(mode='update') as hdul:
         hdr = hdul[0].header
         mode = str(align_mode).upper()
         if mode == 'NIRCAM':
@@ -1164,10 +1153,10 @@ def add_alignment_groups(table: Table, use_shapely: bool = False) -> Table:
     pgons, guide_star_id = [], []
     table_indices = np.arange(len(table))
     for im in table['image']:
-        region = fits.open(im)['SCI'].header['S_REGION']
+        region = as_datamodel(im).s_region
         coords = np.array(region.split('POLYGON ICRS  ')[1].split(' '), dtype=float)
         pgons.append(shapely.Polygon(coords.reshape(4, 2)))
-        guide_star_id.append(fits.getval(im, 'GDSTARID', ext=0))
+        guide_star_id.append(as_datamodel(im).keyword('GDSTARID', ext=0))
 
     # For each guide star, find a reference image for each image and record it.
     guide_star_id, pgons = np.array(guide_star_id), np.array(pgons)
@@ -1217,9 +1206,55 @@ def add_alignment_groups(table: Table, use_shapely: bool = False) -> Table:
     return table
 
 
+# Absolute-hub filter preference for NIRCam visit seeding / mosaic filter.
+# Deep F200W / F150W hubs beat large but shallow or narrowband-led visits.
+_HUB_FILTER_RANK: dict[str, float] = {
+    'f200w': 100.0,
+    'f150w2': 90.0,
+    'f150w': 85.0,
+    'f277w': 70.0,
+    'f322w2': 68.0,
+    'f356w': 65.0,
+    'f444w': 60.0,
+    'f250m': 45.0,
+    'f300m': 45.0,
+    'f335m': 42.0,
+    'f360m': 42.0,
+    'f430m': 40.0,
+}
+
+# Seed mosaic must beat this Gaia residual (mas) with n_cal > 0.
+HUB_GAIA_MAX_MAS: float = 40.0
+# Post-pass abs retie search (arcsec); covers ~2" wrong-island cases.
+HUB_ABS_SEARCH_ARCSEC: float = 5.0
+# Post-pass: shift frames worse than this vs hub (arcsec).
+HUB_ABS_RETIE_TOL_ARCSEC: float = 0.050
+# Do not apply CRVAL shifts larger than this (false multimodal peaks).
+HUB_ABS_RETIE_MAX_APPLY_ARCSEC: float = 0.40
+# Require a stronger 2-D histogram peak before applying an abs retie shift.
+HUB_ABS_RETIE_MIN_PEAK: int = 8
+# Frames farther than this from the hub (with a confident peak) are re-JHAT'd
+# to the hub catalog rather than CRVAL-shifted.
+HUB_FRAME_ABS_MAX_MAS: float = 200.0
+
+
+def _hub_filter_rank(filt: str) -> float:
+    key = str(filt or '').lower()
+    if key in _HUB_FILTER_RANK:
+        return float(_HUB_FILTER_RANK[key])
+    if 'N' in key.upper():
+        return 5.0
+    return 25.0
+
+
 def visit_filter_dict(table: Table) -> dict[Any, str]:
     """
-    Find the broadband filter with maximum spatial coverage in each visit.
+    Choose each visit's alignment-mosaic filter.
+
+    Prefers deep broadband hubs (F200W > F150W2 > F150W > ...) over merely
+    largest footprint so shallow / large SW filters do not seed weak mosaics.
+    Narrowband filters are never selected when any broadband exists.
+    Footprint area and depth (frame count / exposure) break remaining ties.
 
     Parameters
     ----------
@@ -1235,28 +1270,58 @@ def visit_filter_dict(table: Table) -> dict[Any, str]:
     visit_filter = dict.fromkeys(visits)
     for vis in visits:
         tbl = table[table['visit'] == vis]
-        net_polygon = []
         filters = np.unique(tbl['filter']).value
-        is_broadband = []
+        best_filt: str | None = None
+        best_score = float('-inf')
         for filt in filters:
-            if 'N' in filt.upper():
-                is_broadband.append(False)
+            if 'N' in str(filt).upper():
                 continue
-            is_broadband.append(True)
             pgons = []
             filter_rows = tbl[tbl['filter'] == filt]
             for im, pupil in zip(filter_rows['image'], filter_rows['pupil']):
-                if 'N' in pupil.upper():
+                if 'N' in str(pupil).upper():
                     continue
-                region = fits.open(im)['SCI'].header['S_REGION']
+                region = as_datamodel(im).s_region
                 coords = np.array(
                     region.split('POLYGON ICRS  ')[1].split(' '), dtype=float
                 )
                 pgons.append(shapely.Polygon(coords.reshape(4, 2)))
-            net_polygon.append(shapely.unary_union(pgons))
-
-        area = [polygon.area for polygon in net_polygon]
-        visit_filter[vis] = filters[is_broadband][np.argmax(area)]
+            if not pgons:
+                continue
+            area = float(shapely.unary_union(pgons).area)
+            n_frames = int(len(filter_rows))
+            try:
+                exptime = float(
+                    np.nansum(np.asarray(filter_rows['exptime'], dtype=float))
+                )
+            except Exception:
+                exptime = 0.0
+            # Rank dominates; area / depth are tie-breaks only.
+            score = (
+                _hub_filter_rank(str(filt)) * 1.0e6
+                + area * 1.0e3
+                + float(n_frames)
+                + 1.0e-3 * exptime
+            )
+            if score > best_score:
+                best_score = score
+                best_filt = str(filt)
+        if best_filt is None:
+            # All-narrowband visit: fall back to largest footprint filter.
+            net_polygon = []
+            for filt in filters:
+                pgons = []
+                filter_rows = tbl[tbl['filter'] == filt]
+                for im, pupil in zip(filter_rows['image'], filter_rows['pupil']):
+                    region = as_datamodel(im).s_region
+                    coords = np.array(
+                        region.split('POLYGON ICRS  ')[1].split(' '), dtype=float
+                    )
+                    pgons.append(shapely.Polygon(coords.reshape(4, 2)))
+                net_polygon.append(shapely.unary_union(pgons) if pgons else None)
+            areas = [p.area if p is not None else -1.0 for p in net_polygon]
+            best_filt = str(filters[int(np.argmax(areas))])
+        visit_filter[vis] = best_filt
 
     return visit_filter
 
@@ -1284,7 +1349,7 @@ def get_visit_geoms(table: Table) -> dict[Any, shapely.geometry.base.BaseGeometr
             pgons = []
             filter_rows = tbl[tbl['filter'] == filt]
             for im in filter_rows['image']:
-                region = fits.open(im)['SCI'].header['S_REGION']
+                region = as_datamodel(im).s_region
                 coords = np.array(
                     region.split('POLYGON ICRS  ')[1].split(' '), dtype=float
                 )
@@ -1313,10 +1378,365 @@ def order_visits(table: Table) -> np.ndarray:
     return np.argsort([geom.area for geom in geoms.values()])[::-1]
 
 
+def jhat_product_needs_realign(
+    jhat_path: str | Path,
+    *,
+    catalog_path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """
+    Decide whether an existing JHAT product should be rebuilt.
+
+    Soft-fail copies (``JWNCAL`` / ``GANCAL`` == 0) and products older than
+    the alignment catalog are always rebuilt so a new hub catalog is not
+    skipped by a stale on-disk ``*_jhat.fits``.
+    """
+    path = Path(jhat_path)
+    if not path.is_file():
+        return True, 'missing'
+    try:
+        _disp_mas, n_cal = read_dispersion_mas(str(path))
+    except Exception:
+        return True, 'unreadable'
+    if n_cal is None or int(n_cal) <= 0:
+        return True, 'soft_fail'
+    if catalog_path is not None:
+        cat = Path(catalog_path)
+        if cat.is_file():
+            try:
+                if path.stat().st_mtime + 1.0e-6 < cat.stat().st_mtime:
+                    return True, 'stale_vs_catalog'
+            except OSError:
+                pass
+    return False, 'ok'
+
+
+def remove_jhat_for_realign(jhat_path: str | Path) -> None:
+    """Delete a JHAT product (and break a symlink) so JHAT can rewrite it."""
+    path = Path(jhat_path)
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+    except OSError as exc:
+        logger.warning('Could not remove %s for realign: %s', path, exc)
+
+
+def is_jwst_science_jhat(path: str | Path) -> bool:
+    """
+    Return True for JWST science JHAT products (excludes HST in mixed trees).
+    """
+    p = Path(path)
+    name = p.name.lower()
+    if name.startswith('jw'):
+        return True
+    try:
+        telescop = str(as_datamodel(str(p)).keyword('TELESCOP', ext=0) or '').upper()
+        if telescop == 'JWST':
+            return True
+        instrume = str(as_datamodel(str(p)).keyword('INSTRUME', ext=0) or '').upper()
+        return instrume in {'NIRCAM', 'MIRI', 'NIRISS', 'NIRSPEC'}
+    except Exception:
+        return False
+
+
+def cal_image_for_jhat(
+    jhat_path: str | Path,
+    raw_dir: str | Path,
+) -> Path | None:
+    """Map ``*_jhat.fits`` back to ``reduction/raw/*_cal.fits`` when present."""
+    stem = Path(jhat_path).name.replace('_jhat.fits', '')
+    raw = Path(raw_dir)
+    for name in (f'{stem}_cal.fits', f'{stem}.fits'):
+        cand = raw / name
+        if cand.exists():
+            return cand
+    return None
+
+
+def measure_frame_abs_offset_mas(
+    frame: str | Path,
+    abs_ref: str | Path,
+    *,
+    max_search_arcsec: float = HUB_ABS_SEARCH_ARCSEC,
+    min_peak: int = 3,
+    bin_arcsec: float = 0.05,
+) -> dict[str, Any]:
+    """Measure absolute sky offset of *frame* relative to *abs_ref* (mas)."""
+    from st123.stages.alignment.hst_jhat import measure_hst_sky_offset_2dhist
+
+    off = measure_hst_sky_offset_2dhist(
+        Path(frame),
+        Path(abs_ref),
+        max_offset_arcsec=float(max_search_arcsec),
+        bin_arcsec=float(bin_arcsec),
+        nbright=800,
+        min_peak=int(min_peak),
+        exclude_zero_arcsec=min(0.35, max(0.08, 2.0 * float(bin_arcsec))),
+    )
+    abs_as = float(off.get('abs_arcsec') or 0.0)
+    return {
+        'ok': bool(off.get('ok')),
+        'abs_mas': 1000.0 * abs_as,
+        'abs_arcsec': abs_as,
+        'peak_count': int(off.get('peak_count') or 0),
+        'dra_arcsec': off.get('dra_arcsec'),
+        'ddec_arcsec': off.get('ddec_arcsec'),
+    }
+
+
+def select_jwst_jhats_for_abs_redo(
+    jhat_paths: Sequence[str | Path],
+    abs_ref: str | Path,
+    *,
+    catalog_path: str | Path | None = None,
+    check_stale: bool = False,
+    measure_abs: bool = False,
+    max_abs_mas: float = HUB_FRAME_ABS_MAX_MAS,
+    min_peak: int = 5,
+    ncores: int = 1,
+) -> list[tuple[Path, str]]:
+    """
+    Select JWST JHAT products that should be re-aligned to the hub catalog.
+
+    Soft-fails (and optional catalog-mtime staleness) are always selected from
+    headers only. Expensive absolute 2-D histogram checks run only when
+    *measure_abs* is True; prefer catching wrong-island WCSs from the capped
+    abs-retie pass (``skip_large``) instead of measuring every frame twice.
+    """
+    selected: list[tuple[Path, str]] = []
+    candidates: list[Path] = []
+    ref = Path(abs_ref)
+    cat = catalog_path if check_stale else None
+    for path in jhat_paths:
+        fp = Path(path)
+        if not is_jwst_science_jhat(fp):
+            continue
+        need, reason = jhat_product_needs_realign(fp, catalog_path=cat)
+        if need:
+            selected.append((fp, reason))
+            continue
+        if measure_abs and ref.is_file():
+            candidates.append(fp)
+
+    if not measure_abs or not candidates:
+        return selected
+
+    # Parallel abs-offset screen for remaining good products only.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _check(fp: Path) -> tuple[Path, str] | None:
+        meas = measure_frame_abs_offset_mas(fp, ref, min_peak=int(min_peak))
+        if (
+            meas['ok']
+            and int(meas['peak_count']) >= int(min_peak)
+            and float(meas['abs_mas']) > float(max_abs_mas)
+        ):
+            return (fp, f'abs_qa_{meas["abs_mas"]:.0f}mas')
+        return None
+
+    n_workers = max(1, min(int(ncores), len(candidates)))
+    if n_workers == 1:
+        for fp in candidates:
+            hit = _check(fp)
+            if hit is not None:
+                selected.append(hit)
+    else:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_check, fp) for fp in candidates]
+            for fut in as_completed(futures):
+                hit = fut.result()
+                if hit is not None:
+                    selected.append(hit)
+    return selected
+
+
+def realign_jwst_jhats_to_catalog(
+    jhat_reasons: Sequence[tuple[Path, str]],
+    *,
+    catalog_path: str | Path,
+    raw_dir: str | Path,
+    jhat_outdir: str | Path,
+    guess_offset: tuple[float, float] = (0.0, 0.0),
+    ncores: int = 1,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """
+    Delete selected JHAT products and re-run JHAT against *catalog_path*.
+    """
+    cals: list[str] = []
+    raw = Path(raw_dir)
+    for jhat, reason in jhat_reasons:
+        cal = cal_image_for_jhat(jhat, raw)
+        if cal is None:
+            logger.warning(
+                'Abs QA redo skipped %s (%s): no cal under %s',
+                Path(jhat).name,
+                reason,
+                raw,
+            )
+            continue
+        logger.info(
+            'Abs QA redo %s (%s) -> %s',
+            Path(jhat).name,
+            reason,
+            Path(catalog_path).name,
+        )
+        remove_jhat_for_realign(jhat)
+        cals.append(str(cal))
+    report: dict[str, Any] = {
+        'n_selected': len(jhat_reasons),
+        'n_queued': len(cals),
+        'n_failures': 0,
+    }
+    if not cals:
+        return report
+    report['n_failures'] = int(
+        align_to_mosaic(
+            str(catalog_path),
+            cals,
+            str(jhat_outdir),
+            guess_offset=guess_offset,
+            verbose=verbose,
+            ncores=ncores,
+        )
+    )
+    return report
+
+
+def score_visit_abs_hub(
+    table: Table,
+    visit_id: Any,
+    align_filter: str,
+    *,
+    footprint_area: float = 0.0,
+) -> float:
+    """
+    Score a visit as an absolute-alignment hub (higher is better).
+
+    Prefers deep F200W/F150W alignment filters with many frames / exposure
+    time over merely large footprints (which can seed a weak Gaia solution).
+    """
+    vis = table[table['visit'] == visit_id]
+    if len(vis) == 0:
+        return -1.0
+    filt = str(align_filter or '').lower()
+    rank = _hub_filter_rank(filt)
+    align_rows = vis[np.array([str(f).lower() == filt for f in vis['filter']])]
+    if len(align_rows) == 0:
+        align_rows = vis
+    n_frames = int(len(align_rows))
+    try:
+        exptime = float(np.nansum(np.asarray(align_rows['exptime'], dtype=float)))
+    except Exception:
+        exptime = 0.0
+    area = max(0.0, float(footprint_area))
+    # Rank dominates; then depth; area is a weak tie-break only.
+    return rank * 1.0e9 + n_frames * 1.0e6 + exptime * 1.0e3 + area
+
+
+def rank_visits_as_abs_hubs(
+    table: Table,
+    visit_filter: dict[Any, str],
+    visit_geoms: dict[Any, shapely.geometry.base.BaseGeometry],
+) -> list[Any]:
+    """
+    Return visit IDs sorted best-first as absolute Gaia / catalog hubs.
+    """
+    scored: list[tuple[float, Any]] = []
+    for vid in list(visit_geoms.keys()):
+        filt = visit_filter.get(vid, '')
+        area = float(visit_geoms[vid].area) if vid in visit_geoms else 0.0
+        scored.append(
+            (
+                score_visit_abs_hub(
+                    table, vid, str(filt), footprint_area=area
+                ),
+                vid,
+            )
+        )
+    scored.sort(key=lambda t: (-t[0], str(t[1])))
+    return [vid for _, vid in scored]
+
+
+def mosaic_abs_quality(
+    mosaic_path: str | Path,
+    *,
+    max_mas: float = HUB_GAIA_MAX_MAS,
+) -> dict[str, Any]:
+    """
+    Summarize whether a visit mosaic is usable as an absolute hub seed.
+
+    Uses ``GADISPM`` / ``JWDISPM`` (arcsec in header) and ``GANCAL`` /
+    ``JWNCAL``. Soft-fail products have ``n_calibrators == 0``.
+    """
+    path = Path(mosaic_path)
+    disp_mas, n_cal = read_dispersion_mas(str(path))
+    n_cal_i = int(n_cal) if n_cal is not None else 0
+    ok = (
+        path.is_file()
+        and n_cal_i > 0
+        and disp_mas is not None
+        and math.isfinite(float(disp_mas))
+        and float(disp_mas) <= float(max_mas)
+    )
+    return {
+        'ok': bool(ok),
+        'path': str(path),
+        'dispersion_mas': None if disp_mas is None else float(disp_mas),
+        'n_calibrators': n_cal_i,
+        'max_mas': float(max_mas),
+    }
+
+
+def retie_jwst_jhat_to_abs_ref(
+    jhat_paths: Sequence[str | Path],
+    abs_ref: str | Path,
+    *,
+    max_residual_arcsec: float = HUB_ABS_RETIE_TOL_ARCSEC,
+    max_search_arcsec: float = HUB_ABS_SEARCH_ARCSEC,
+    max_apply_arcsec: float = HUB_ABS_RETIE_MAX_APPLY_ARCSEC,
+    min_peak: int = HUB_ABS_RETIE_MIN_PEAK,
+    bin_arcsec: float = 0.05,
+    jwst_only: bool = True,
+    ncores: int = 1,
+) -> dict[str, Any]:
+    """
+    Shift JWST JHAT products onto a common absolute hub mosaic / frame.
+
+    Filters out HST products when *jwst_only* is True (safe for mixed legacy
+    ``jhat/`` trees). Caps applied CRVAL shifts at *max_apply_arcsec* so
+    multimodal false peaks (~1-2") are not written; larger offsets should be
+    fixed by :func:`realign_jwst_jhats_to_catalog` instead.
+    """
+    from st123.stages.mosaic.mosaic import harmonize_jwst_frames_to_ref
+
+    paths: list[Path] = []
+    n_skipped_non_jwst = 0
+    for path in jhat_paths:
+        fp = Path(path)
+        if jwst_only and not is_jwst_science_jhat(fp):
+            n_skipped_non_jwst += 1
+            continue
+        paths.append(fp)
+    report = harmonize_jwst_frames_to_ref(
+        paths,
+        abs_ref,
+        max_residual_arcsec=float(max_residual_arcsec),
+        max_search_arcsec=float(max_search_arcsec),
+        bin_arcsec=float(bin_arcsec),
+        max_apply_arcsec=float(max_apply_arcsec),
+        min_peak=int(min_peak),
+        ncores=max(1, int(ncores)),
+    )
+    report['n_skipped_non_jwst'] = int(n_skipped_non_jwst)
+    return report
+
+
 def pick_visit(
     align_pgon: shapely.geometry.base.BaseGeometry | None,
     visit_geoms: dict[Any, shapely.geometry.base.BaseGeometry],
     visit_filter: dict[Any, str],
+    *,
+    hub_order: Sequence[Any] | None = None,
 ) -> tuple[Any, float]:
     """
     Pick the next visit to align against the current alignment footprint.
@@ -1324,12 +1744,15 @@ def pick_visit(
     Parameters
     ----------
     align_pgon : shapely geometry or None
-        Footprint already aligned; ``None`` selects the largest broadband visit.
+        Footprint already aligned; ``None`` selects the absolute hub visit
+        (via *hub_order* when provided, else largest broadband footprint).
     visit_geoms : dict
         Visit identifier mapped to a shapely geometry (mutated when
         ``align_pgon`` is ``None``).
     visit_filter : dict
         Visit identifier mapped to its alignment filter.
+    hub_order : sequence, optional
+        Best-first absolute-hub visit IDs from :func:`rank_visits_as_abs_hubs`.
 
     Returns
     -------
@@ -1337,6 +1760,10 @@ def pick_visit(
         ``(visit_id, overlap_fraction)``.
     """
     if align_pgon is None:
+        if hub_order:
+            for visit_id in hub_order:
+                if visit_id in visit_geoms:
+                    return visit_id, float(visit_geoms[visit_id].area)
         narrowband_visits = np.array(list(visit_filter.keys()))[
             np.array(['N' in i.upper() for i in visit_filter.values()])
         ]
@@ -1401,7 +1828,7 @@ def is_level3_i2d(image: str) -> bool:
     Return True when ``image`` is a Level-3 / coadd ``*i2d*.fits`` product.
 
     These frames need :func:`fix_phot` because JHAT GWCS and FITS WCS can
-    disagree on pixel↔sky transforms for the same sky coordinate.
+    disagree on pixel<->sky transforms for the same sky coordinate.
     """
     name = Path(image).name.lower()
     return name.endswith(('.fits', '.fits.gz')) and 'i2d' in name
@@ -1439,7 +1866,7 @@ def fix_phot(mosaic: str, *, workdir: str | None = None) -> str:
     stem = Path(mosaic).stem  # e.g. coadd_0_0_f150w2_i2d
     raw = os.path.join(workdir, f'{stem}.phot.txt')
     refcat, _photfile = jwst_phot(mosaic, photfilename=raw)
-    w = wcs.WCS(fits.open(mosaic)['SCI'].header)
+    w = as_datamodel(mosaic).sci_wcs()
     sky_xy = w.all_pix2world(refcat['x'], refcat['y'], 0)
     refcat['ra'], refcat['dec'] = np.array(sky_xy[0]), np.array(sky_xy[1])
     corr_stem = stem.replace('i2d', 'i2d.corr') if 'i2d' in stem.lower() else f'{stem}.corr'
@@ -1502,7 +1929,7 @@ def generate_level3_mosaic(
 
     mosaic_path = f'{outdir_level3}/{filter_name}_i2d.fits'
     logger.info(
-        'Image3Pipeline.run(%s) → %s (resample + source catalog)...',
+        'Image3Pipeline.run(%s) -> %s (resample + source catalog)...',
         asn_file,
         mosaic_path,
     )
@@ -1576,16 +2003,23 @@ def create_alignment_mosaic(
     repo = str(_resolve_repo_root())
     jobs = []
     n_skip = 0
+    n_redo = 0
     for row in align_table:
         image = row['image']
         jhat_dest = os.path.join(
             outdir, os.path.basename(image.replace('cal.fits', 'jhat.fits'))
         )
-        if os.path.exists(jhat_dest):
-            n_skip += 1
-            continue
+        need, reason = jhat_product_needs_realign(jhat_dest)
         ref_image = row['ref_img']
         phot_sidecar = ref_image.replace('.fits', '.phot.txt')
+        if not need and os.path.exists(jhat_dest) and os.path.exists(phot_sidecar):
+            # Cheap stale check against an existing parent catalog only.
+            need, reason = jhat_product_needs_realign(
+                jhat_dest, catalog_path=phot_sidecar
+            )
+        if not need:
+            n_skip += 1
+            continue
         if is_level3_i2d(ref_image):
             # Always rebuild i2d catalogs via fix_phot (GWCS vs FITS WCS bug).
             photfilename = fix_phot(ref_image)
@@ -1593,6 +2027,14 @@ def create_alignment_mosaic(
             _, photfilename = jwst_phot(ref_image)
         else:
             photfilename = phot_sidecar
+        if os.path.exists(jhat_dest):
+            n_redo += 1
+            logger.info(
+                'Replacing relative JHAT %s (%s)',
+                os.path.basename(jhat_dest),
+                reason,
+            )
+            remove_jhat_for_realign(jhat_dest)
         jobs.append(
             _build_visit_jhat_job(
                 image=image,
@@ -1603,9 +2045,10 @@ def create_alignment_mosaic(
             )
         )
     logger.info(
-        'Relative JHAT: %d to run, %d already present (workers=%d)',
+        'Relative JHAT: %d to run, %d already present, %d redo (workers=%d)',
         len(jobs),
         n_skip,
+        n_redo,
         max(1, int(ncores)),
     )
     results = _run_jobs_parallel(
@@ -1646,17 +2089,16 @@ def create_alignment_mosaic(
     )
     aligned_mosaic = aligned_image.replace('jhat.fits', 'jhat_i2d.fits')
     shutil.move(aligned_image, aligned_mosaic)
-    with fits.open(aligned_mosaic, mode='update') as filehandle:
+    with as_datamodel(aligned_mosaic).open(mode='update') as filehandle:
         filehandle[0].header['JHATX'] = guess_offset[0]
         filehandle[0].header['JHATY'] = guess_offset[1]
 
     return aligned_mosaic, guess_offset, n_failures
 
 
-# Gaia catalog helpers live in :mod:`st123.alignment.gaia_catalog` (Vizier
+# Gaia catalog helpers live in :mod:`st123.stages.alignment.gaia_catalog` (Vizier
 # default) so HST scoring does not import the JWST stack just to query Gaia.
-from st123.alignment.gaia_catalog import (  # noqa: E402
-    cut_gaia_sources,
+from st123.stages.alignment.gaia_catalog import (  # noqa: E402
     query_gaia,
 )
 
@@ -1720,7 +2162,7 @@ def add_bin_dq(filename, outfile=None, mask_shape='circle'):
     str
         Path to the written file.
     """
-    im = fits.open(filename)
+    im = as_datamodel(filename).open()
     dq_mask = copy.deepcopy(im['DQ'].data)
 
     flag_sat = (dq_mask != 1) & (dq_mask != 2) & (dq_mask != 3)
@@ -1730,7 +2172,7 @@ def add_bin_dq(filename, outfile=None, mask_shape='circle'):
     expmask = expand_mask(dq_mask, mask_shape=mask_shape)
     expmask = np.where(expmask == 10, False, True)
 
-    _data, hdr = fits.getdata(filename, ext=3, header=True)
+    hdr = im[3].header.copy()
     hdr['EXTNAME'] = 'BIN_DQ'
     image_hdu = fits.ImageHDU(data=expmask.astype(np.uint8), name='BIN_DQ', header=hdr)
     im.insert(8, image_hdu)
@@ -1817,7 +2259,7 @@ def calc_dispersion(
     std_floor = max(float(std_d2d), 1e-9)  # arcsec; ~0.001 mas
     n_calibrators = int(np.count_nonzero(d2d <= float(med_d2d) + sig * std_floor))
     if n_calibrators == 0:
-        # Degenerate clip — fall back to the raw in-radius match count.
+        # Degenerate clip - fall back to the raw in-radius match count.
         n_calibrators = int(len(d2d))
 
     if plot:
@@ -1915,7 +2357,7 @@ def jwst_dispersion(align_image, outdir, photfile=None, gaia=False, plot=False, 
 
     os.rename(aligned_image, temp_cal_name)
     _align_cat, align_photfile = jwst_phot(temp_cal_name)
-    wcs_in = wcs.WCS(fits.getheader(phot_image, ext=1)) if phot_image else False
+    wcs_in = wcs.WCS(as_datamodel(phot_image).header(1)) if phot_image else False
     disp_fn_mean, disp_fn_median, disp_fn_std, n_calibrators = calc_dispersion(
         refcat, align_photfile, w=wcs_in, sig=sig, dist_limit=0.5, plot=plot
     )
@@ -1924,7 +2366,7 @@ def jwst_dispersion(align_image, outdir, photfile=None, gaia=False, plot=False, 
     logger.info(f'Final n_calibrators (JWNCAL): {n_calibrators}')
     os.rename(temp_cal_name, aligned_image)
 
-    with fits.open(aligned_image, mode='update') as filehandle:
+    with as_datamodel(aligned_image).open(mode='update') as filehandle:
         hdr = filehandle[0].header
         if gaia:
             hdr['GADISPM'] = disp_fn_mean
@@ -1944,6 +2386,9 @@ def jwst_dispersion(align_image, outdir, photfile=None, gaia=False, plot=False, 
             )
             hdr['JWCAT'] = os.path.basename(photfile)
 
+    from st123.datamodels.jwst import sanitize_jwst_l2
+
+    sanitize_jwst_l2(aligned_image, materialize_headers=True)
     return disp_in_mean, disp_in_median, disp_fn_mean, disp_fn_median
 
 
@@ -1971,7 +2416,7 @@ def guess_shift(align_image, ref_table, radius_px=50, res=5, sig=2, plot=False):
     tuple
         ``(best_x, best_y)`` shift in pixels.
     """
-    sci_hdr = copy.copy(wcs.WCS(fits.getheader(align_image, ext=1)))
+    sci_hdr = copy.copy(wcs.WCS(as_datamodel(align_image).header(1)))
     align_photfile = fix_phot(align_image)
     crpix1, crpix2 = sci_hdr.wcs.crpix
 
@@ -2066,7 +2511,7 @@ def assess_field_brightness(
         ``bright`` (bool) plus diagnostic ``median``, ``p99``, ``hot_frac``.
     """
     try:
-        with fits.open(align_image, memmap=True) as hdul:
+        with as_datamodel(align_image).open(memmap=True) as hdul:
             sci = np.asarray(hdul['SCI'].data, dtype=np.float64)
     except Exception:
         return {
@@ -2167,7 +2612,7 @@ def run_jhat(
             **params,
         )
 
-    # Always mediate JHAT stdout/stderr through logging (DEBUG → log file;
+    # Always mediate JHAT stdout/stderr through logging (DEBUG -> log file;
     # console only when --verbose raises the stream handler to DEBUG).
     with capture_output():
         wcs_align.run_all(align_image, **run_kwargs)
@@ -2195,7 +2640,7 @@ def align_jwst_image(
 
     1. Strict parameters (always first so globally bright galaxies do not
        starve calibrators off-nucleus).
-    2. Crowded/bright fallback when the strict residual is still high —
+    2. Crowded/bright fallback when the strict residual is still high -
        fewer, brighter, high-SNR calibrators (before relaxing, which would
        add faint PAH / arm structure).
     3. Relaxed parameters.
@@ -2279,9 +2724,9 @@ def align_jwst_image(
         factor = 2 if 'long' in align_image else 1
 
     try:
-        pixscale = np.abs(fits.getval(align_image, 'CDELT1', ext=1) * 3600)
+        pixscale = np.abs(as_datamodel(align_image).keyword('CDELT1', ext=1) * 3600)
     except Exception:
-        pixscale = np.abs(fits.getval(align_image, 'CD1_2', ext=1) * 3600)
+        pixscale = np.abs(as_datamodel(align_image).keyword('CD1_2', ext=1) * 3600)
     pixscale = 0.031 if pixscale < 0.032 else 0.062
     retry_pix = min(float(soft_fail_pix), 1.0)
 
@@ -2330,7 +2775,7 @@ def align_jwst_image(
         logger.error(traceback.format_exc())
         disp_fn_med = 99.99
 
-    # 2) Crowded/bright fallback before relaxing — only when needed.
+    # 2) Crowded/bright fallback before relaxing - only when needed.
     # Use for bright/crowded SCI *or* any high residual; never as the default
     # first attempt on globally bright galaxies.
     if disp_fn_med / pixscale > retry_pix and not gaia:
@@ -2422,7 +2867,7 @@ def align_jwst_image(
         guess_offset = (0, 0)
 
         safe_copy(align_image, jhat_image)
-        with fits.open(jhat_image, mode='update') as filehandle:
+        with as_datamodel(jhat_image).open(mode='update') as filehandle:
             d_mu = finite_arcsec(disp_in_mu)
             d_med = finite_arcsec(disp_in_med)
             if gaia:
@@ -2443,6 +2888,9 @@ def align_jwst_image(
                     0,
                     'N calibrators for JWDISPM / align solution',
                 )
+        from st123.datamodels.jwst import sanitize_jwst_l2
+
+        sanitize_jwst_l2(jhat_image, materialize_headers=True)
     elif disp_fn_med / pixscale > retry_pix:
         logger.info(
             f'Keeping JHAT solution despite median '
@@ -2473,8 +2921,8 @@ def update_refcat(mosaic_name, photfile, out_refcat, align_pgon):
     int
         Always ``0``.
     """
-    flt = fits.getval(mosaic_name, keyword='FILTER', ext=0)
-    pupil = fits.getval(mosaic_name, keyword='PUPIL', ext=0)
+    flt = as_datamodel(mosaic_name).keyword('FILTER', ext=0)
+    pupil = as_datamodel(mosaic_name).keyword('PUPIL', ext=0)
 
     if not os.path.exists(out_refcat):
         refcat = Table.read(photfile, format='ascii')
@@ -2531,12 +2979,26 @@ def align_to_mosaic(
     """
     repo = str(_resolve_repo_root())
     jobs = []
+    n_skip = 0
+    n_redo = 0
     for im in cal_images:
         jhat_dest = os.path.join(
             outdir, os.path.basename(im.replace('cal.fits', 'jhat.fits'))
         )
-        if os.path.exists(jhat_dest):
+        need, reason = jhat_product_needs_realign(
+            jhat_dest, catalog_path=mosaic_photfile
+        )
+        if not need:
+            n_skip += 1
             continue
+        if os.path.exists(jhat_dest):
+            n_redo += 1
+            logger.info(
+                'Replacing mosaic JHAT %s (%s)',
+                os.path.basename(jhat_dest),
+                reason,
+            )
+            remove_jhat_for_realign(jhat_dest)
         xs, ys = guess_offset
         if 'long' in im:
             xs = xs * 0.5
@@ -2552,6 +3014,14 @@ def align_to_mosaic(
                 verbose=bool(verbose),
             )
         )
+    logger.info(
+        'Align-to-mosaic JHAT: %d to run, %d already present, %d redo '
+        '(workers=%d)',
+        len(jobs),
+        n_skip,
+        n_redo,
+        max(1, int(ncores)),
+    )
     results = _run_jobs_parallel(
         jobs,
         run_visit_align_job,
@@ -2604,7 +3074,7 @@ def has_jwst_gwcs(image: str) -> bool:
     bool
         True when an ``ASDF`` extension is present.
     """
-    with fits.open(image) as hdul:
+    with as_datamodel(image).open() as hdul:
         return any(hdu.name == 'ASDF' for hdu in hdul)
 
 
@@ -2682,7 +3152,7 @@ def load_sci_data_wcs(image: str) -> tuple[np.ndarray, WCS]:
     tuple
         ``(data, wcs)``.
     """
-    with fits.open(image) as hdul:
+    with as_datamodel(image).open() as hdul:
         if 'SCI' in hdul and hdul['SCI'].data is not None:
             hdu = hdul['SCI']
         else:
@@ -2769,7 +3239,7 @@ def resolve_outdir(outdir: str) -> str:
 
 def safe_copy(src: str, dest: str) -> None:
     """
-    Copy ``src`` → ``dest``, tolerating EPERM on metadata/utime.
+    Copy ``src`` -> ``dest``, tolerating EPERM on metadata/utime.
 
     Shared ``alignment_output`` trees are often owned by another user: ``copy2``
     can fail on utime/chmod even when the content is group-writable.
@@ -2814,7 +3284,7 @@ def stage_photfile(
     if os.path.exists(dest) and os.path.samefile(photfile, dest):
         return dest
     safe_copy(photfile, dest)
-    logger.info(f'Copied reference catalog → {dest}')
+    logger.info(f'Copied reference catalog -> {dest}')
     return dest
 
 
@@ -2885,20 +3355,20 @@ def build_ref_catalog(
 
     dest = phot_catalog_path(image, outdir)
     logger.info(f'Running photometry on reference: {image}')
-    # Always write JHAT intermediates under this worker's outdir — never beside
+    # Always write JHAT intermediates under this worker's outdir - never beside
     # shared coadds under reduction/reference/ (parallel workers race there).
     workdir = resolve_outdir(os.path.join(outdir, '_phot_work', Path(image).stem))
 
     if is_level3_i2d(image):
         try:
-            logger.info('  level-3/i2d → fix_phot (FITS WCS sky coords)')
+            logger.info('  level-3/i2d -> fix_phot (FITS WCS sky coords)')
             src = fix_phot(image, workdir=workdir)
             staged = stage_photfile(src, outdir, dest_name=Path(dest).name)
         except Exception as exc:
             logger.info(f'  fix_phot failed ({exc}); falling back to photutils')
             staged = photutils_phot(image, dest)
     elif has_jwst_gwcs(image):
-        logger.info('  detected JWST ASDF/GWCS → jwst_phot')
+        logger.info('  detected JWST ASDF/GWCS -> jwst_phot')
         raw = os.path.join(workdir, f'{Path(image).stem}.phot.txt')
         _, src = jwst_phot(image, photfilename=raw)
         staged = stage_photfile(src, outdir, dest_name=Path(dest).name)
@@ -2912,7 +3382,7 @@ def build_ref_catalog(
         cache_dest = cache_path / Path(staged).name
         try:
             safe_copy(staged, str(cache_dest))
-            logger.info(f'Cached reference catalog → {cache_dest}')
+            logger.info(f'Cached reference catalog -> {cache_dest}')
         except OSError as exc:
             # Shared caches owned by another user often reject overwrite.
             logger.warning(
@@ -3044,7 +3514,7 @@ def clip_catalog_to_miri_footprint(table: Table, miri_image: str) -> Table:
     """
     from matplotlib.path import Path as MplPath
 
-    from st123.mosaic.image_overlap import MirIFootprint
+    from st123.stages.mosaic.image_overlap import MirIFootprint
 
     miri = MirIFootprint.from_fits(miri_image)
     ra = np.asarray(table['ra'], dtype=float)
@@ -3091,7 +3561,7 @@ def clip_catalog_to_miri_footprint(table: Table, miri_image: str) -> Table:
     clipped = table[keep]
     logger.info(
         f'Clipped master catalog to MIRI footprint: '
-        f'{len(table)} → {len(clipped)} sources'
+        f'{len(table)} -> {len(clipped)} sources'
     )
     return clipped
 
@@ -3154,7 +3624,7 @@ def build_master_ref_catalog(
 
     master = merge_phot_catalogs(tables, match_radius_arcsec=match_radius_arcsec)
     logger.info(
-        f'Merged {len(tables)} reference catalog(s) → {len(master)} unique sources '
+        f'Merged {len(tables)} reference catalog(s) -> {len(master)} unique sources '
         f'(match radius {match_radius_arcsec}" )'
     )
 
@@ -3167,7 +3637,7 @@ def build_master_ref_catalog(
 
     dest = str(Path(outdir) / dest_name)
     write_jhat_phot_table(master, dest)
-    logger.info(f'Wrote master reference catalog → {dest} ({len(master)} sources)')
+    logger.info(f'Wrote master reference catalog -> {dest} ({len(master)} sources)')
     return dest
 
 
@@ -3286,7 +3756,7 @@ def read_dispersion_mas(jhat_image: str) -> tuple[float | None, int | None]:
         ``n_calibrators`` is ``JWNCAL`` / ``GANCAL`` when present and
         plausible; otherwise recomputed from this frame's dispersion match.
     """
-    with fits.open(jhat_image) as hdul:
+    with as_datamodel(jhat_image).open() as hdul:
         hdr = hdul[0].header
         disp = hdr.get('JWDISPM', hdr.get('GADISPM'))
         ncal = hdr.get('JWNCAL', hdr.get('GANCAL'))
@@ -3317,7 +3787,7 @@ def read_jhat_pixel_offset(jhat_image: str) -> tuple[float, float]:
     tuple
         ``(xshift, yshift)`` in pixels.
     """
-    with fits.open(jhat_image) as hdul:
+    with as_datamodel(jhat_image).open() as hdul:
         hdr = hdul[0].header
         xoff = hdr.get('XOFFSET', 0.0)
         yoff = hdr.get('YOFFSET', 0.0)
@@ -3467,7 +3937,7 @@ def iterative_sigma_clip_matches(
         if hard.sum() < keep.sum():
             logger.info(
                 f'  hard residual cut ({max_residual_arcsec * 1000:.1f} mas): '
-                f'{int(keep.sum())} → {int((keep & hard).sum())}'
+                f'{int(keep.sum())} -> {int((keep & hard).sum())}'
             )
         keep = keep & hard
 
@@ -3603,7 +4073,7 @@ def refine_alignment_iteratively(
 
         # Only re-run JHAT when the matched set actually shrank (sigma-clip /
         # hard residual). Do NOT treat "matched subset << full master_ref" as
-        # progress — that is always true on the first pass and was forcing a
+        # progress - that is always true on the first pass and was forcing a
         # destructive catalog rewrite that hurt F560W.
         #
         # Optional MIRI morph/mag cuts are applied *before* matching, so when
@@ -3647,7 +4117,7 @@ def refine_alignment_iteratively(
             safe_copy(align_phot, backup_phot)
 
         # Only seed pixel offsets for F770W-style tight refine (hard residual
-        # ceiling). Seeding large F560W XOFFSET/YOFFSET (~50–130 px) into JHAT
+        # ceiling). Seeding large F560W XOFFSET/YOFFSET (~50-130 px) into JHAT
         # with a cleaned catalog routinely fails matching and destroys the
         # ~10 mas solutions refine would otherwise recover.
         if max_residual_arcsec is not None:
@@ -3679,7 +4149,7 @@ def refine_alignment_iteratively(
         jhat, align_phot, _ = jhat_product_paths(align_image, outdir)
         new_disp, new_ncal = read_dispersion_mas(jhat)
         logger.info(
-            f'  refine iter {it}: dispersion {disp_mas} → {new_disp} mas '
+            f'  refine iter {it}: dispersion {disp_mas} -> {new_disp} mas '
             f'(n_calibrators={new_ncal})'
         )
 
@@ -3706,7 +4176,7 @@ def refine_alignment_iteratively(
         if disp_mas is not None and new_disp is not None:
             if abs(new_disp - disp_mas) < tol_mas:
                 logger.info(
-                    f'  refine iter {it}: |Δdispersion|='
+                    f'  refine iter {it}: |Deltadispersion|='
                     f'{abs(new_disp - disp_mas):.3f} mas < {tol_mas} mas; converged'
                 )
                 disp_mas, n_cal = new_disp, new_ncal
@@ -3717,7 +4187,7 @@ def refine_alignment_iteratively(
                 break
             if new_disp > disp_mas + tol_mas:
                 restore_backup_and_stop(
-                    f'dispersion worsened ({disp_mas:.3f} → {new_disp:.3f} mas)'
+                    f'dispersion worsened ({disp_mas:.3f} -> {new_disp:.3f} mas)'
                 )
                 break
 
@@ -3732,7 +4202,7 @@ def refine_alignment_iteratively(
         final_clean = str(Path(outdir) / 'master_ref_refined.phot.txt')
         if os.path.abspath(current_ref) != os.path.abspath(final_clean):
             shutil.copy2(current_ref, final_clean)
-            logger.info(f'Final refined reference catalog → {final_clean}')
+            logger.info(f'Final refined reference catalog -> {final_clean}')
 
     logger.info(
         f'Iterative refinement finished: dispersion_mas={disp_mas}, '
@@ -3922,16 +4392,21 @@ def _resolve_repo_root(explicit: Path | None = None) -> Path:
     """
     if explicit is not None:
         root = explicit.expanduser().resolve()
-        if not (root / 'st123' / 'alignment' / 'align.py').is_file() and not (
-            root / 'alignment' / 'align.py'
-        ).is_file():
+        if not (
+            (root / 'st123' / 'stages' / 'alignment' / 'align.py').is_file()
+            or (root / 'st123' / 'alignment' / 'align.py').is_file()
+            or (root / 'alignment' / 'align.py').is_file()
+        ):
             raise FileNotFoundError(f'--repo does not look like st123: {root}')
         return root
 
-    here = Path(__file__).resolve().parent  # <repo>/st123/alignment
-    repo_root = here.parents[1]
-    for cand in (repo_root, Path.cwd(), Path('/data/rwisenbaker/st123')):
-        if (cand / 'st123' / 'alignment' / 'align.py').is_file():
+    here = Path(__file__).resolve().parent  # <repo>/st123/stages/alignment
+    repo_root = here.parents[2]
+    marker = Path('st123') / 'stages' / 'alignment' / 'align.py'
+    for cand in (repo_root, here.parents[1], Path.cwd()):
+        if (cand / marker).is_file() or (
+            cand / 'st123' / 'alignment' / 'align.py'
+        ).is_file():
             return cand.resolve()
     return repo_root.resolve()
 
@@ -3990,7 +4465,7 @@ class FrameOverlaps:
 class AlignmentSummaryRow:
     """One row of the dataset alignment summary table.
 
-    ``n_calibrators`` is the number of science↔reference matches that survive
+    ``n_calibrators`` is the number of science<->reference matches that survive
     the sigma-clip used for ``dispersion_mas`` / ``JWDISPM`` (header
     ``JWNCAL``). It is never the raw JHAT ``*.refcat.txt`` row count.
     """
@@ -4060,7 +4535,7 @@ def read_miri_filter(miri_path: str) -> str:
     str
         Filter name, or ``'UNKNOWN'``.
     """
-    with fits.open(miri_path) as hdul:
+    with as_datamodel(miri_path).open() as hdul:
         filt = hdul[0].header.get('FILTER')
         if not filt and 'SCI' in hdul:
             filt = hdul['SCI'].header.get('FILTER')
@@ -4115,7 +4590,7 @@ def _normalize_align_mode(align_mode: str | None) -> str:
     return mode
 
 
-# Soft-fail sentinel written by align_jwst_image (99.99 arcsec → mas).
+# Soft-fail sentinel written by align_jwst_image (99.99 arcsec -> mas).
 SOFT_FAIL_DISPERSION_MAS: float = 99990.0
 
 
@@ -4147,7 +4622,7 @@ def reference_solution_usable(row: AlignmentSummaryRow) -> bool:
     Usable means a real JHAT product with a positive calibrator count and a
     non-sentinel finite dispersion. Soft-fail copies (``JWNCAL=0`` /
     ``99990`` mas) are never usable. Meeting ``min_calibrators`` is *not*
-    required here — see :func:`reference_solution_keepable` for final SUCCESS.
+    required here - see :func:`reference_solution_keepable` for final SUCCESS.
 
     Parameters
     ----------
@@ -4200,7 +4675,7 @@ def reference_solution_keepable(row: AlignmentSummaryRow) -> bool:
         return True
     thr = max_reference_dispersion_mas(row.filter)
     if thr is None:
-        # F560W: no quality-hold threshold — allow sparse usable REFERENCE.
+        # F560W: no quality-hold threshold - allow sparse usable REFERENCE.
         return True
     return float(row.dispersion_mas) <= float(thr)
 
@@ -4223,7 +4698,7 @@ def read_jhat_dispersion_median_mas(jhat_path: str | Path) -> float | None:
     if not path.is_file():
         return None
     try:
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             val = hdul[0].header.get('JWDISPD', hdul[0].header.get('GADISPD'))
         if val is None:
             return None
@@ -4243,7 +4718,7 @@ def f770w_reference_gate_dispersion_mas(
     Dispersion value used for F770W REFERENCE quality-hold decisions.
 
     Uses ``max(mean, median)`` when median is available, and reports a skew
-    reason when mean ≫ median (busy PAH fields inflate the mean).
+    reason when mean >> median (busy PAH fields inflate the mean).
 
     Parameters
     ----------
@@ -4347,7 +4822,7 @@ def provisional_fallback_parents_from_holds(
                 miri_path=row.miri_path,
                 jhat_path=str(row.aligned_path),
                 filter=row.filter,
-                wavelength_um=filter_wavelength_um(row.filter),
+                wavelength_um=filter_wavelength_um(row.miri_path),
                 dispersion_mas=float(row.dispersion_mas),
                 relative_dispersion_mas=float(row.dispersion_mas),
                 align_mode='REFERENCE',
@@ -4416,7 +4891,7 @@ def harvest_alignment_metrics(
         return AlignmentSummaryRow(**empty)
     aligned_path = str(jhat.resolve())
 
-    with fits.open(jhat) as hdul:
+    with as_datamodel(jhat).open() as hdul:
         hdr = hdul[0].header
         if hdr.get('FILTER'):
             filt = str(hdr['FILTER'])
@@ -4454,7 +4929,7 @@ def harvest_alignment_metrics(
     except (TypeError, ValueError):
         n_calibrators = 'NA'
 
-    # JWNCAL must be the clipped match count used for JWDISPM — never the
+    # JWNCAL must be the clipped match count used for JWDISPM - never the
     # JHAT *.refcat.txt row count (often the full unclipped master catalog).
     # Recompute from this frame's photometry when the header is missing or
     # looks polluted (e.g. JWNCAL == len(master_ref) from an older bug).
@@ -4478,7 +4953,7 @@ def harvest_alignment_metrics(
             # Persist the corrected count so later provenance / summary
             # passes do not re-inherit a polluted header value.
             try:
-                with fits.open(aligned_path, mode='update') as hdul:
+                with as_datamodel(aligned_path).open(mode='update') as hdul:
                     hdul[0].header['JWNCAL'] = (
                         int(n_from_match),
                         'N calibrators for JWDISPM / align solution',
@@ -4510,7 +4985,8 @@ def write_alignment_summary(rows: list[AlignmentSummaryRow], outfile: Path) -> P
     Write a plain ASCII alignment summary table.
 
     The file is written to a temporary name and atomically replaced so a live
-    reader never sees a partial table.
+    reader never sees a partial table. Also writes unified ``frame_qa.json``
+    next to the summary when rows are available.
 
     Parameters
     ----------
@@ -4586,7 +5062,81 @@ def write_alignment_summary(rows: list[AlignmentSummaryRow], outfile: Path) -> P
     tmp = outfile.with_name(outfile.name + '.tmp')
     tmp.write_text('\n'.join(lines))
     tmp.replace(outfile)
+    try:
+        _write_jwst_frame_qa_from_summary(rows, outfile.parent)
+    except Exception as exc:
+        logger.warning('Could not write JWST frame_qa.json: %s', exc)
     return outfile
+
+
+def _write_jwst_frame_qa_from_summary(
+    rows: list[AlignmentSummaryRow],
+    outdir: Path,
+) -> Path | None:
+    """Build unified ``frame_qa.json`` from JWST alignment summary rows."""
+    from st123.stages.alignment.frame_qa import (
+        build_frame_qa,
+        warn_if_frame_qa_soft,
+        write_alignment_summary_table,
+        write_frame_qa,
+    )
+
+    if not rows:
+        return None
+    frame_rows: list[dict] = []
+    abs_vals: list[float] = []
+    n_cals: list[int] = []
+    for r in rows:
+        disp = r.dispersion_mas if isinstance(r.dispersion_mas, (int, float)) else None
+        ncal = r.n_calibrators if isinstance(r.n_calibrators, int) else None
+        if disp is not None and str(r.status).upper() == 'SUCCESS':
+            abs_vals.append(float(disp))
+        if ncal is not None and str(r.status).upper() == 'SUCCESS':
+            n_cals.append(int(ncal))
+        frame_rows.append(
+            {
+                'path': Path(r.aligned_path or r.miri_path).name,
+                'filter': r.filter,
+                'status': r.status,
+                'n_calibrators': ncal if ncal is not None else 'NA',
+                'dispersion_mas': float(disp) if disp is not None else 'NA',
+                'internal_max_delta_mas': 'NA',
+                'align_mode': r.align_mode,
+                'algnref': r.original_ref,
+                'aligned_to': r.aligned_to,
+                'mission': 'jwst',
+            }
+        )
+    qa = build_frame_qa(
+        mission='jwst',
+        align_mode='REFERENCE',
+        abs_ref=next((r.original_ref for r in rows if r.original_ref), None),
+        residual_mas=max(abs_vals) if abs_vals else None,
+        n_calibrators=min(n_cals) if n_cals else None,
+        abs_method='catalog_dispersion',
+        max_delta_mas=None,
+        frames=frame_rows,
+    )
+    path = write_frame_qa(outdir, qa)
+    write_alignment_summary_table(
+        [
+            {
+                'path': fr['path'],
+                'filter': fr['filter'],
+                'status': fr['status'],
+                'n_calibrators': fr['n_calibrators'],
+                'dispersion_mas': fr['dispersion_mas'],
+                'internal_max_delta_mas': fr['internal_max_delta_mas'],
+                'align_mode': fr['align_mode'],
+                'algnref': fr['algnref'],
+                'aligned_to': fr['aligned_to'],
+            }
+            for fr in frame_rows
+        ],
+        outdir / 'frame_qa_alignment_summary.txt',
+    )
+    warn_if_frame_qa_soft(qa, log=logger, context=outdir.name)
+    return path
 
 
 def _looks_like_filter(token: str) -> bool:
@@ -4634,11 +5184,11 @@ def discover_miri_images(data_dir: Path) -> list[str]:
     Preferred layout is
     ``<data-dir>/download/JWST/MIRI/<FILTER>/<obsid>/*mirimage*_cal.fits``
     (flattened MAST products). Also matches legacy nested
-    ``…/mastDownload/JWST/*_mirimage/*_cal.fits`` trees and older
-    ``<FILTER>/<obsid>/…`` layouts.
+    ``.../mastDownload/JWST/*_mirimage/*_cal.fits`` trees and older
+    ``<FILTER>/<obsid>/...`` layouts.
 
-    Non-full-frame MIRI products (subarrays / cutouts) are skipped — they are
-    unsupported by ``mirimask`` and the alignment→DOLPHOT path.
+    Non-full-frame MIRI products (subarrays / cutouts) are skipped - they are
+    unsupported by ``mirimask`` and the alignment->DOLPHOT path.
 
     Parameters
     ----------
@@ -4775,7 +5325,7 @@ def filter_name_from_miri_path(miri_path: str) -> str | None:
         Filter name, or ``None`` when the path has no filter segment.
     """
     parts = Path(miri_path).parts
-    # Flat canonical: …/MIRI/<FILTER>/<obsid>/<file>
+    # Flat canonical: .../MIRI/<FILTER>/<obsid>/<file>
     for i, part in enumerate(parts):
         if part.upper() != 'MIRI' or i + 1 >= len(parts):
             continue
@@ -4850,14 +5400,14 @@ def find_frame_overlaps(
     refs : list of str
         Reference coadds.
     MirIFootprint, BestOverlap, compute_overlap : callable
-        Injected from :mod:`st123.mosaic.image_overlap`.
+        Injected from :mod:`st123.stages.mosaic.image_overlap`.
 
     Returns
     -------
     list of FrameOverlaps
         One entry per science frame.
     """
-    from st123.mosaic.image_overlap import compute_cumulative_overlap_fraction
+    from st123.stages.mosaic.image_overlap import compute_cumulative_overlap_fraction
 
     results: list[FrameOverlaps] = []
 
@@ -5172,7 +5722,7 @@ def ref_instrument(path: str | Path) -> str:
         Uppercased instrument name, or ``''`` when missing / unreadable.
     """
     try:
-        return str(fits.getval(str(path), 'INSTRUME', ext=0) or '').strip().upper()
+        return str(as_datamodel(str(path)).keyword('INSTRUME', ext=0) or '').strip().upper()
     except Exception:
         return ''
 
@@ -5268,7 +5818,7 @@ def _frame_ref_overlap_frac(frame: FrameOverlaps | dict) -> float:
 
     if not ref_images:
         return 0.0
-    from st123.mosaic.image_overlap import (
+    from st123.stages.mosaic.image_overlap import (
         MirIFootprint,
         compute_cumulative_overlap_fraction,
     )
@@ -5355,8 +5905,8 @@ def reject_zero_nircam_overlap_frames(
     """
     Drop frames with insufficient cumulative reference footprint overlap.
 
-    Rejected frames remain in the overlap summaries only — they are not written
-    to ``alignment_summary.txt`` and never reach JHAT, including MIRI→MIRI
+    Rejected frames remain in the overlap summaries only - they are not written
+    to ``alignment_summary.txt`` and never reach JHAT, including MIRI->MIRI
     fallback.
 
     Parameters
@@ -5403,7 +5953,7 @@ def _group_frames_by_filter(
     frames: list[FrameOverlaps] | list[dict],
 ) -> OrderedDict[str, list[FrameOverlaps | dict]]:
     """
-    Group frames by filter, preserving blue→red order of first appearance.
+    Group frames by filter, preserving blue->red order of first appearance.
 
     Parameters
     ----------
@@ -5415,9 +5965,7 @@ def _group_frames_by_filter(
     collections.OrderedDict
         Filter name mapped to its frames.
     """
-    ordered = sort_frames_blue_to_red(
-        frames, filter_from_path=filter_name_from_miri_path
-    )
+    ordered = sort_frames_blue_to_red(frames)
     groups: OrderedDict[str, list[FrameOverlaps | dict]] = OrderedDict()
     for frame in ordered:
         miri_path, _, _ = _frame_ref_images(frame)
@@ -5899,7 +6447,7 @@ def _preload_science_stack() -> None:
             with suppress_output():
                 _sanitize_logging()
                 import st123  # noqa: F401
-                import st123.alignment.align  # noqa: F401
+                import st123.stages.alignment.align  # noqa: F401
             _STACK_READY = True
             return
         except Exception as exc:  # pragma: no cover - environment-dependent
@@ -6122,7 +6670,7 @@ def run_reference_align_job(job: dict[str, Any]) -> AlignWorkerResult:
 
     row = AlignmentSummaryRow(**result.row)
 
-    # Too few calibrators in the final dispersion match set → quality-hold
+    # Too few calibrators in the final dispersion match set -> quality-hold
     # even when JWDISPM looks good (tiny overfitted subsets / soft-fail
     # JWNCAL=0 are common false SUCCESS modes).
     min_cal = calibrator_settings_for_filter(filt).min_calibrators
@@ -6150,7 +6698,7 @@ def run_reference_align_job(job: dict[str, Any]) -> AlignWorkerResult:
         if n_fixed is not None:
             logger.info(
                 f'{Path(row.aligned_path).name}: correcting JWNCAL '
-                f'{n_cal} → {n_fixed} before min_calibrators gate'
+                f'{n_cal} -> {n_fixed} before min_calibrators gate'
             )
             n_cal = n_fixed
             row.n_calibrators = n_fixed
@@ -6230,7 +6778,7 @@ def run_reference_align_job(job: dict[str, Any]) -> AlignWorkerResult:
         miri_path=miri_path,
         jhat_path=row.aligned_path,
         filter=row.filter,
-        wavelength_um=filter_wavelength_um(row.filter),
+        wavelength_um=filter_wavelength_um(row.miri_path),
         dispersion_mas=float(row.dispersion_mas),
         relative_dispersion_mas=float(row.dispersion_mas),
         align_mode='REFERENCE',
@@ -6416,7 +6964,7 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
 
         # Keep MIRI_REL when it improves absolute dispersion. If the held
         # REFERENCE is under-calibrated, also accept a finalized parent chain
-        # whose absolute is only moderately worse — prefer a real relative
+        # whose absolute is only moderately worse - prefer a real relative
         # tie over a tiny-n_cal REFERENCE SUCCESS.
         ref_under_cal = bool(job.get('reference_under_calibrated'))
         parent_finalized = not bool(getattr(parent, 'provisional', False))
@@ -6458,7 +7006,7 @@ def run_fallback_align_job(job: dict[str, Any]) -> AlignWorkerResult:
             miri_path=miri_path,
             jhat_path=row.aligned_path,
             filter=row.filter,
-            wavelength_um=filter_wavelength_um(row.filter),
+            wavelength_um=filter_wavelength_um(row.miri_path),
             dispersion_mas=float(row.dispersion_mas),
             relative_dispersion_mas=rel_mas,
             align_mode='MIRI_REL',
@@ -6611,10 +7159,10 @@ def align_from_frames(
     repo: Path | None = None,
 ) -> tuple[int, list[AlignmentSummaryRow]]:
     """
-    Align frames filter-by-filter (blue→red), in parallel within each filter.
+    Align frames filter-by-filter (blue->red), in parallel within each filter.
 
     For each filter wave the frames are first aligned to their overlapping
-    reference images (``align_mode=REFERENCE`` on success). MIRI→MIRI fallback
+    reference images (``align_mode=REFERENCE`` on success). MIRI->MIRI fallback
     then runs in parallel for hard failures and for REFERENCE solutions whose
     dispersion exceeds the per-filter (or uniform CLI) quality-hold threshold;
     MIRI_REL is kept only when its absolute dispersion improves on REFERENCE.
@@ -6652,7 +7200,7 @@ def align_from_frames(
     use_filter_calibrators : bool, optional
         Apply :func:`calibrator_settings_for_filter` overrides.
     fallback : bool, optional
-        Enable MIRI→MIRI relative fallback.
+        Enable MIRI->MIRI relative fallback.
     max_nircam_dispersion_mas : float, optional
         Uniform REFERENCE quality hold in mas; ``None`` uses the per-filter
         map and values at or below zero disable the hold.
@@ -6674,7 +7222,7 @@ def align_from_frames(
 
     repo_str = str((repo or _resolve_repo_root(None)).resolve())
     workers = max(1, int(workers))
-    # CLI: None → per-filter map; <=0 → disable; >0 → uniform override.
+    # CLI: None -> per-filter map; <=0 -> disable; >0 -> uniform override.
     if max_nircam_dispersion_mas is not None and max_nircam_dispersion_mas <= 0:
         max_nircam_dispersion_mas = 0.0  # sentinel: disabled for all filters
 
@@ -6739,7 +7287,7 @@ def align_from_frames(
                 miri_path=final.miri_path,
                 jhat_path=str(final.aligned_path),
                 filter=final.filter,
-                wavelength_um=filter_wavelength_um(final.filter),
+                wavelength_um=filter_wavelength_um(final.miri_path),
                 dispersion_mas=float(final.dispersion_mas),
                 relative_dispersion_mas=float(final.dispersion_mas),
                 align_mode='REFERENCE',
@@ -6799,7 +7347,7 @@ def align_from_frames(
         prev = row_by_miri.get(result.miri_path)
 
         # MIRI_REL did not improve a REFERENCE quality hold: keep keepable
-        # REFERENCE only; soft-fail / tiny-n_cal / unusable → FAILURE.
+        # REFERENCE only; soft-fail / tiny-n_cal / unusable -> FAILURE.
         if (
             not result.ok
             and result.mode == 'fallback'
@@ -6853,7 +7401,7 @@ def align_from_frames(
     if summary_outfile is not None:
         summary_outfile = Path(summary_outfile).expanduser().resolve()
         write_alignment_summary(rows, summary_outfile)
-        logger.info(f'Live alignment summary → {summary_outfile}')
+        logger.info(f'Live alignment summary -> {summary_outfile}')
 
     logger.info(
         f'Alignment plan: {len(groups)} filter wave(s), '
@@ -6885,7 +7433,7 @@ def align_from_frames(
 
     if use_filter_calibrators:
         logger.info(
-            'Filter calibrators: F770W → '
+            'Filter calibrators: F770W -> '
             f'{describe_calibrator_settings(F770W_CALIBRATOR_SETTINGS)}'
         )
     else:
@@ -6896,7 +7444,7 @@ def align_from_frames(
     elif max_nircam_dispersion_mas is not None:
         logger.info(
             f'REFERENCE quality hold: uniform > '
-            f'{max_nircam_dispersion_mas:.1f} mas → try MIRI_REL '
+            f'{max_nircam_dispersion_mas:.1f} mas -> try MIRI_REL '
             f'(keep only if improved)'
         )
     else:
@@ -6904,7 +7452,7 @@ def align_from_frames(
         for name, thr in FILTER_MAX_REFERENCE_DISPERSION_MAS.items():
             parts.append(f'{name}:{"off" if thr is None else f"{thr:.0f}"}')
         logger.info(
-            'REFERENCE quality hold (per filter, mas → try MIRI_REL; '
+            'REFERENCE quality hold (per filter, mas -> try MIRI_REL; '
             f'keep only if improved): {", ".join(parts)}'
         )
 
@@ -6954,7 +7502,7 @@ def align_from_frames(
         if demoted:
             logger.info(
                 f'{filt}: demoted {len(demoted)} REFERENCE frame(s) for peer '
-                f'inconsistency → MIRI_REL'
+                f'inconsistency -> MIRI_REL'
             )
             flush_summary()
 
@@ -7068,7 +7616,7 @@ def align_from_frames(
                 )
                 continue
             if reference_solution_keepable(row):
-                # Had parents but MIRI_REL never scheduled / never returned —
+                # Had parents but MIRI_REL never scheduled / never returned -
                 # still keep keepable REFERENCE (dispersion hold only).
                 finalize_quality_hold_keep_reference(
                     row,
@@ -7135,7 +7683,7 @@ def run_overlaps(
         Parsed CLI arguments (``data_dir``, ``filters``, ``limit``,
         ``overlap_outdir``, ``repo``, ``galaxy``).
     MirIFootprint, BestOverlap, compute_overlap : callable
-        Injected from :mod:`st123.mosaic.image_overlap`.
+        Injected from :mod:`st123.stages.mosaic.image_overlap`.
 
     Returns
     -------
@@ -7149,6 +7697,20 @@ def run_overlaps(
     filters = parse_filters_arg(getattr(args, 'filters', None))
     miri_images = filter_miri_images(discover_miri_images(data_dir), filters)
     refs = discover_ref_images(data_dir)
+    existing_box = getattr(args, 'existing_box', None)
+    if existing_box:
+        from st123.stages.mosaic.mosaic import box_coadd_i2d_paths, resolve_existing_box_dir
+
+        box_dir = resolve_existing_box_dir(data_dir, existing_box)
+        box_resolved = box_dir.resolve()
+        refs = [r for r in refs if Path(r).resolve().parent == box_resolved]
+        if not refs:
+            refs = box_coadd_i2d_paths(box_dir)
+        logger.info(
+            'Restricting MIRI reference coadds to --existing-box %s (%d file(s))',
+            existing_box,
+            len(refs),
+        )
     if args.limit is not None:
         miri_images = miri_images[: args.limit]
 

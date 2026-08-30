@@ -11,7 +11,7 @@ import pytest
 from astropy.io import fits
 from astropy.table import Table
 
-from st123.mosaic.mosaic import (
+from st123.stages.mosaic.mosaic import (
     FULL_GROUP_LABEL,
     create_coadd_mosaic,
     create_dirs,
@@ -75,7 +75,7 @@ def test_edit_spec_groups(tmp_path: Path):
 
 def test_mp_init_sets_globals():
     mp_init(1, 2, ['a.fits'])
-    import st123.mosaic.mosaic as mosaic_mod
+    import st123.stages.mosaic.mosaic as mosaic_mod
 
     assert mosaic_mod.success == 1
     assert mosaic_mod.failed == 2
@@ -214,9 +214,9 @@ def test_create_coadd_mosaic_builds_and_sets_output_wcs(tmp_path: Path):
     image3.source_catalog = MagicMock()
 
     with (
-        patch('st123.mosaic.mosaic.patch_jwst_for_photutils3'),
-        patch('st123.mosaic.mosaic.asn_from_list') as asn_mod,
-        patch('st123.mosaic.mosaic.calwebb_image3.Image3Pipeline', return_value=image3),
+        patch('st123.stages.mosaic.mosaic.patch_jwst_for_photutils3'),
+        patch('st123.stages.mosaic.mosaic.asn_from_list') as asn_mod,
+        patch('st123.stages.mosaic.mosaic.calwebb_image3.Image3Pipeline', return_value=image3),
     ):
         asn = MagicMock()
         asn.dump.return_value = ('name', '{}')
@@ -258,6 +258,30 @@ def test_write_dolphot_frame_list(tmp_path: Path):
     assert str(frames[0].resolve()) in text
 
 
+def test_write_dolphot_frame_list_merges_existing(tmp_path: Path):
+    hst_ref = tmp_path / 'coadd_0_sn_wfc3_f160w_drz.fits'
+    hst_frame = tmp_path / 'ib2q01xaq_jhat.fits'
+    i2d = tmp_path / 'coadd_0_sn_f200w_i2d.fits'
+    nircam = tmp_path / 'jw_nrca1_jhat.fits'
+    for p in (hst_ref, hst_frame, i2d, nircam):
+        p.write_text('x')
+    (tmp_path / 'dolphot_frames.txt').write_text(
+        f'# group=0 box=sn\n# ref {hst_ref.resolve()}\n{hst_frame.resolve()}\n'
+    )
+    out = write_dolphot_frame_list(
+        str(tmp_path),
+        refimage=str(i2d),
+        frames=[str(nircam)],
+        group=0,
+        box='sn',
+    )
+    text = Path(out).read_text()
+    assert f'# ref {i2d.resolve()}' in text
+    assert str(hst_frame.resolve()) in text
+    assert str(nircam.resolve()) in text
+    assert 'box=sn' in text
+
+
 def test_write_dolphot_frame_list_full_group(tmp_path: Path):
     ref = tmp_path / 'coadd_0_full_f770w_i2d.fits'
     ref.write_text('x')
@@ -279,15 +303,98 @@ def test_apply_gwcs_removed_from_scripts_package():
         importlib.import_module('st123.scripts.apply_gwcs')
 
 
+def test_resolve_existing_box_path_under_reference(tmp_path: Path):
+    """Short group_*/ref_* forms resolve under reduction/reference/."""
+    reduction = tmp_path / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_sn'
+    box.mkdir(parents=True)
+    resolved = mosaic_script.resolve_existing_box_path(reduction, 'group_0/ref_sn')
+    assert resolved == box.resolve()
+
+    # Prefixed form still works.
+    resolved2 = mosaic_script.resolve_existing_box_path(
+        reduction, 'reference/group_0/ref_sn'
+    )
+    assert resolved2 == box.resolve()
+
+    with pytest.raises(FileNotFoundError, match='tried:'):
+        mosaic_script.resolve_existing_box_path(reduction, 'group_0/ref_missing')
+
+    project = tmp_path
+    from_project = mosaic_script.resolve_existing_box_path(
+        project, 'group_0/ref_sn'
+    )
+    assert from_project == box.resolve()
+
+
+def test_resolve_coverage_sky_implied_by_center_and_existing_box():
+    """Custom stamps / existing-box imply coverage without --require-coverage."""
+    from types import SimpleNamespace
+
+    from astropy import wcs as astropy_wcs
+
+    from st123.stages.mosaic.mosaic import MosaicBox
+
+    # --center-ra/dec alone implies coverage at that point.
+    args = SimpleNamespace(
+        require_coverage=False,
+        require_coverage_ra=None,
+        require_coverage_dec=None,
+        center_ra=70.37,
+        center_dec=-2.87,
+        contains_ra=None,
+        contains_dec=None,
+        existing_box=None,
+    )
+    assert mosaic_script._resolve_coverage_sky(args) == (70.37, -2.87)
+
+    # --existing-box implies stamp-center coverage once a box WCS exists.
+    w = astropy_wcs.WCS(naxis=2)
+    w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    w.wcs.crval = [185.73, 15.82]
+    w.wcs.crpix = [32.5, 32.5]
+    w.wcs.cdelt = [-0.001, 0.001]
+    w.pixel_shape = (64, 64)
+    box = MosaicBox(
+        group_id=0,
+        box_id='sn',
+        outdir='/tmp/ref_sn',
+        bbox=None,
+        frames=[],
+        wcs=w,
+    )
+    plan = SimpleNamespace(boxes=[box])
+    args = SimpleNamespace(
+        require_coverage=False,
+        require_coverage_ra=None,
+        require_coverage_dec=None,
+        center_ra=None,
+        center_dec=None,
+        contains_ra=None,
+        contains_dec=None,
+        existing_box='group_0/ref_sn',
+    )
+    ra, dec = mosaic_script._resolve_coverage_sky(args, plan=plan, box=box)
+    assert ra == pytest.approx(185.73, abs=1e-4)
+    assert dec == pytest.approx(15.82, abs=1e-4)
+
+    # Auto-split boxes still require the opt-in flag.
+    args.existing_box = None
+    assert mosaic_script._resolve_coverage_sky(args, plan=plan, box=box) == (
+        None,
+        None,
+    )
+
+
 def test_plan_mosaic_boxes_smoke_with_synthetic_table(tmp_path: Path):
     """Shared planner creates group_*/ref_* dirs from a prebuilt table."""
-    from st123.mosaic.mosaic import MosaicPlan
+    from st123.stages.mosaic.mosaic import MosaicPlan
 
     reduction = tmp_path
     ref = reduction / 'reference' / 'group_0' / 'ref_0'
     # Bypass input_list/WCS by stubbing plan internals via a tiny wrapper plan.
     # Construction of MosaicPlan + MosaicBox is the contract consumers use.
-    from st123.mosaic.mosaic import MosaicBox
+    from st123.stages.mosaic.mosaic import MosaicBox
 
     box = MosaicBox(
         group_id=0,

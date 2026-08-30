@@ -10,8 +10,8 @@ import pytest
 from astropy.io import fits
 
 from helpers import write_illuminated_fits, write_ref_with_s_region
-from st123.alignment import align as align_lib
-from st123.alignment.align import (
+from st123.stages.alignment import align as align_lib
+from st123.stages.alignment.align import (
     FILTER_MAX_REFERENCE_DISPERSION_MAS,
     F770W_CALIBRATOR_SETTINGS,
     AlignWorkerResult,
@@ -21,7 +21,7 @@ from st123.alignment.align import (
     max_reference_dispersion_mas,
     rank_fallback_parents,
 )
-from st123.mosaic.image_overlap import (
+from st123.stages.mosaic.image_overlap import (
     BestOverlap,
     MirIFootprint,
     ScienceFootprint,
@@ -38,14 +38,27 @@ def _write_miri_cal(
     crval=(150.0, 2.0),
     shape: tuple[int, int] = (1024, 1032),
     subarray: str = 'FULL',
+    photplam_angstrom: float | None = None,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_illuminated_fits(path, shape=shape, crval=crval, include_s_region=True)
+    if photplam_angstrom is None:
+        token = str(filter_name).upper().split('_', 1)[0]
+        digits = ''.join(ch for ch in token[1:] if ch.isdigit()) if token.startswith('F') else ''
+        if digits:
+            val = float(digits)
+            um = val / 100.0 if val >= 100 else val / 10.0
+            photplam_angstrom = um * 1.0e4
+        else:
+            photplam_angstrom = 1.0e4
     with fits.open(path, mode='update') as hdul:
         hdul[0].header['FILTER'] = filter_name
         hdul[0].header['INSTRUME'] = 'MIRI'
         hdul[0].header['DETECTOR'] = 'MIRIMAGE'
         hdul[0].header['SUBARRAY'] = subarray
+        hdul[0].header['PHOTPLAM'] = float(photplam_angstrom)
+        if 'SCI' in hdul:
+            hdul['SCI'].header['PHOTPLAM'] = float(photplam_angstrom)
     return path
 
 
@@ -64,7 +77,7 @@ def test_calibrator_settings_and_quality_hold_thresholds():
 
 def test_assess_field_brightness_flags_bright_sci(tmp_path: Path):
     import numpy as np
-    from st123.alignment.align import assess_field_brightness
+    from st123.stages.alignment.align import assess_field_brightness
     from st123.utils.settings import CROWDED_JHAT_NBRIGHT, crowded_jwst_params
 
     quiet = tmp_path / 'quiet_cal.fits'
@@ -207,34 +220,41 @@ def test_align_jwst_image_uses_crowded_retry_when_bright_and_strict_fails(tmp_pa
     assert kinds == ['strict', 'crowded']
 
 
-def test_filter_wavelength_um_and_blue_to_red_sort():
-    from st123.alignment.align import filter_wavelength_um, sort_frames_blue_to_red
+def test_filter_wavelength_um_and_blue_to_red_sort(tmp_path: Path):
+    from st123.stages.alignment.align import filter_wavelength_um, sort_frames_blue_to_red
 
-    assert filter_wavelength_um('F560W') == pytest.approx(5.6)
-    assert filter_wavelength_um('F1000W') == pytest.approx(10.0)
-    assert filter_wavelength_um('F200W') == pytest.approx(2.0)
-    assert filter_wavelength_um('not-a-filter') == float('inf')
+    f560 = _write_miri_cal(tmp_path / 'a_f560.fits', filter_name='F560W')
+    f770 = _write_miri_cal(tmp_path / 'b_f770.fits', filter_name='F770W')
+    f1000 = _write_miri_cal(tmp_path / 'c_f1000.fits', filter_name='F1000W')
+    f200 = tmp_path / 'nircam_f200.fits'
+    hdr = fits.Header()
+    hdr['TELESCOP'] = 'JWST'
+    hdr['INSTRUME'] = 'NIRCAM'
+    hdr['FILTER'] = 'F200W'
+    hdr['PHOTPLAM'] = 19900.0
+    fits.PrimaryHDU(header=hdr).writeto(f200)
 
-    filt_map = {
-        '/c_f1000.fits': 'F1000W',
-        '/a_f560.fits': 'F560W',
-        '/b_f770.fits': 'F770W',
-    }
+    assert filter_wavelength_um(f560) == pytest.approx(5.6)
+    assert filter_wavelength_um(f1000) == pytest.approx(10.0)
+    assert filter_wavelength_um(f200) == pytest.approx(1.99)
+    assert filter_wavelength_um(tmp_path / 'missing.fits') == float('inf')
+
     frames = [
-        {'miri_path': '/c_f1000.fits'},
-        {'miri_path': '/a_f560.fits'},
-        {'miri_path': '/b_f770.fits'},
+        {'miri_path': str(f1000)},
+        {'miri_path': str(f560)},
+        {'miri_path': str(f770)},
     ]
-    ordered = sort_frames_blue_to_red(frames, filter_from_path=filt_map.get)
+    ordered = sort_frames_blue_to_red(frames)
     assert [f['miri_path'] for f in ordered] == [
-        '/a_f560.fits',
-        '/b_f770.fits',
-        '/c_f1000.fits',
+        str(f560),
+        str(f770),
+        str(f1000),
     ]
 
 
-def test_combine_dispersion_and_rank_parents():
+def test_combine_dispersion_and_rank_parents(tmp_path: Path):
     assert combine_dispersion_mas(30.0, 40.0) == pytest.approx(50.0)
+    child = _write_miri_cal(tmp_path / 'child_f770.fits', filter_name='F770W')
     parents = [
         SuccessfulAlignment(
             miri_path='/a_f560.fits',
@@ -260,11 +280,11 @@ def test_combine_dispersion_and_rank_parents():
         ),
     ]
     with patch(
-        'st123.alignment.align.sky_overlap_fraction',
-        side_effect=lambda child, parent: 0.8 if 'f560' in parent else 0.9,
+        'st123.stages.alignment.align.sky_overlap_fraction',
+        side_effect=lambda child_path, parent: 0.8 if 'f560' in parent else 0.9,
     ):
         ranked = rank_fallback_parents(
-            '/child_f770.fits',
+            str(child),
             'F770W',
             parents,
             max_parents=5,
@@ -564,7 +584,7 @@ def test_best_overlap_miri_path_alias():
 
 
 def test_alignment_package_exports_drivers():
-    from st123 import alignment
+    from st123.stages import alignment
 
     assert callable(alignment.align_jwst_image)
     assert callable(alignment.run_alignment)
@@ -641,14 +661,14 @@ def test_visit_and_reference_workers_share_harvest_contract(tmp_path: Path):
         patch.object(align_lib, 'align_jwst_image'),
         patch.object(align_lib, 'run_alignment'),
     ):
-        # No dispersion header → FAILURE for both modes.
+        # No dispersion header -> FAILURE for both modes.
         _write_jhat_product(outdir, cal, dispersion_arcsec=None)
         visit_fail = align_lib.run_visit_align_job(visit_job)
         ref_fail = align_lib.run_reference_align_job(ref_job)
         assert visit_fail.ok is False and visit_fail.row['status'] == 'FAILURE'
         assert ref_fail.ok is False and ref_fail.row['status'] == 'FAILURE'
 
-        # Finite JWDISPM → SUCCESS + provenance for both modes.
+        # Finite JWDISPM -> SUCCESS + provenance for both modes.
         _write_jhat_product(outdir, cal, dispersion_arcsec=0.05)
         visit_ok = align_lib.run_visit_align_job(visit_job)
         ref_ok = align_lib.run_reference_align_job(ref_job)
@@ -674,7 +694,7 @@ def test_prefer_nircam_reference_paths(tmp_path: Path):
 
     preferred = align_lib.prefer_nircam_reference_paths([str(miri), str(nircam)])
     assert preferred == [str(nircam)]
-    # No NIRCam → keep MIRI list unchanged.
+    # No NIRCam -> keep MIRI list unchanged.
     assert align_lib.prefer_nircam_reference_paths([str(miri)]) == [str(miri)]
 
 
@@ -920,8 +940,9 @@ def test_soft_fail_and_usable_reference_helpers():
     assert align_lib.reference_solution_keepable(sparse_tight)
 
 
-def test_rank_fallback_prefers_f770w_seed_and_finalized():
+def test_rank_fallback_prefers_f770w_seed_and_finalized(tmp_path: Path):
     """Redder frames prefer F770W seeds; skip provisional above-threshold parents."""
+    child = _write_miri_cal(tmp_path / 'child_f2100.fits', filter_name='F2100W')
     parents = [
         SuccessfulAlignment(
             miri_path='/prov_f2100.fits',
@@ -961,11 +982,11 @@ def test_rank_fallback_prefers_f770w_seed_and_finalized():
         ),
     ]
     with patch(
-        'st123.alignment.align.sky_overlap_fraction',
+        'st123.stages.alignment.align.sky_overlap_fraction',
         return_value=0.8,
     ):
         ranked = rank_fallback_parents(
-            '/child_f2100.fits',
+            str(child),
             'F2100W',
             parents,
             max_parents=5,
@@ -1187,7 +1208,7 @@ def test_quality_hold_no_parent_finalizes_failure(tmp_path: Path):
 
 def test_usable_hold_kept_after_failed_miri_rel(tmp_path: Path):
     """Keepable REFERENCE hold stays SUCCESS when MIRI_REL does not improve it."""
-    # Paths must include filter tokens so blue→red wave order is F560W then F770W.
+    # Paths must include filter tokens so blue->red wave order is F560W then F770W.
     parent_cal = _write_miri_cal(
         tmp_path
         / 'JWST'

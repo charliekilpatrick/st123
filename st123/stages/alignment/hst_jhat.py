@@ -6,7 +6,7 @@ Upstream ``jhat.simple_jwst_phot.hst_photclass`` assumes ACS/WFC3-style headers
 products use ``FILTNAM1``/``FILTNAM2`` and ``*_c0m.fits``, and often store a
 numeric ``FILTER1`` that crashes ``'CLEAR' not in FILTER1``.
 
-Also patches JHAT's encircled-energy helper: SciPy ≥1.14 removed ``interp2d``,
+Also patches JHAT's encircled-energy helper: SciPy >=1.14 removed ``interp2d``,
 which upstream ``hst_get_ee_corr`` still calls.
 """
 
@@ -21,7 +21,24 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from st123.utils.logging import capture_output
+from st123.utils.logging import capture_output, configure_worker_logging
+from st123.datamodels import as_datamodel
+from st123.stages.alignment.frame_qa import (
+    FRAME_ABS_RETIE_MAX_APPLY_ARCSEC,
+    FRAME_ABS_RETIE_MIN_PEAK,
+    FRAME_ABS_RETIE_TOL_ARCSEC,
+    FRAME_ABS_TOL_ARCSEC,
+    FRAME_INTERNAL_TOL_ARCSEC,
+    FRAME_L3_SOFT_TOL_ARCSEC,
+    FRAME_MIN_MATCH_HEALTHY,
+    FRAME_SPARSE_TOL_ARCSEC,
+    build_frame_qa,
+    coherent_tol_arcsec,
+    stamp_quality_headers,
+    warn_if_frame_qa_soft,
+    write_alignment_summary_table,
+    write_frame_qa,
+)
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +92,7 @@ HST_JHAT_L3REF_PARAMS: dict[str, Any] = {
     'refcat_magcol': 'mag',
 }
 
-# Narrowband JHAT retry: continuum-poor frames often fail broadband Δmag /
+# Narrowband JHAT retry: continuum-poor frames often fail broadband Deltamag /
 # tight d2d cuts against F814W/F606W L3 catalogs. Loosen matching only for
 # filters classified by :func:`is_hst_narrowband_filter`.
 HST_JHAT_NARROWBAND_PARAMS: dict[str, Any] = {
@@ -107,7 +124,7 @@ HST_NARROWBAND_PARENT_FILTERS: tuple[str, ...] = (
     'f160w',
 )
 
-# Relative-match knobs for sparse narrowband → broadband ties.
+# Relative-match knobs for sparse narrowband -> broadband ties.
 HST_NARROWBAND_REL_MIN_MATCHES: int = 5
 HST_NARROWBAND_REL_MAX_MATCH_PIX: float = 25.0
 HST_NARROWBAND_REL_NBRIGHT: int = 400
@@ -191,10 +208,9 @@ def write_hst_narrowband_provenance(
     n_match, abs_arcsec, dra_arcsec, ddec_arcsec
         Optional relative-match metrics.
     """
-    from astropy.io import fits
 
     mode = str(align_mode).upper()
-    with fits.open(jhat_path, mode='update', memmap=False) as hdul:
+    with as_datamodel(jhat_path).open(mode='update', memmap=False) as hdul:
         hdr = hdul[0].header
         hdr['ALGNMODE'] = (mode, 'JHAT, HST_REL, or PIPELINE')
         hdr['ALGNTO'] = (str(aligned_to), 'Narrowband aligned-to parent')
@@ -237,7 +253,7 @@ def rank_hst_narrowband_parents(
     Rank aligned broadband JHAT parents for a narrowband frame.
 
     Prefers same visit key and instrument, then preferred broadband filters
-    (F814W, F606W, …). Narrowband SUCCESS products are never used as parents.
+    (F814W, F606W, ...). Narrowband SUCCESS products are never used as parents.
 
     Parameters
     ----------
@@ -443,7 +459,7 @@ def measure_hst_relative_offset_from_phot(
         stats['n_match'] = n
         if n < int(min_matches):
             return stats
-    # Total img−ref offset = bootstrap + residual of shifted coords.
+    # Total img-ref offset = bootstrap + residual of shifted coords.
     c_im = SkyCoord(ra_i[good] * u.deg, dec_i[good] * u.deg)
     c_rm = c_r[idx[good]]
     dra = (c_im.ra - c_rm.ra).to(u.deg).value
@@ -506,7 +522,6 @@ def align_hst_narrowband_relative(
         Result with ``ok``, ``outpath``, ``n_match``, offset fields, and
         ``error`` when the relative match fails (no product kept on failure).
     """
-    from astropy.io import fits
 
     raw = Path(raw_path).expanduser().resolve()
     parent = Path(parent_jhat).expanduser().resolve()
@@ -574,7 +589,7 @@ def align_hst_narrowband_relative(
 
     dra_deg = -float(off['dra_deg'])
     ddec_deg = -float(off['ddec_deg'])
-    with fits.open(jhat, mode='update', memmap=False) as hdul:
+    with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
         apply_sky_translation_to_sci(
             hdul,
             dra_deg,
@@ -582,7 +597,7 @@ def align_hst_narrowband_relative(
             comment='st123: narrowband HST_REL vs broadband',
         )
         hdul.flush()
-    # Applied shift is the inverse of the measured img−ref offset.
+    # Applied shift is the inverse of the measured img-ref offset.
     write_hst_narrowband_provenance(
         jhat,
         align_mode='HST_REL',
@@ -660,7 +675,7 @@ def measure_hst_narrowband_residual_vs_refcat(
     Post-alignment residual of a JHAT product vs an L3 / broadband refcat.
 
     Projects the frame's ``*.phot.txt`` x/y through the current SCI WCS and
-    matches to *refcat* ra/dec. Reports median separation of good matches —
+    matches to *refcat* ra/dec. Reports median separation of good matches -
     this is the quality metric (dispersion), not the bootstrap offset.
 
     Parameters
@@ -682,7 +697,6 @@ def measure_hst_narrowband_residual_vs_refcat(
     import numpy as np
     import pandas as pd
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.wcs import WCS
     import astropy.units as u
 
@@ -690,6 +704,8 @@ def measure_hst_narrowband_residual_vs_refcat(
         'ok': False,
         'n_match': 0,
         'residual_arcsec': None,
+        'residual_mean_arcsec': None,
+        'residual_std_arcsec': None,
         'dra_arcsec': 0.0,
         'ddec_arcsec': 0.0,
         'dra_deg': 0.0,
@@ -717,7 +733,7 @@ def measure_hst_narrowband_residual_vs_refcat(
     else:
         phot = phot.head(int(nbright))
 
-    with fits.open(jhat, memmap=True) as hdul:
+    with as_datamodel(jhat).open(memmap=True) as hdul:
         idxs = _sci_hdu_indices(hdul)
         if not idxs:
             return stats
@@ -743,16 +759,19 @@ def measure_hst_narrowband_residual_vs_refcat(
     stats['n_match'] = n
     if n < 3:
         return stats
-    # ref − img (apply to CRVAL to move image onto ref)
+    # ref - img (apply to CRVAL to move image onto ref)
     dra = (c_ref.ra[idx] - c_img.ra).to(u.deg).value
     ddec = (c_ref.dec[idx] - c_img.dec).to(u.deg).value
     dra_m = float(np.median(dra[good]))
     ddec_m = float(np.median(ddec[good]))
     dec0 = float(np.median(np.asarray(dec_img, dtype=float)[good]))
+    sep_good = np.asarray(sep.arcsec[good], dtype=float)
     stats.update(
         {
             'ok': True,
-            'residual_arcsec': float(np.median(sep.arcsec[good])),
+            'residual_arcsec': float(np.median(sep_good)),
+            'residual_mean_arcsec': float(np.mean(sep_good)),
+            'residual_std_arcsec': float(np.std(sep_good)),
             'dra_deg': dra_m,
             'ddec_deg': ddec_m,
             'dra_arcsec': dra_m * 3600.0 * float(np.cos(np.radians(dec0))),
@@ -790,7 +809,7 @@ def refine_hst_narrowband_to_refcat(
        using phot x/y projected through the current SCI WCS (not stale phot
        ra/dec, which still reflect the pipeline WCS after HST_REL).
     2. Per-SCI CRPIX centroid refine vs the same refcat (chip-2 / ACS-WFC).
-    3. A final tight CRVAL polish, then residual measurement at 0.15–0.25".
+    3. A final tight CRVAL polish, then residual measurement at 0.15-0.25".
 
     Parameters
     ----------
@@ -810,7 +829,6 @@ def refine_hst_narrowband_to_refcat(
     dict
         ``ok``, ``n_passes``, final residual / n_match, per-pass log.
     """
-    from astropy.io import fits
 
     jhat = Path(jhat_path).expanduser().resolve()
     ref_path = Path(refcat).expanduser().resolve()
@@ -867,7 +885,7 @@ def refine_hst_narrowband_to_refcat(
             pre_tight = measure_hst_narrowband_residual_vs_refcat(
                 jhat, ref_path, match_radius_arcsec=0.15
             )
-            with fits.open(jhat, mode='update', memmap=False) as hdul:
+            with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
                 apply_sky_translation_to_sci(
                     hdul,
                     float(meas['dra_deg']),
@@ -896,7 +914,7 @@ def refine_hst_narrowband_to_refcat(
                 ):
                     revert = True
             if revert:
-                with fits.open(jhat, mode='update', memmap=False) as hdul:
+                with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
                     apply_sky_translation_to_sci(
                         hdul,
                         -float(meas['dra_deg']),
@@ -917,14 +935,14 @@ def refine_hst_narrowband_to_refcat(
                 (post_tight if post_tight.get('ok') else meas)['residual_arcsec']
             )
             log.info(
-                'Narrowband refine %s: apply |Δ|=%.3f" (n=%d, rad=%.2f")',
+                'Narrowband refine %s: apply |Delta|=%.3f" (n=%d, rad=%.2f")',
                 jhat.name,
                 shift,
                 meas['n_match'],
                 match_rad,
             )
 
-    # Choose stage ladder from the current residual — avoid re-opening a
+    # Choose stage ladder from the current residual - avoid re-opening a
     # wide match radius once the solution is already near-broadband.
     probe = measure_hst_narrowband_residual_vs_refcat(
         jhat, ref_path, match_radius_arcsec=0.5
@@ -949,7 +967,7 @@ def refine_hst_narrowband_to_refcat(
 
     if per_chip:
         # Wider search than broadband: narrowband continuum is sparse and the
-        # sibling bootstrap can leave ~0.1–0.5" chip residuals.
+        # sibling bootstrap can leave ~0.1-0.5" chip residuals.
         chip = refine_hst_wcs_per_chip_from_refcat(
             jhat,
             ref_path,
@@ -962,7 +980,7 @@ def refine_hst_narrowband_to_refcat(
             'n_sci': chip.get('n_sci'),
             'chips': chip.get('chips'),
         }
-        # Only re-polish CRVAL when CRPIX actually moved — otherwise the
+        # Only re-polish CRVAL when CRPIX actually moved - otherwise the
         # extra medium-radius stages can walk a good solution off L3.
         if int(chip.get('n_updated') or 0) > 0:
             _crval_stages(((0.25, 0.20), (0.15, 0.12), (0.10, 0.08)))
@@ -986,7 +1004,7 @@ def refine_hst_narrowband_to_refcat(
         report['residual_arcsec'] = float(final['residual_arcsec'])
         report['dra_arcsec'] = float(final['dra_arcsec'])
         report['ddec_arcsec'] = float(final['ddec_arcsec'])
-        with fits.open(jhat, mode='update', memmap=False) as hdul:
+        with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
             hdul[0].header['ST123NRM'] = (
                 float(final['residual_arcsec']),
                 '[arcsec] narrowband residual vs refcat',
@@ -1016,7 +1034,7 @@ def finalize_hst_narrowband_group(
     Order matters for sparse narrowbands:
     1. Per-frame iterative refine onto *refcat* (primary absolute tie).
     2. Optional small internal relative CRVAL tweaks (pixel match only;
-       capped — never use stale pipeline phot ra/dec).
+       capped - never use stale pipeline phot ra/dec).
     3. Optional common abs retie vs *abs_ref* image only (no Gaia fallback;
        Gaia is too easy to mismatch on emission-line frames).
     4. Final per-frame L3 polish + residual measurement.
@@ -1037,7 +1055,6 @@ def finalize_hst_narrowband_group(
     dict
         Harmonize / abs-retie / residual summary.
     """
-    from astropy.io import fits
 
     paths = [Path(p).resolve() for p in jhat_paths if Path(p).is_file()]
     report: dict[str, Any] = {
@@ -1100,7 +1117,7 @@ def finalize_hst_narrowband_group(
                     }
                 )
                 continue
-            with fits.open(path, mode='update', memmap=False) as hdul:
+            with as_datamodel(path).open(mode='update', memmap=False) as hdul:
                 apply_sky_translation_to_sci(
                     hdul,
                     -float(off['dra_deg']),
@@ -1127,7 +1144,7 @@ def finalize_hst_narrowband_group(
             ),
         }
 
-    # 3) Common abs vs deep image only — never Gaia on narrowbands.
+    # 3) Common abs vs deep image only - never Gaia on narrowbands.
     abs_path = Path(abs_ref).resolve() if abs_ref else None
     if abs_path is not None and abs_path.is_file():
         report['abs_retie'] = apply_common_abs_shift_vs_ref(
@@ -1234,7 +1251,6 @@ def polish_hst_narrowband_products(
         Per-visit/filter finalize reports under ``groups``.
     """
     from st123.utils.helpers import get_filter
-    from astropy.io import fits
 
     out = Path(jhat_dir).expanduser().resolve()
     refcat_path = Path(refcat).resolve() if refcat else find_hst_l3_refcat(out)
@@ -1250,7 +1266,7 @@ def polish_hst_narrowband_products(
     else:
         for path in sorted(out.glob('*_jhat.fits')):
             try:
-                with fits.open(path, memmap=True) as hdul:
+                with as_datamodel(path).open(memmap=True) as hdul:
                     if hdul[0].header.get('ST123NAR'):
                         candidates.append(path.resolve())
                         continue
@@ -1374,7 +1390,7 @@ def recover_failed_hst_narrowbands(
         rel_errors: list[str] = []
         for parent in parents:
             log.info(
-                'HST narrowband HST_REL: %s (%s) → parent %s',
+                'HST narrowband HST_REL: %s (%s) -> parent %s',
                 raw.name,
                 filt,
                 parent.name,
@@ -1941,12 +1957,12 @@ def ensure_wfpc2_jhat_patch() -> None:
     Replace ``jhat.simple_jwst_phot.hst_photclass.load_image`` with a WFPC2-safe
     wrapper (idempotent; safe if ``jhat`` is re-imported).
 
-    Also installs SciPy ``interp2d`` / EE-correction shims needed on SciPy ≥1.14,
+    Also installs SciPy ``interp2d`` / EE-correction shims needed on SciPy >=1.14,
     a tolerant HST ``match_refcat`` retry for poor initial WCS, and the
-    Gaia→Vizier patch (ESA TAP disabled).
+    Gaia->Vizier patch (ESA TAP disabled).
     """
     install_scipy_interp2d_compat()
-    from st123.alignment.gaia_catalog import install_jhat_gaia_vizier_patch
+    from st123.stages.alignment.gaia_catalog import install_jhat_gaia_vizier_patch
 
     install_jhat_gaia_vizier_patch()
     import jhat.simple_jwst_phot as sjp
@@ -2104,7 +2120,7 @@ def _recover_jhat_product(image: str | Path, outdir: str | Path) -> Path | None:
     """
     Locate / normalize JHAT products when tweakreg writes ``*_tweakregstep.fits``.
 
-    Upstream JHAT renames ``{stem}_tweakregstep.fits`` → ``{stem}_jhat.fits``, but
+    Upstream JHAT renames ``{stem}_tweakregstep.fits`` -> ``{stem}_jhat.fits``, but
     tweakreg-hack often emits ``{inputstem}_tweakregstep.fits`` (e.g.
     ``iey902sdq_flc_tweakregstep.fits``), which the rename misses.
     """
@@ -2166,7 +2182,7 @@ def measure_sci_sky_translation(
     margin: int = 50,
 ) -> tuple[float, float]:
     """
-    Median sky translation (ΔRA, ΔDec) in degrees from *wcs_before* → *wcs_after*.
+    Median sky translation (DeltaRA, DeltaDec) in degrees from *wcs_before* -> *wcs_after*.
 
     Samples a grid of detector pixels and differences the world coordinates.
     """
@@ -2193,7 +2209,7 @@ def apply_sky_translation_to_sci(
     sci_indices: list[int] | None = None,
     comment: str = 'st123: multi-SCI JHAT sky',
 ) -> int:
-    """Add (ΔRA, ΔDec) in degrees to ``CRVAL`` of selected SCI HDUs. Returns count."""
+    """Add (DeltaRA, DeltaDec) in degrees to ``CRVAL`` of selected SCI HDUs. Returns count."""
     idxs = sci_indices if sci_indices is not None else _sci_hdu_indices(hdul)
     n = 0
     for i in idxs:
@@ -2213,11 +2229,16 @@ def apply_sky_translation_to_sci(
 
 
 # Pre-drizzle internal alignment: frames in one coadd must agree better than this.
-HST_INTERNAL_ALIGN_MAX_ARCSEC = 0.08
+# Defaults track the shared JWST/HST 50 mas gate (sparse soft-fallback 80 mas).
+HST_INTERNAL_ALIGN_MAX_ARCSEC = FRAME_INTERNAL_TOL_ARCSEC
 # Level-3 coadds (different filters / instruments) should agree to this.
-HST_L3_ALIGN_MAX_ARCSEC = 0.12
+HST_L3_ALIGN_MAX_ARCSEC = FRAME_ABS_TOL_ARCSEC
+# Soft L3 ceiling used for mosaic warnings (not a hard drizzle gate).
+HST_L3_SOFT_ALIGN_MAX_ARCSEC = FRAME_L3_SOFT_TOL_ARCSEC
 # Absolute tie search radius for 2-D offset histograms (handles ~arcsec pipeline errors).
 HST_ABS_OFFSET_MAX_ARCSEC = 5.0
+# Sparse-match soft internal/abs tolerance (legacy 80 mas).
+HST_SPARSE_ALIGN_MAX_ARCSEC = FRAME_SPARSE_TOL_ARCSEC
 
 
 def measure_hst_sky_offset_2dhist(
@@ -2235,13 +2256,12 @@ def measure_hst_sky_offset_2dhist(
     Robust sky offset of *path_img* relative to *path_ref* via a 2-D histogram.
 
     Nearest-neighbour matching inside a large radius is contaminated by chance
-    pairs near 0 when the true offset is ~1–5″. The histogram peak (optionally
+    pairs near 0 when the true offset is ~1-5". The histogram peak (optionally
     excluding a small core around zero) recovers the coherent shift. Returns
-    ``img − ref``; add ``−dra/−ddec`` to *path_img* CRVAL to place it on *path_ref*.
+    ``img - ref``; add ``-dra/-ddec`` to *path_img* CRVAL to place it on *path_ref*.
     """
     import numpy as np
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.stats import sigma_clipped_stats
     from astropy.wcs import WCS
     from photutils.detection import DAOStarFinder
@@ -2260,7 +2280,7 @@ def measure_hst_sky_offset_2dhist(
     }
 
     def _det(path: Path):
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             idxs = _sci_hdu_indices(hdul)
             if not idxs or sci_order >= len(idxs):
                 return None
@@ -2307,7 +2327,7 @@ def measure_hst_sky_offset_2dhist(
     # Prefer a peak outside the false-match core near zero only when that
     # outer peak *dominates* the core. Crowded fields always produce weak
     # secondary peaks (>= min_peak) outside ~0.35"; blindly preferring them
-    # false-fails well-aligned coadds at ~0.3–0.5".
+    # false-fails well-aligned coadds at ~0.3-0.5".
     cx = 0.5 * (xe[:-1] + xe[1:])
     cy = 0.5 * (ye[:-1] + ye[1:])
     XX, YY = np.meshgrid(cx, cy, indexing='ij')
@@ -2359,12 +2379,15 @@ def measure_hst_sky_offset_2dhist(
 
 def find_hst_abs_ref_image(jhat_dir: str | Path) -> Path | None:
     """
-    Prefer a deep aligned frame/coadd for absolute ties (F625 / ACS·WFC3 F814).
+    Prefer a deep aligned frame/coadd for absolute ties (F625 / ACS*WFC3 F814).
 
     Prefers boxed ``reference/group_*/ref_*/`` products, then legacy flat
-    coadds. Modern ACS/WFC3 coadds beat WFPC2 when both exist — WFPC2
+    coadds. Modern ACS/WFC3 coadds beat WFPC2 when both exist - WFPC2
     multi-visit coadds can be self-ghosted and make a poor absolute reference.
+    Candidates with healthy ``JWDISPM``/``JWNCAL`` or dense phot catalogs are
+    boosted (JWST-style hub quality gate).
     """
+
     jhat = Path(jhat_dir).expanduser().resolve()
     refdir = jhat.parent / 'reference'
     candidates: list[Path] = []
@@ -2392,8 +2415,14 @@ def find_hst_abs_ref_image(jhat_dir: str | Path) -> Path | None:
             jhat / 'iey902shq_jhat.fits',
         ]
     )
+    # Prefer Gaia-anchored L3 under jhat/l3_ref when present.
+    l3 = jhat / 'l3_ref'
+    if l3.is_dir():
+        candidates.extend(sorted(l3.glob('coadd_*_drc.fits')))
+        candidates.extend(sorted(l3.glob('coadd_*_drz.fits')))
+        candidates.extend(sorted(l3.glob('coadd_*_jhat.fits')))
 
-    def _score(p: Path) -> tuple[int, int]:
+    def _score(p: Path) -> tuple[int, int, int]:
         name = p.name.lower()
         pref = 0
         if 'wfc3' in name and 'f625' in name:
@@ -2403,17 +2432,60 @@ def find_hst_abs_ref_image(jhat_dir: str | Path) -> Path | None:
         elif 'acs' in name and 'f814' in name:
             pref = 320
         elif 'wfpc2' in name and 'f814' in name:
-            pref = 200
+            pref = 120  # demote ghost-prone WFPC2 hubs
         elif 'f625' in name:
             pref = 150
         elif 'f814' in name:
             pref = 100
         layout = 1 if 'group_' in p.as_posix() else 0
+        # Prefer hubs that already carry a healthy JWDISPM stamp / dense phot.
+        quality = 0
+        try:
+            with as_datamodel(p).open(memmap=True) as hdul:
+                disp = hdul[0].header.get('JWDISPM')
+                ncal = hdul[0].header.get('JWNCAL')
+                if disp is not None and ncal is not None:
+                    try:
+                        d = float(disp)
+                        n = int(ncal)
+                        if n >= FRAME_MIN_MATCH_HEALTHY and d <= FRAME_ABS_TOL_ARCSEC:
+                            quality = 50
+                        elif n >= FRAME_MIN_MATCH_HEALTHY and d <= FRAME_SPARSE_TOL_ARCSEC:
+                            quality = 25
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass
+        phot = p.with_name(
+            p.name.replace('_drc.fits', '_drc.phot.txt')
+            .replace('_drz.fits', '_drz.phot.txt')
+            .replace('_jhat.fits', '.phot.txt')
+        )
+        # Also check l3_ref sibling naming.
+        if not phot.is_file() and 'drc' in p.name:
+            alt = p.parent / 'l3_ref' / (p.stem.replace('_drc', '_drc') + '.phot.txt')
+            # common: coadd_acs_f814w_drc.phot.txt next to jhat/l3_ref
+            for cand in (
+                p.parent / f'{p.name.replace(".fits", ".phot.txt")}',
+                jhat / 'l3_ref' / f'{p.stem}.phot.txt',
+                jhat / 'l3_ref' / p.name.replace('_drc.fits', '_drc.phot.txt').replace(
+                    '_drz.fits', '_drz.phot.txt'
+                ),
+            ):
+                if cand.is_file():
+                    phot = cand
+                    break
+        if phot.is_file():
+            try:
+                n_lines = sum(1 for _ in phot.open())
+                quality += min(40, n_lines // 50)
+            except Exception:
+                pass
         try:
             size = int(p.stat().st_size)
         except OSError:
             size = 0
-        return (pref + 10 * layout, size)
+        return (pref + 10 * layout + quality, size, quality)
 
     usable: list[Path] = []
     for cand in candidates:
@@ -2429,11 +2501,10 @@ def find_hst_abs_ref_image(jhat_dir: str | Path) -> Path | None:
 
 def _frame_exptime(path: str | Path) -> float:
     """EXPTIME from primary/SCI, else EXPSTART/EXPEND; 0.0 if missing."""
-    from astropy.io import fits
 
     p = Path(path)
     try:
-        with fits.open(p, memmap=True) as hdul:
+        with as_datamodel(p).open(memmap=True) as hdul:
             for hdu in hdul:
                 val = hdu.header.get('EXPTIME')
                 if val is not None:
@@ -2468,13 +2539,12 @@ def _detect_sci_sky_sources(
     Returns ``(None, None, None)`` when detection fails.
     """
     import numpy as np
-    from astropy.io import fits
     from astropy.stats import sigma_clipped_stats
     from astropy.wcs import WCS
     from photutils.detection import DAOStarFinder
 
     p = Path(path)
-    with fits.open(p, memmap=True) as hdul:
+    with as_datamodel(p).open(memmap=True) as hdul:
         idxs = _sci_hdu_indices(hdul)
         if not idxs or sci_order < 0 or sci_order >= len(idxs):
             return None, None, None
@@ -2513,7 +2583,7 @@ def measure_hst_frame_sky_offset(
     Median sky offset of *path_img* relative to *path_ref* (same SCI order).
 
     Sources are detected independently; matched in sky. Positive
-    ``dra_arcsec`` / ``ddec_arcsec`` mean img catalogs sit east/north of ref —
+    ``dra_arcsec`` / ``ddec_arcsec`` mean img catalogs sit east/north of ref -
     subtract those CRVAL shifts from *path_img* to place it on *path_ref*.
     """
     import numpy as np
@@ -2549,7 +2619,7 @@ def measure_hst_frame_sky_offset(
     stats['n_match'] = n
     if n < int(min_matches):
         return stats
-    # img − ref in degrees (RA wrapped).
+    # img - ref in degrees (RA wrapped).
     dra = (c_i.ra - c_r.ra[idx]).to(u.deg).value
     dra = (dra + 180.0) % 360.0 - 180.0
     ddec = (c_i.dec - c_r.dec[idx]).to(u.deg).value
@@ -2590,12 +2660,11 @@ def measure_hst_frame_sky_offset_via_refcat(
     """
     import numpy as np
     import pandas as pd
-    from astropy.io import fits
     from astropy.stats import sigma_clip
     from astropy.wcs import WCS
     from astropy.wcs.utils import proj_plane_pixel_scales
 
-    from st123.alignment.gaia_simple import _centroid
+    from st123.stages.alignment.gaia_simple import _centroid
 
     stats: dict[str, Any] = {
         'path_img': str(Path(path_img)),
@@ -2623,7 +2692,7 @@ def measure_hst_frame_sky_offset_via_refcat(
     decs = np.asarray(ref_df['dec'], dtype=float)[: int(max_sources)]
 
     def _load(path: Path):
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             idxs = _sci_hdu_indices(hdul)
             if not idxs or sci_order >= len(idxs):
                 return None
@@ -2650,12 +2719,12 @@ def measure_hst_frame_sky_offset_via_refcat(
     dra_list: list[float] = []
     ddec_list: list[float] = []
     sep_list: list[float] = []
-    for ra, dec in zip(ras, decs):
-        try:
-            x_i0, y_i0 = w_i.world_to_pixel_values(float(ra), float(dec))
-            x_r0, y_r0 = w_r.world_to_pixel_values(float(ra), float(dec))
-        except Exception:
-            continue
+    # One quiet vectorized projection -- avoids per-star all_world2pix warnings.
+    x_i_all, y_i_all = world_to_pixel_quiet(w_i, ras, decs)
+    x_r_all, y_r_all = world_to_pixel_quiet(w_r, ras, decs)
+    for x_i0, y_i0, x_r0, y_r0, ra, dec in zip(
+        x_i_all, y_i_all, x_r_all, y_r_all, ras, decs
+    ):
         if not (
             np.isfinite(x_i0)
             and np.isfinite(y_i0)
@@ -2771,12 +2840,11 @@ def measure_hst_frame_sky_offset_multichip(
     Per-SCI sky offsets of *path_img* vs *path_ref*.
 
     Top-level ``dra_*`` / ``abs_arcsec`` are from SCI1 (the primary drizzle
-    alignment chip). ``max_abs_arcsec`` is the worst chip — used for QA.
+    alignment chip). ``max_abs_arcsec`` is the worst chip - used for QA.
     """
-    from astropy.io import fits
 
     chip_stats: list[dict[str, Any]] = []
-    with fits.open(path_img, memmap=True) as hdul:
+    with as_datamodel(path_img).open(memmap=True) as hdul:
         n_sci = min(len(_sci_hdu_indices(hdul)), int(max_sci))
     for k in range(n_sci):
         st = _measure_offset_one_sci(
@@ -2852,6 +2920,44 @@ _WCS_COPY_KEYS = (
 )
 
 
+def world_to_pixel_quiet(wcs, ra, dec, *, origin: int = 0):
+    """
+    Sky -> pixel without per-star ``all_world2pix`` warning spam.
+
+    Uses :meth:`astropy.wcs.WCS.all_world2pix` with ``quiet=True`` so
+    divergent SIP / WFPC2 solutions return NaN instead of flooding stderr.
+    Accepts scalars or arrays; returns ``(x, y)`` with the same shape.
+    """
+    import numpy as np
+
+    ra_a = np.asarray(ra, dtype=float)
+    dec_a = np.asarray(dec, dtype=float)
+    scalar = ra_a.ndim == 0 and dec_a.ndim == 0
+    if scalar:
+        ra_a = ra_a.reshape(1)
+        dec_a = dec_a.reshape(1)
+    try:
+        raw = wcs.all_world2pix(ra_a, dec_a, int(origin), quiet=True)
+        # Astropy returns [x_arr, y_arr] (list) or an Nx2 / 2xN array.
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            x = np.asarray(raw[0], dtype=float)
+            y = np.asarray(raw[1], dtype=float)
+        else:
+            xy = np.asarray(raw, dtype=float)
+            if xy.ndim == 2 and xy.shape[0] == 2:
+                x, y = xy[0], xy[1]
+            elif xy.ndim == 2 and xy.shape[-1] == 2:
+                x, y = xy[:, 0], xy[:, 1]
+            else:
+                raise TypeError(f'unexpected all_world2pix shape {xy.shape}')
+    except Exception:
+        x = np.full(np.broadcast(ra_a, dec_a).shape, np.nan, dtype=float)
+        y = np.full(np.broadcast(ra_a, dec_a).shape, np.nan, dtype=float)
+    if scalar:
+        return float(x.reshape(-1)[0]), float(y.reshape(-1)[0])
+    return x, y
+
+
 def measure_hst_frame_relative_offset_pixel(
     path_img: str | Path,
     path_ref: str | Path,
@@ -2862,27 +2968,26 @@ def measure_hst_frame_relative_offset_pixel(
     nbright: int = 250,
 ) -> dict[str, Any]:
     """
-    Relative WCS offset via detections matched in the reference pixel frame.
+    Relative WCS offset via detections matched on the sky.
 
-    Projects *path_img* sources through its WCS into *path_ref* pixels and
-    matches to *path_ref* detections. This is the metric that predicts
-    drizzle ghosting; shared-refcat centroid QA can false-pass after
-    per-frame CRPIX refine.
+    Both frames are projected with ``pixel_to_world`` only (stable for HST),
+    then matched with :meth:`~astropy.coordinates.SkyCoord.match_to_catalog_sky`.
+    This avoids ``all_world2pix`` divergence that WFPC2 / mistied SIP solutions
+    trigger when projecting one frame into the other's pixel grid.
     """
     import numpy as np
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.stats import sigma_clipped_stats
     from astropy.wcs import WCS
+    from astropy.wcs.utils import proj_plane_pixel_scales
     from photutils.detection import DAOStarFinder
-    from scipy.spatial import cKDTree
     import astropy.units as u
 
     stats: dict[str, Any] = {
         'path_img': str(Path(path_img)),
         'path_ref': str(Path(path_ref)),
         'sci_order': int(sci_order),
-        'method': 'pixel_match',
+        'method': 'sky_match',
         'n_match': 0,
         'ok': False,
         'dra_deg': 0.0,
@@ -2895,7 +3000,7 @@ def measure_hst_frame_relative_offset_pixel(
     }
 
     def _det(path: Path):
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             idxs = _sci_hdu_indices(hdul)
             if not idxs or sci_order >= len(idxs):
                 return None
@@ -2904,6 +3009,8 @@ def measure_hst_frame_relative_offset_pixel(
             wcs = WCS(ext.header, hdul, naxis=2)
         mask = ~np.isfinite(data)
         _, med, std = sigma_clipped_stats(data, mask=mask, sigma=3.0, maxiters=5)
+        if not np.isfinite(std) or std <= 0:
+            return None
         tbl = DAOStarFinder(fwhm=2.5, threshold=5.0 * std)(data - med, mask=mask)
         if tbl is None or len(tbl) < 5:
             return None
@@ -2924,28 +3031,37 @@ def measure_hst_frame_relative_offset_pixel(
         return stats
     xi, yi, wi = det_i
     xr, yr, wr = det_r
-    ra_i, dec_i = wi.pixel_to_world_values(xi, yi)
-    xp, yp = wr.world_to_pixel_values(ra_i, dec_i)
-    tree = cKDTree(np.column_stack([xr, yr]))
-    dist, idx = tree.query(
-        np.column_stack([np.asarray(xp), np.asarray(yp)]),
-        distance_upper_bound=float(max_match_pix),
+    try:
+        ra_i, dec_i = wi.pixel_to_world_values(xi, yi)
+        ra_r, dec_r = wr.pixel_to_world_values(xr, yr)
+    except Exception:
+        return stats
+    c_i = SkyCoord(
+        np.asarray(ra_i, dtype=float) * u.deg,
+        np.asarray(dec_i, dtype=float) * u.deg,
     )
-    good = np.isfinite(dist) & (np.asarray(idx) < len(xr))
+    c_r = SkyCoord(
+        np.asarray(ra_r, dtype=float) * u.deg,
+        np.asarray(dec_r, dtype=float) * u.deg,
+    )
+    try:
+        scale = float(np.nanmedian(proj_plane_pixel_scales(wr)) * 3600.0)
+    except Exception:
+        scale = 0.04
+    match_as = float(max_match_pix) * max(scale, 1e-6)
+    idx, sep, _ = c_i.match_to_catalog_sky(c_r)
+    good = np.isfinite(sep.arcsec) & (sep.arcsec < match_as)
     n = int(np.count_nonzero(good))
     stats['n_match'] = n
     if n < int(min_matches):
         return stats
-    ra_r, dec_r = wr.pixel_to_world_values(xr[idx[good]], yr[idx[good]])
-    c_i = SkyCoord(np.asarray(ra_i)[good] * u.deg, np.asarray(dec_i)[good] * u.deg)
-    c_r = SkyCoord(np.asarray(ra_r, dtype=float) * u.deg, np.asarray(dec_r, dtype=float) * u.deg)
-    # img − ref on matched stars (same convention as other offset helpers).
-    dra = (c_i.ra - c_r.ra).to(u.deg).value
+    # img - ref on matched stars (same convention as other offset helpers).
+    dra = (c_i.ra[good] - c_r.ra[idx[good]]).to(u.deg).value
     dra = (dra + 180.0) % 360.0 - 180.0
-    ddec = (c_i.dec - c_r.dec).to(u.deg).value
+    ddec = (c_i.dec[good] - c_r.dec[idx[good]]).to(u.deg).value
     dra_m = float(np.median(dra))
     ddec_m = float(np.median(ddec))
-    dec0 = float(np.median(c_i.dec.degree))
+    dec0 = float(np.median(c_i.dec[good].degree))
     dra_as = dra_m * 3600.0 * float(np.cos(np.radians(dec0)))
     ddec_as = ddec_m * 3600.0
     stats.update(
@@ -2956,8 +3072,8 @@ def measure_hst_frame_relative_offset_pixel(
             'dra_arcsec': dra_as,
             'ddec_arcsec': ddec_as,
             'abs_arcsec': float(np.hypot(dra_as, ddec_as)),
-            'med_sep_arcsec': float(np.median(c_i.separation(c_r).arcsec)),
-            'med_dpix': float(np.median(dist[good])),
+            'med_sep_arcsec': float(np.median(sep.arcsec[good])),
+            'med_dpix': float(np.median(sep.arcsec[good]) / max(scale, 1e-6)),
         }
     )
     return stats
@@ -2966,7 +3082,7 @@ def measure_hst_frame_relative_offset_pixel(
 def validate_hst_group_internal_alignment(
     frames: list[str | Path],
     *,
-    max_coherent_arcsec: float = HST_INTERNAL_ALIGN_MAX_ARCSEC,
+    max_coherent_arcsec: float | None = None,
     match_radius_arcsec: float = 1.0,
     min_matches: int = 12,
     refcat: str | Path | None = None,
@@ -2974,27 +3090,36 @@ def validate_hst_group_internal_alignment(
     """
     Pairwise internal-alignment QA for level-2 frames that will share a coadd.
 
-    Uses **pixel-space** source matching (not shared-refcat centroids). ``ok``
-    is True when every measurable SCI1 pair has coherent |Δ| ≤
-    *max_coherent_arcsec*. Single-frame groups always pass.
+    Uses **sky-space** source matching (``pixel_to_world`` on both frames; not
+    ``all_world2pix`` into a peer pixel grid). ``ok`` is True when every
+    measurable SCI1 pair has coherent |Delta| <= *max_coherent_arcsec*
+    (default: 50 mas when matches are healthy, else 80 mas soft fallback).
+    Single-frame groups always pass.
 
     *refcat* is accepted for API compatibility but ignored for the pass/fail
     decision (refcat centroid QA can false-pass after per-frame CRPIX refine).
     """
     del match_radius_arcsec, refcat  # unused; kept for call-site compatibility
     paths = [Path(p).expanduser().resolve() for p in frames]
+    # Adaptive default: start at the tight gate; raise to sparse if needed.
+    limit0 = (
+        float(max_coherent_arcsec)
+        if max_coherent_arcsec is not None
+        else float(HST_INTERNAL_ALIGN_MAX_ARCSEC)
+    )
     report: dict[str, Any] = {
         'ok': True,
         'n_frames': len(paths),
-        'max_coherent_arcsec': float(max_coherent_arcsec),
+        'max_coherent_arcsec': limit0,
         'max_abs_arcsec': 0.0,
         'pairs': [],
         'failed_pairs': [],
-        'method': 'pixel_match',
+        'method': 'sky_match',
     }
     if len(paths) < 2:
         return report
     worst = 0.0
+    match_counts: list[int] = []
     for i in range(len(paths)):
         for j in range(i + 1, len(paths)):
             st = measure_hst_frame_relative_offset_pixel(
@@ -3004,6 +3129,7 @@ def validate_hst_group_internal_alignment(
                 min_matches=min_matches,
             )
             abs_as = float(st.get('abs_arcsec') or 0.0)
+            n_match = int(st.get('n_match') or 0)
             pair = {
                 'a': paths[i].name,
                 'b': paths[j].name,
@@ -3012,23 +3138,34 @@ def validate_hst_group_internal_alignment(
                 'max_abs_arcsec': abs_as,
                 'dra_arcsec': float(st.get('dra_arcsec') or 0.0),
                 'ddec_arcsec': float(st.get('ddec_arcsec') or 0.0),
-                'n_match': int(st.get('n_match') or 0),
+                'n_match': n_match,
                 'med_dpix': float(st.get('med_dpix') or 0.0),
-                'method': 'pixel_match',
+                'method': 'sky_match',
             }
             report['pairs'].append(pair)
-            # Too few matches ⇒ pair is unmeasurable, not a failed alignment.
-            # (Failing these produced the misleading ``0.000" > 0.080"`` errors.)
-            if not st.get('ok') and int(st.get('n_match') or 0) < int(min_matches):
+            # Too few matches => pair is unmeasurable, not a failed alignment.
+            if not st.get('ok') and n_match < int(min_matches):
                 continue
+            if st.get('ok'):
+                match_counts.append(n_match)
             if not st.get('ok'):
                 report['failed_pairs'].append(pair)
                 report['ok'] = False
                 continue
             worst = max(worst, abs_as)
-            if abs_as > float(max_coherent_arcsec):
+    # Adaptive limit from median healthy match count when caller left default.
+    if max_coherent_arcsec is None and match_counts:
+        limit0 = coherent_tol_arcsec(int(sorted(match_counts)[len(match_counts) // 2]))
+        report['max_coherent_arcsec'] = limit0
+    for pair in report['pairs']:
+        if not pair.get('ok'):
+            continue
+        if int(pair.get('n_match') or 0) < int(min_matches):
+            continue
+        if float(pair['abs_arcsec']) > float(limit0):
+            if pair not in report['failed_pairs']:
                 report['failed_pairs'].append(pair)
-                report['ok'] = False
+            report['ok'] = False
     report['max_abs_arcsec'] = float(worst)
     return report
 
@@ -3136,14 +3273,11 @@ def find_hst_l3_refcat(jhat_dir: str | Path) -> Path | None:
 
 
 def _jhat_minus_raw_sky_shift(jhat_path: Path, raw_path: Path) -> tuple[float, float]:
-    """SCI1 sky translation (degrees) from *raw_path* → *jhat_path* WCS."""
+    """SCI1 sky translation (degrees) from *raw_path* -> *jhat_path* WCS."""
     import numpy as np
-    from astropy.io import fits
     from astropy.wcs import WCS
 
-    with fits.open(raw_path, memmap=True) as raw_hdul, fits.open(
-        jhat_path, memmap=True
-    ) as jhat_hdul:
+    with as_datamodel(raw_path).open(memmap=True) as raw_hdul, as_datamodel(jhat_path).open(memmap=True) as jhat_hdul:
         ri = _sci_hdu_indices(raw_hdul)
         ji = _sci_hdu_indices(jhat_hdul)
         if not ri or not ji:
@@ -3164,7 +3298,7 @@ def measure_hst_abs_offset_vs_refcat(
     nbright: int = 300,
 ) -> dict[str, Any]:
     """
-    Absolute sky offset of *path* vs *refcat* (ref − image), SCI *sci_order*.
+    Absolute sky offset of *path* vs *refcat* (ref - image), SCI *sci_order*.
 
     Returns degrees/arcsec suitable to **add** to CRVAL to place the frame on
     the refcat frame.
@@ -3172,7 +3306,6 @@ def measure_hst_abs_offset_vs_refcat(
     import numpy as np
     import pandas as pd
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.stats import sigma_clipped_stats
     from astropy.wcs import WCS
     from photutils.detection import DAOStarFinder
@@ -3198,7 +3331,7 @@ def measure_hst_abs_offset_vs_refcat(
         np.asarray(ref_df['dec'], dtype=float) * u.deg,
     )
 
-    with fits.open(path, memmap=True) as hdul:
+    with as_datamodel(path).open(memmap=True) as hdul:
         idxs = _sci_hdu_indices(hdul)
         if not idxs or sci_order >= len(idxs):
             return stats
@@ -3223,7 +3356,7 @@ def measure_hst_abs_offset_vs_refcat(
     stats['n_match'] = n
     if n < int(min_matches):
         return stats
-    # ref − img ; add to CRVAL to move image onto ref.
+    # ref - img ; add to CRVAL to move image onto ref.
     dra = (c_ref.ra[idx] - c_img.ra).to(u.deg).value
     dra = (dra + 180.0) % 360.0 - 180.0
     ddec = (c_ref.dec[idx] - c_img.dec).to(u.deg).value
@@ -3247,10 +3380,9 @@ def measure_hst_abs_offset_vs_refcat(
 
 def _snapshot_sci_wcs(path: Path) -> dict[int, dict[str, Any]]:
     """Capture SCI WCS keywords (+ a few ST123 flags) for later restore."""
-    from astropy.io import fits
 
     snap: dict[int, dict[str, Any]] = {}
-    with fits.open(path, memmap=True) as hdul:
+    with as_datamodel(path).open(memmap=True) as hdul:
         for idx in _sci_hdu_indices(hdul):
             hdr = hdul[idx].header
             snap[idx] = {k: hdr[k] for k in _WCS_COPY_KEYS if k in hdr}
@@ -3265,9 +3397,8 @@ def _snapshot_sci_wcs(path: Path) -> dict[int, dict[str, Any]]:
 
 def _restore_sci_wcs_snapshot(path: Path, snap: dict[int, dict[str, Any]]) -> None:
     """Rewrite SCI WCS (+ primary ST123 flags) from :func:`_snapshot_sci_wcs`."""
-    from astropy.io import fits
 
-    with fits.open(path, mode='update', memmap=False) as hdul:
+    with as_datamodel(path).open(mode='update', memmap=False) as hdul:
         for idx, values in snap.items():
             if idx < 0:
                 continue
@@ -3291,12 +3422,11 @@ def _hst_visit_key(path: Path) -> str:
 
     Prefer ``ROOTNAME`` (ipppssoot) chars [:6]; fall back to the JHAT stem.
     Distinct programs/visits (e.g. ``ie9801`` vs ``iejn02``) must not share a
-    single pipeline-relative restore — their calibrated relative WCS differ.
+    single pipeline-relative restore - their calibrated relative WCS differ.
     """
-    from astropy.io import fits
 
     try:
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             for hdu in hdul:
                 root = hdu.header.get('ROOTNAME') or hdu.header.get('ROOT')
                 if root:
@@ -3323,22 +3453,21 @@ def measure_hst_sky_offset_vs_gaia(
     """
     Absolute sky offset of one frame vs Gaia (Vizier), via detection matching.
 
-    Matches detections to Gaia on sky (RA/Dec) only — avoids
+    Matches detections to Gaia on sky (RA/Dec) only - avoids
     ``all_world2pix`` failures on pathological WFPC2 WCS solutions that break
     refcat x/y projection.
 
     Returns the same key shape as :func:`measure_hst_sky_offset_2dhist`
-    (``ok``, ``dra_deg``, ``ddec_deg``, ``abs_arcsec``, …).
+    (``ok``, ``dra_deg``, ``ddec_deg``, ``abs_arcsec``, ...).
     """
     import numpy as np
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.stats import sigma_clipped_stats
     from astropy.wcs import WCS
     from photutils.detection import DAOStarFinder
     import astropy.units as u
 
-    from st123.alignment.gaia_catalog import (
+    from st123.stages.alignment.gaia_catalog import (
         default_gaia_cache_dir,
         fetch_gaia_cone,
         load_gaia_cache,
@@ -3358,7 +3487,7 @@ def measure_hst_sky_offset_vs_gaia(
     }
     path = Path(path).expanduser().resolve()
     try:
-        # Prefer the field cache (or a CRVAL cone) and skip cut_gaia_sources —
+        # Prefer the field cache (or a CRVAL cone) and skip cut_gaia_sources -
         # WFPC2 WCS often fails all_world2pix during the image footprint cut.
         gaia = None
         cache_dir = default_gaia_cache_dir(path)
@@ -3367,7 +3496,7 @@ def measure_hst_sky_offset_vs_gaia(
             if cached is not None and len(cached) >= int(min_matches):
                 gaia = cached
         if gaia is None:
-            with fits.open(path, memmap=True) as hdul:
+            with as_datamodel(path).open(memmap=True) as hdul:
                 idxs = _sci_hdu_indices(hdul)
                 if not idxs:
                     return stats
@@ -3387,7 +3516,7 @@ def measure_hst_sky_offset_vs_gaia(
         )
 
         best: dict[str, Any] | None = None
-        with fits.open(path, memmap=True) as hdul:
+        with as_datamodel(path).open(memmap=True) as hdul:
             idxs = _sci_hdu_indices(hdul)
             if not idxs:
                 return stats
@@ -3430,7 +3559,7 @@ def measure_hst_sky_offset_vs_gaia(
                 n = int(np.count_nonzero(good))
                 if n < int(min_matches):
                     continue
-                # Image − Gaia; apply −Δ to CRVAL to move image onto Gaia.
+                # Image - Gaia; apply -Delta to CRVAL to move image onto Gaia.
                 dra = (c_img.ra[good] - c_ref.ra[idx[good]]).to(u.deg).value
                 ddec = (c_img.dec[good] - c_ref.dec[idx[good]]).to(u.deg).value
                 dra_m = float(np.median(dra))
@@ -3473,7 +3602,6 @@ def apply_common_abs_shift_vs_ref(
     an absolute frame before AstroDrizzle. When the coadd/image 2-D hist tie
     fails, fall back to a Gaia match on the visit anchor (same common shift).
     """
-    from astropy.io import fits
 
     paths = [Path(p).resolve() for p in frames]
     report: dict[str, Any] = {
@@ -3536,10 +3664,30 @@ def apply_common_abs_shift_vs_ref(
     report['abs_arcsec'] = abs_as
     if abs_as < float(min_apply_arcsec):
         return report
+    # Cap large multimodal / false-Gaia peaks (JWST hub retie semantics).
+    if abs_as > float(FRAME_ABS_RETIE_MAX_APPLY_ARCSEC):
+        report['skipped_large'] = True
+        log.warning(
+            'Visit abs retie skip %s: |Delta|=%.3f" > max apply %.3f"',
+            anchor.name,
+            abs_as,
+            FRAME_ABS_RETIE_MAX_APPLY_ARCSEC,
+        )
+        return report
+    peak = int(off.get('peak_count') or off.get('n_match') or 0)
+    if peak and peak < int(FRAME_ABS_RETIE_MIN_PEAK) and report.get('method') == 'abs_ref_2dhist':
+        report['skipped_weak_peak'] = True
+        log.warning(
+            'Visit abs retie skip %s: weak 2dhist peak=%d < %d',
+            anchor.name,
+            peak,
+            FRAME_ABS_RETIE_MIN_PEAK,
+        )
+        return report
     dra_deg = -float(off['dra_deg'])
     ddec_deg = -float(off['ddec_deg'])
     for path in paths:
-        with fits.open(path, mode='update', memmap=False) as hdul:
+        with as_datamodel(path).open(mode='update', memmap=False) as hdul:
             apply_sky_translation_to_sci(
                 hdul,
                 dra_deg,
@@ -3557,8 +3705,8 @@ def apply_common_abs_shift_vs_ref(
             hdul.flush()
     report['applied'] = True
     log.info(
-        'Visit abs retie %s → %s (%s): applied opposite of dRA=%+.3f" dDec=%+.3f" '
-        '(|Δ|=%.3f") on %d frame(s)',
+        'Visit abs retie %s -> %s (%s): applied opposite of dRA=%+.3f" dDec=%+.3f" '
+        '(|Delta|=%.3f") on %d frame(s)',
         anchor.name,
         report.get('abs_ref'),
         report.get('method'),
@@ -3627,7 +3775,6 @@ def restore_pipeline_relative_wcs_with_common_shift(
     Reset each JHAT MEF SCI WCS to its calibrated raw sibling, then apply one
     common sky shift. Preserves pipeline dither / chip geometry.
     """
-    from astropy.io import fits
 
     rows: list[dict[str, Any]] = []
     for path in frames:
@@ -3642,9 +3789,7 @@ def restore_pipeline_relative_wcs_with_common_shift(
             log.warning('No raw sibling for %s; cannot restore relative WCS', path.name)
             rows.append(row)
             continue
-        with fits.open(raw, memmap=True) as raw_hdul, fits.open(
-            path, mode='update', memmap=False
-        ) as jhat_hdul:
+        with as_datamodel(raw).open(memmap=True) as raw_hdul, as_datamodel(path).open(mode='update', memmap=False) as jhat_hdul:
             raw_idxs = _sci_hdu_indices(raw_hdul)
             jhat_idxs = _sci_hdu_indices(jhat_hdul)
             n = min(len(raw_idxs), len(jhat_idxs))
@@ -3703,7 +3848,7 @@ def harmonize_hst_visits_across_filters(
     Within each HST visit, put **all filters** on one relative + absolute frame.
 
     Per-filter harmonize can Gaia-retie only the F555W members of a visit while
-    skipping an "already aligned" F814W pair, leaving a ~0.05″ inter-filter
+    skipping an "already aligned" F814W pair, leaving a ~0.05" inter-filter
     split. This pass:
 
     1. Groups JHAT frames by visit key (ignoring filter).
@@ -3712,7 +3857,6 @@ def harmonize_hst_visits_across_filters(
     """
     from collections import defaultdict
 
-    from astropy.io import fits
 
     paths = [Path(p).expanduser().resolve() for p in frames if Path(p).is_file()]
     abs_ref_path = Path(abs_ref).expanduser().resolve() if abs_ref else None
@@ -3777,12 +3921,12 @@ def harmonize_hst_visits_across_filters(
                 row['ok'] = False
                 entry['ok'] = False
                 entry['error'] = (
-                    f'relative |Δ|={abs_as:.3f}" > {max_internal_arcsec:.3f}"'
+                    f'relative |Delta|={abs_as:.3f}" > {max_internal_arcsec:.3f}"'
                 )
                 row['relative'].append(entry)
                 continue
             if abs_as >= float(min_apply_arcsec):
-                with fits.open(path, mode='update', memmap=False) as hdul:
+                with as_datamodel(path).open(mode='update', memmap=False) as hdul:
                     apply_sky_translation_to_sci(
                         hdul,
                         -float(off['dra_deg']),
@@ -3845,8 +3989,8 @@ def harmonize_hst_group_wcs(
     frame's calibrated-raw SCI WCS (preserving dithers) and applies **one
     common** absolute sky shift measured with a 2-D offset histogram vs
     *abs_ref* (default: F814 coadd or F625), searching up to
-    *max_abs_offset_arcsec* (default 5″). Small-radius catalog matches are
-    not used for the absolute tie — they false-lock near 0″.
+    *max_abs_offset_arcsec* (default 5"). Small-radius catalog matches are
+    not used for the absolute tie - they false-lock near 0".
 
     Mixed multi-visit / multi-program archives are split by visit key before
     pipeline-relative restore (cross-visit residuals are left for mosaic).
@@ -3855,7 +3999,6 @@ def harmonize_hst_group_wcs(
     ``ok=False`` with ``method='jhat_kept_unharmonized'`` (no raise).
     """
     import numpy as np
-    from astropy.io import fits
     from collections import defaultdict
 
     del match_radius_arcsec, min_correct_arcsec, max_iters, refcat  # API compat
@@ -3927,7 +4070,7 @@ def harmonize_hst_group_wcs(
                 )
                 sub['visit'] = vid
             # Tie every visit (incl. singletons) to the shared abs_ref so a
-            # multi-visit filter coadd does not ghost at the ~0.1–0.2" level.
+            # multi-visit filter coadd does not ghost at the ~0.1-0.2" level.
             # Gaia fallback covers visits where coadd 2-D hist matching fails
             # (e.g. sparse WFPC2 epochs vs a modern ACS/WFC3 abs_ref).
             if bool(sub.get('ok')):
@@ -3947,7 +4090,7 @@ def harmonize_hst_group_wcs(
         report['method'] = 'visit_split_harmonize'
         report['subgroups'] = sub_reports
         report['ok'] = all_ok
-        # Avoid O(n²) full-group QA across visits; summarize from subgroups.
+        # Avoid O(n^2) full-group QA across visits; summarize from subgroups.
         sub_max = [
             float((s.get('post') or s.get('pre') or {}).get('max_abs_arcsec') or 0.0)
             for s in sub_reports
@@ -3966,7 +4109,7 @@ def harmonize_hst_group_wcs(
         }
         if all_ok:
             log.info(
-                'Visit-split harmonize OK for %d visit(s) (within-visit max |Δ|=%.3f")',
+                'Visit-split harmonize OK for %d visit(s) (within-visit max |Delta|=%.3f")',
                 len(by_visit),
                 report['post']['max_abs_arcsec'] or 0.0,
             )
@@ -3997,10 +4140,10 @@ def harmonize_hst_group_wcs(
             'ddec_arcsec': probe.get('ddec_arcsec'),
             'peak_count': probe.get('peak_count'),
         }
-        if probe.get('ok') and float(probe['abs_arcsec']) > 0.12:
+        if probe.get('ok') and float(probe['abs_arcsec']) > FRAME_ABS_TOL_ARCSEC:
             need_abs = True
             log.info(
-                'Absolute probe %s vs %s: |Δ|=%.3f" (dRA=%+.3f dDec=%+.3f) → retie',
+                'Absolute probe %s vs %s: |Delta|=%.3f" (dRA=%+.3f dDec=%+.3f) -> retie',
                 anchor_path.name,
                 abs_ref_path.name,
                 probe['abs_arcsec'],
@@ -4011,7 +4154,7 @@ def harmonize_hst_group_wcs(
     if report['pre']['ok'] and not need_abs:
         report['post'] = report['pre']
         log.info(
-            'Group already aligned (internal max |Δ|=%.3f"; abs OK) — skip',
+            'Group already aligned (internal max |Delta|=%.3f"; abs OK) - skip',
             report['pre']['max_abs_arcsec'],
         )
         return report
@@ -4045,7 +4188,7 @@ def harmonize_hst_group_wcs(
             )
             if not off.get('ok'):
                 continue
-            with fits.open(path, mode='update', memmap=False) as hdul:
+            with as_datamodel(path).open(mode='update', memmap=False) as hdul:
                 apply_sky_translation_to_sci(
                     hdul,
                     -float(off['dra_deg']),
@@ -4075,7 +4218,7 @@ def harmonize_hst_group_wcs(
         restore_pipeline_relative_wcs_with_common_shift(
             paths, dra_deg=0.0, ddec_deg=0.0
         )
-        # 2) Absolute via 2-D histogram vs abs_ref (handles up to ~5″).
+        # 2) Absolute via 2-D histogram vs abs_ref (handles up to ~5").
         dra_deg = ddec_deg = 0.0
         if abs_ref_path is not None and abs_ref_path.is_file():
             abs_off = measure_hst_sky_offset_2dhist(
@@ -4084,12 +4227,12 @@ def harmonize_hst_group_wcs(
                 max_offset_arcsec=max_abs_offset_arcsec,
             )
             if abs_off.get('ok'):
-                # img−ref → apply −Δ to CRVAL.
+                # img-ref -> apply -Delta to CRVAL.
                 dra_deg = -float(abs_off['dra_deg'])
                 ddec_deg = -float(abs_off['ddec_deg'])
                 report['method'] = 'pipeline_relative_2dhist_abs'
                 log.info(
-                    '2D-hist abs %s → %s: img-ref dRA=%+.3f" dDec=%+.3f" '
+                    '2D-hist abs %s -> %s: img-ref dRA=%+.3f" dDec=%+.3f" '
                     '(peak n=%d); applying opposite to group',
                     anchor_path.name,
                     abs_ref_path.name,
@@ -4112,7 +4255,7 @@ def harmonize_hst_group_wcs(
 
         if abs(dra_deg) > 0 or abs(ddec_deg) > 0:
             for path in paths:
-                with fits.open(path, mode='update', memmap=False) as hdul:
+                with as_datamodel(path).open(mode='update', memmap=False) as hdul:
                     apply_sky_translation_to_sci(
                         hdul,
                         dra_deg,
@@ -4155,7 +4298,7 @@ def harmonize_hst_group_wcs(
     report['ok'] = bool(report['post']['ok'])
     if not report['ok']:
         reason = (
-            f'max |Δ|={report["post"]["max_abs_arcsec"]:.3f}" > '
+            f'max |Delta|={report["post"]["max_abs_arcsec"]:.3f}" > '
             f'{max_internal_arcsec:.3f}"'
         )
         _revert_jhat_wcs(reason)
@@ -4174,7 +4317,7 @@ def harmonize_hst_group_wcs(
             )
             if not off.get('ok'):
                 continue
-            with fits.open(path, mode='update', memmap=False) as hdul:
+            with as_datamodel(path).open(mode='update', memmap=False) as hdul:
                 apply_sky_translation_to_sci(
                     hdul,
                     -float(off['dra_deg']),
@@ -4199,12 +4342,12 @@ def harmonize_hst_group_wcs(
             report['ok'] = True
             report['corrections'] = sib_corrections
             log.info(
-                'Sibling CRVAL harmonize OK: max |Δ| → %.3f" (limit %.3f")',
+                'Sibling CRVAL harmonize OK: max |Delta| -> %.3f" (limit %.3f")',
                 report['post']['max_abs_arcsec'],
                 max_internal_arcsec,
             )
             return report
-        # Sibling path also failed — reinstate pre-harmonize WCS and soft-fail.
+        # Sibling path also failed - reinstate pre-harmonize WCS and soft-fail.
         _revert_jhat_wcs('sibling CRVAL harmonize also failed')
         report['method'] = 'jhat_kept_unharmonized'
         report['ok'] = False
@@ -4218,7 +4361,7 @@ def harmonize_hst_group_wcs(
         )
         return report
     log.info(
-        'Group harmonize OK: max |Δ| %.3f" → %.3f" (limit %.3f")',
+        'Group harmonize OK: max |Delta| %.3f" -> %.3f" (limit %.3f")',
         report['pre']['max_abs_arcsec'],
         report['post']['max_abs_arcsec'],
         max_internal_arcsec,
@@ -4365,14 +4508,13 @@ def propagate_jhat_wcs_to_all_sci(
     tenths of an arcsecond.
 
     This measures the median sky translation on the first SCI that changed
-    relative to *source*, then applies the same ΔCRVAL to every SCI that still
+    relative to *source*, then applies the same DeltaCRVAL to every SCI that still
     matches *source* (typically SCI2+). Already-updated chips are left as JHAT
     wrote them.
 
-    Returns a stats dict (``dra_deg``, ``ddec_deg``, ``n_updated``, …).
+    Returns a stats dict (``dra_deg``, ``ddec_deg``, ``n_updated``, ...).
     """
     import numpy as np
-    from astropy.io import fits
     from astropy.wcs import WCS
 
     aligned_path = Path(aligned).expanduser().resolve()
@@ -4394,13 +4536,13 @@ def propagate_jhat_wcs_to_all_sci(
             f'(got {aligned_path}, {source_path})'
         )
 
-    with fits.open(source_path, memmap=True) as src_hdul:
+    with as_datamodel(source_path).open(memmap=True) as src_hdul:
         src_idxs = _sci_hdu_indices(src_hdul)
         if len(src_idxs) < 2:
             stats['n_sci'] = len(src_idxs)
             return stats  # single-SCI: nothing to propagate
 
-        with fits.open(aligned_path, mode='update', memmap=False) as aln_hdul:
+        with as_datamodel(aligned_path).open(mode='update', memmap=False) as aln_hdul:
             aln_idxs = _sci_hdu_indices(aln_hdul)
             stats['n_sci'] = len(aln_idxs)
             if len(aln_idxs) < 2:
@@ -4488,13 +4630,12 @@ def refine_hst_wcs_per_chip_from_refcat(
     """
     import numpy as np
     import pandas as pd
-    from astropy.io import fits
     from astropy.stats import sigma_clip
     from astropy.table import Table
     from astropy.wcs import WCS
     from astropy.wcs.utils import proj_plane_pixel_scales
 
-    from st123.alignment.gaia_simple import _centroid
+    from st123.stages.alignment.gaia_simple import _centroid
 
     aligned_path = Path(aligned).expanduser().resolve()
     ref_path = Path(refcat).expanduser().resolve()
@@ -4516,7 +4657,7 @@ def refine_hst_wcs_per_chip_from_refcat(
     if 'mag' in ref.colnames:
         ref.sort('mag')
 
-    with fits.open(aligned_path, mode='update', memmap=False) as hdul:
+    with as_datamodel(aligned_path).open(mode='update', memmap=False) as hdul:
         idxs = _sci_hdu_indices(hdul)
         stats['n_sci'] = len(idxs)
         for ai in idxs:
@@ -4528,13 +4669,12 @@ def refine_hst_wcs_per_chip_from_refcat(
             r_pix = float(search_radius_arcsec) / max(scale, 1e-6)
             dxs: list[float] = []
             dys: list[float] = []
-            for row in ref[:4000]:
-                ra = float(row['ra'])
-                dec = float(row['dec'])
-                try:
-                    x_pred, y_pred = w.world_to_pixel_values(ra, dec)
-                except Exception:
-                    continue
+            # Quiet vectorized sky->pixel; skip off-detector / divergent rows.
+            n_ref = min(4000, len(ref))
+            ras = np.asarray(ref['ra'][:n_ref], dtype=float)
+            decs = np.asarray(ref['dec'][:n_ref], dtype=float)
+            x_pred_all, y_pred_all = world_to_pixel_quiet(w, ras, decs)
+            for x_pred, y_pred in zip(x_pred_all, y_pred_all):
                 if not (np.isfinite(x_pred) and np.isfinite(y_pred)):
                     continue
                 if (
@@ -4600,7 +4740,7 @@ def refine_hst_wcs_per_chip_from_refcat(
             stats['n_updated'] += 1
             stats['chips'].append(chip_stat)
 
-        # Partial refine (e.g. 1/2 SCI) leaves chip–chip WCS inconsistent and
+        # Partial refine (e.g. 1/2 SCI) leaves chip-chip WCS inconsistent and
         # doubles PSFs in the drizzle. Copy the median CRPIX shift from chips
         # that matched onto chips that did not.
         applied = [c for c in stats['chips'] if c.get('applied')]
@@ -4691,6 +4831,144 @@ def refine_hst_wcs_per_chip_from_refcat(
     return stats
 
 
+def heal_hst_partial_chip_refine(
+    frames: Sequence[str | Path],
+) -> dict[str, Any]:
+    """
+    Finish incomplete multi-SCI CRPIX refines left on disk.
+
+    Older / interrupted per-chip refine can leave ``ST123CHP`` with
+    ``ST123CNU < n_SCI`` (one UVIS chip shifted, sibling untouched). That
+    doubles PSFs in AstroDrizzle and trips :func:`validate_hst_multi_sci_chip_refine`.
+
+    Recover the applied (dx, dy) from each refined SCI vs its ERR CRPIX (ERR
+    keeps the pre-refine reference pixel), copy onto unreined SCI, and mark
+    ``ST123CAF``.
+    """
+
+    report: dict[str, Any] = {
+        'ok': True,
+        'n_frames': 0,
+        'n_healed': 0,
+        'n_failed': 0,
+        'frames': [],
+    }
+    for raw in frames:
+        path = Path(raw).expanduser().resolve()
+        row: dict[str, Any] = {'path': str(path), 'healed': False}
+        report['n_frames'] += 1
+        if not path.is_file():
+            row['error'] = 'missing'
+            report['n_failed'] += 1
+            report['ok'] = False
+            report['frames'].append(row)
+            continue
+        try:
+            with as_datamodel(path).open(mode='update', memmap=False) as hdul:
+                idxs = _sci_hdu_indices(hdul)
+                n_sci = len(idxs)
+                row['n_sci'] = n_sci
+                if n_sci < 2:
+                    report['frames'].append(row)
+                    continue
+                chp = bool(hdul[0].header.get('ST123CHP'))
+                n_ref = hdul[0].header.get('ST123CNU')
+                n_ref_i = int(n_ref) if n_ref is not None else None
+                row['n_refined_before'] = n_ref_i
+                if not chp or n_ref_i is None or n_ref_i >= n_sci:
+                    report['frames'].append(row)
+                    continue
+
+                refined: list[tuple[int, float, float]] = []
+                pending: list[int] = []
+                for ai in idxs:
+                    hdr = hdul[ai].header
+                    comment = str(hdr.comments['CRPIX1'] if 'CRPIX1' in hdr else '')
+                    is_refined = 'per-SCI refine' in comment
+                    if is_refined:
+                        # Prefer ERR companion (same EXTVER) as pre-refine CRPIX.
+                        dx = dy = None
+                        ver = int(getattr(hdul[ai], 'ver', 1) or 1)
+                        for j, hdu in enumerate(hdul):
+                            if (
+                                getattr(hdu, 'name', '') == 'ERR'
+                                and int(getattr(hdu, 'ver', 1) or 1) == ver
+                                and hdu.header.get('CRPIX1') is not None
+                            ):
+                                dx = float(hdr['CRPIX1']) - float(hdu.header['CRPIX1'])
+                                dy = float(hdr['CRPIX2']) - float(hdu.header['CRPIX2'])
+                                break
+                        if dx is None:
+                            # Fallback: treat pipeline-like integers as baseline.
+                            dx = float(hdr['CRPIX1']) - round(float(hdr['CRPIX1']))
+                            dy = float(hdr['CRPIX2']) - round(float(hdr['CRPIX2']))
+                            # If already on integer CRPIX, use delta from 2048/1026-ish
+                            # is unreliable; skip this chip as a shift donor.
+                            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                                pending.append(ai)
+                                continue
+                        refined.append((ai, float(dx), float(dy)))
+                    else:
+                        pending.append(ai)
+
+                if not refined or not pending:
+                    row['error'] = (
+                        f'cannot heal partial refine '
+                        f'(refined={len(refined)} pending={len(pending)})'
+                    )
+                    report['n_failed'] += 1
+                    report['ok'] = False
+                    report['frames'].append(row)
+                    continue
+
+                dx_m = float(sum(t[1] for t in refined) / len(refined))
+                dy_m = float(sum(t[2] for t in refined) / len(refined))
+                for ai in pending:
+                    hdr = hdul[ai].header
+                    hdr['CRPIX1'] = (
+                        float(hdr['CRPIX1']) + dx_m,
+                        'st123: per-SCI refine dx (sibling heal)',
+                    )
+                    hdr['CRPIX2'] = (
+                        float(hdr['CRPIX2']) + dy_m,
+                        'st123: per-SCI refine dy (sibling heal)',
+                    )
+                hdul[0].header['ST123CHP'] = (
+                    True,
+                    'st123: per-SCI CRPIX refine vs refcat',
+                )
+                hdul[0].header['ST123CNU'] = (
+                    n_sci,
+                    'SCI chips CRPIX-refined',
+                )
+                hdul[0].header['ST123CAF'] = (
+                    True,
+                    'st123: all SCI chips CRPIX-refined',
+                )
+                hdul.flush()
+                row['healed'] = True
+                row['dx_pix'] = dx_m
+                row['dy_pix'] = dy_m
+                row['n_copied'] = len(pending)
+                report['n_healed'] += 1
+                log.info(
+                    'Healed partial chip refine %s: copied dx=%.3f dy=%.3f px '
+                    'to %d SCI (%d -> %d)',
+                    path.name,
+                    dx_m,
+                    dy_m,
+                    len(pending),
+                    int(n_ref_i),
+                    n_sci,
+                )
+        except Exception as exc:
+            row['error'] = f'{type(exc).__name__}: {exc}'
+            report['n_failed'] += 1
+            report['ok'] = False
+        report['frames'].append(row)
+    return report
+
+
 def validate_hst_multi_sci_chip_refine(
     frames: Sequence[str | Path],
 ) -> dict[str, Any]:
@@ -4698,10 +4976,9 @@ def validate_hst_multi_sci_chip_refine(
     Pre-drizzle QA: multi-SCI frames must not retain a partial chip refine.
 
     Frames with ``ST123CHP`` set and ``ST123CNU < n_SCI`` fail (classic 1/2
-    UVIS refine → elongated PSFs). Frames with no chip-refine flag are allowed
+    UVIS refine -> elongated PSFs). Frames with no chip-refine flag are allowed
     (global-only / single-SCI paths).
     """
-    from astropy.io import fits
 
     rows: list[dict[str, Any]] = []
     all_ok = True
@@ -4720,7 +4997,7 @@ def validate_hst_multi_sci_chip_refine(
             rows.append(row)
             continue
         try:
-            with fits.open(path, memmap=True) as hdul:
+            with as_datamodel(path).open(memmap=True) as hdul:
                 n_sci = len(_sci_hdu_indices(hdul))
                 row['n_sci'] = int(n_sci)
                 if n_sci < 2:
@@ -4761,13 +5038,12 @@ def refine_hst_wcs_from_refcat(
     Optional residual CRVAL tweak from aligned-frame phot vs *refcat*.
 
     Uses ``{stem}.phot.txt`` beside *aligned* when present. Applies a median
-    sky residual to **all** SCI extensions when |Δ| is between a noise floor
+    sky residual to **all** SCI extensions when |Delta| is between a noise floor
     and *max_residual_arcsec* (rejects gross mismatches).
     """
     import numpy as np
     import pandas as pd
     from astropy.coordinates import SkyCoord
-    from astropy.io import fits
     from astropy.wcs import WCS
     import astropy.units as u
 
@@ -4780,7 +5056,7 @@ def refine_hst_wcs_from_refcat(
         'dra_arcsec': 0.0,
         'ddec_arcsec': 0.0,
     }
-    # JHAT phot next to product: iey902seq_jhat.fits → iey902seq.phot.txt
+    # JHAT phot next to product: iey902seq_jhat.fits -> iey902seq.phot.txt
     stem = aligned_path.name.replace('_jhat.fits', '').replace('.fits', '')
     phot_path = aligned_path.parent / f'{stem}.phot.txt'
     if not phot_path.is_file():
@@ -4796,11 +5072,11 @@ def refine_hst_wcs_from_refcat(
     if 'ra' not in ref.columns or 'dec' not in ref.columns:
         return stats
 
-    with fits.open(aligned_path, mode='update', memmap=False) as hdul:
+    with as_datamodel(aligned_path).open(mode='update', memmap=False) as hdul:
         idxs = _sci_hdu_indices(hdul)
         if not idxs:
             return stats
-        # JHAT phot x,y are in the primary/first-SCI (or do_driz) frame — not
+        # JHAT phot x,y are in the primary/first-SCI (or do_driz) frame - not
         # per-chip. Project only through SCI1, then apply residual to all SCI.
         ai0 = idxs[0]
         w = WCS(hdul[ai0].header, hdul, naxis=2)
@@ -4827,7 +5103,7 @@ def refine_hst_wcs_from_refcat(
             (c_ref.ra[idx] - c_img.ra).to(u.deg).value
         )
         ddec = (c_ref.dec[idx] - c_img.dec).to(u.deg).value
-        # Image → ref residual; apply to CRVAL so image moves onto ref.
+        # Image -> ref residual; apply to CRVAL so image moves onto ref.
         dra_m = float(np.median(dra[good]))
         ddec_m = float(np.median(ddec[good]))
         dec0 = float(np.median(dec_img[good]))
@@ -4966,7 +5242,7 @@ def align_hst_image(
     params = dict(jhat_params or {})
     outroot = str(out)
     wcs_align = st_wcs_align()
-    # Instance-level histocut caps (not formal run_all kwargs) — set before run.
+    # Instance-level histocut caps (not formal run_all kwargs) - set before run.
     for key in (
         'rough_cut_px_min',
         'rough_cut_px_max',
@@ -4980,7 +5256,7 @@ def align_hst_image(
         # Prefer the shared Vizier field cache over JHAT's ESA TAP Gaia query.
         refcat = 'Gaia'
         try:
-            from st123.alignment.gaia_catalog import (
+            from st123.stages.alignment.gaia_catalog import (
                 default_gaia_cache_dir,
                 write_gaia_refcat,
             )
@@ -5100,7 +5376,7 @@ def find_jhat_phot(
         if name.endswith(suf):
             stems.append(name[: -len(suf)])
     stems.append(image.stem)
-    # coadd_wfc3_f625w_drc → also try coadd_wfc3_f625w
+    # coadd_wfc3_f625w_drc -> also try coadd_wfc3_f625w
     extra: list[str] = []
     for stem in stems:
         for tok in ('_drc', '_drz', '_drw', '_jhat'):
@@ -5160,6 +5436,9 @@ def _hst_jhat_frame_worker(job: dict[str, Any]) -> dict[str, Any]:
     Uses ``spawn``-safe imports inside the worker. Returns the same status
     dict shape as the serial path in :func:`align_hst_raw_dir`.
     """
+    # Spawn workers have no StreamHandler; attach the shared log file so
+    # per-frame progress is visible (parent also logs on future completion).
+    configure_worker_logging()
     t0 = time.perf_counter()
     frame = Path(job['frame'])
     out = Path(job['outdir'])
@@ -5215,7 +5494,7 @@ def _hst_jhat_frame_worker(job: dict[str, Any]) -> dict[str, Any]:
         if narrow:
             entry['align_mode'] = 'JHAT'
         log.info(
-            'HST JHAT [%d/%d] ok %s → %s (%.1fs)',
+            'HST JHAT [%d/%d] ok %s -> %s (%.1fs)',
             idx,
             n_frames,
             frame.name,
@@ -5225,7 +5504,14 @@ def _hst_jhat_frame_worker(job: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         entry['status'] = 'failed'
         entry['error'] = f'{type(exc).__name__}: {exc}'
-        log.error(
+        err = str(exc)
+        soft = (
+            'initial cut' in err.lower()
+            or 'objects pass' in err.lower()
+            or type(exc).__name__ == 'KeyError'
+        )
+        log_fn = log.warning if soft else log.error
+        log_fn(
             'HST JHAT [%d/%d] failed %s after %.1fs: %s',
             idx,
             n_frames,
@@ -5313,12 +5599,16 @@ def align_hst_raw_dir(
             if inst in allow:
                 kept.append(path)
         log.info(
-            'HST instrument filter %s: %d → %d frame(s)',
+            'HST instrument filter %s: %d -> %d frame(s)',
             sorted(allow),
             len(frames),
             len(kept),
         )
         frames = kept
+
+    from st123.datamodels.hst import filter_paths_for_stage
+
+    frames = filter_paths_for_stage(frames, stage='align')
 
     n_frames = len(frames)
     ref_desc = (
@@ -5328,7 +5618,7 @@ def align_hst_raw_dir(
     )
     n_workers = _parallel_worker_budget(n_frames, workers) if n_frames else 1
     log.info(
-        'HST JHAT batch: %d frame(s) under %s → %s (%s; workers=%d)',
+        'HST JHAT batch: %d frame(s) under %s -> %s (%s; workers=%d)',
         n_frames,
         raw,
         out,
@@ -5393,13 +5683,35 @@ def align_hst_raw_dir(
                         frame.name,
                         exc,
                     )
+                    continue
+                entry = ordered[idx] or {}
+                done = sum(1 for r in ordered if r is not None)
+                if entry.get('status') == 'ok':
+                    log.info(
+                        'HST JHAT [%d/%d] ok %s (%d/%d done)',
+                        jobs[idx]['index'],
+                        n_frames,
+                        Path(jobs[idx]['frame']).name,
+                        done,
+                        n_frames,
+                    )
+                else:
+                    log.error(
+                        'HST JHAT [%d/%d] failed %s (%d/%d done): %s',
+                        jobs[idx]['index'],
+                        n_frames,
+                        Path(jobs[idx]['frame']).name,
+                        done,
+                        n_frames,
+                        entry.get('error') or 'unknown',
+                    )
         results = [r for r in ordered if r is not None]
         if not soft_fail:
             for entry in results:
                 if entry.get('status') == 'failed':
                     raise RuntimeError(entry.get('error') or 'JHAT failed')
 
-    # Narrowband mitigation: HST_REL → L3 iterative refine → group retie,
+    # Narrowband mitigation: HST_REL -> L3 iterative refine -> group retie,
     # else PIPELINE copy. Prefer the batch photfilename, then l3_ref/.
     failed_nb = 0
     for r in results:
@@ -5419,7 +5731,7 @@ def align_hst_raw_dir(
             nb_refcat = find_hst_l3_refcat(out)
         nb_abs = find_hst_abs_ref_image(out)
         log.info(
-            'HST narrowband recovery: %d failed narrowband frame(s) → '
+            'HST narrowband recovery: %d failed narrowband frame(s) -> '
             'HST_REL / L3 refine / PIPELINE (refcat=%s, abs_ref=%s)',
             failed_nb,
             nb_refcat.name if nb_refcat else 'none',
@@ -5471,6 +5783,17 @@ def align_hst_raw_dir(
             log.error('Post-align group harmonize failed: %s', exc)
             if not soft_fail:
                 raise
+
+    # Absolute residual polish + JWST-style quality stamps / frame_qa.json.
+    try:
+        finalize_hst_jhat_dir_quality(
+            out,
+            results,
+            refcat=ref_phot if ref_phot is not None else find_hst_l3_refcat(out),
+            abs_ref=find_hst_abs_ref_image(out),
+        )
+    except Exception as exc:
+        log.warning('HST frame quality finalize failed under %s: %s', out, exc)
     return results
 
 
@@ -5478,7 +5801,7 @@ def write_hst_alignment_summary(
     results: list[dict],
     summary_path: str | Path,
 ) -> Path:
-    """Write ``alignment_summary.json`` for an HST JHAT batch."""
+    """Write ``alignment_summary.json`` (frame_qa written by finalize)."""
     path = Path(summary_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     n_ok = sum(1 for r in results if r.get('status') == 'ok')
@@ -5489,5 +5812,343 @@ def write_hst_alignment_summary(
         'n_failed': n_fail,
         'results': results,
     }
-    path.write_text(json.dumps(payload, indent=2) + '\n')
+    path.write_text(json.dumps(payload, indent=2, default=str) + '\n')
+    # Ensure ASCII summary exists even if finalize already ran.
+    outdir = path.parent
+    if not (outdir / 'frame_qa.json').is_file():
+        try:
+            finalize_hst_jhat_dir_quality(outdir, results)
+        except Exception as exc:
+            log.warning('Could not finalize HST frame_qa under %s: %s', outdir, exc)
+    elif not (outdir / 'alignment_summary.txt').is_file():
+        rows = []
+        for r in results:
+            q = r.get('quality') or {}
+            rows.append(
+                {
+                    'path': Path(r.get('outpath') or r.get('path') or '').name,
+                    'filter': 'NA',
+                    'status': r.get('status'),
+                    'n_calibrators': q.get('n_calibrators'),
+                    'dispersion_mas': q.get('dispersion_mas'),
+                    'internal_max_delta_mas': q.get('internal_max_delta_mas'),
+                    'align_mode': q.get('align_mode') or r.get('align_mode') or 'JHAT',
+                    'algnref': q.get('algnref'),
+                    'aligned_to': q.get('aligned_to'),
+                }
+            )
+        try:
+            write_alignment_summary_table(rows, outdir / 'alignment_summary.txt')
+        except Exception:
+            pass
     return path
+
+
+def stamp_hst_jhat_quality(
+    jhat_path: str | Path,
+    *,
+    refcat: str | Path | None = None,
+    abs_ref: str | Path | None = None,
+    align_mode: str = 'JHAT',
+    internal_max_arcsec: float | None = None,
+    match_radius_arcsec: float = 0.5,
+) -> dict[str, Any]:
+    """
+    Measure abs catalog residual and stamp JWST-style quality headers.
+
+    Prefers *refcat* (L3 phot); falls back to abs_ref image phot when needed.
+    """
+    jhat = Path(jhat_path).expanduser().resolve()
+    report: dict[str, Any] = {
+        'path': str(jhat),
+        'ok': False,
+        'align_mode': align_mode,
+        'n_calibrators': None,
+        'dispersion_mas': None,
+        'internal_max_delta_mas': (
+            float(internal_max_arcsec) * 1000.0
+            if internal_max_arcsec is not None
+            else None
+        ),
+    }
+    if not jhat.is_file():
+        report['error'] = 'missing jhat'
+        return report
+
+    ref_path = Path(refcat).expanduser().resolve() if refcat else None
+    if ref_path is None or not ref_path.is_file():
+        # Try sibling phot of abs_ref / l3_ref.
+        for cand in (
+            jhat.parent / 'l3_ref',
+            jhat.parent,
+        ):
+            if not cand.is_dir():
+                continue
+            phots = sorted(cand.glob('coadd_*_drc.phot.txt')) + sorted(
+                cand.glob('coadd_*_drz.phot.txt')
+            )
+            if phots:
+                ref_path = phots[0]
+                break
+    aligned_to = str(ref_path) if ref_path and ref_path.is_file() else (
+        str(abs_ref) if abs_ref else 'NA'
+    )
+    original_ref = str(abs_ref) if abs_ref else aligned_to
+
+    residual = {
+        'ok': False,
+        'n_match': 0,
+        'residual_arcsec': None,
+        'residual_mean_arcsec': None,
+        'residual_std_arcsec': None,
+    }
+    if ref_path is not None and ref_path.is_file():
+        residual = measure_hst_narrowband_residual_vs_refcat(
+            jhat,
+            ref_path,
+            match_radius_arcsec=float(match_radius_arcsec),
+        )
+
+    mean_as = residual.get('residual_mean_arcsec')
+    med_as = residual.get('residual_arcsec')
+    std_as = residual.get('residual_std_arcsec')
+    n_cal = int(residual.get('n_match') or 0) if residual.get('ok') else None
+    if med_as is not None:
+        report['dispersion_mas'] = float(med_as) * 1000.0
+    report['n_calibrators'] = n_cal
+    report['ok'] = bool(residual.get('ok')) and abs_ok_local(
+        med_as, n_calibrators=n_cal
+    )
+    report['algnref'] = original_ref
+    report['aligned_to'] = aligned_to
+    report['residual'] = residual
+
+    stamp_quality_headers(
+        jhat,
+        align_mode=align_mode,
+        original_ref=original_ref,
+        aligned_to=aligned_to,
+        abs_mean_arcsec=float(mean_as) if mean_as is not None else None,
+        abs_median_arcsec=float(med_as) if med_as is not None else None,
+        abs_std_arcsec=float(std_as) if std_as is not None else None,
+        n_calibrators=n_cal,
+        internal_max_arcsec=internal_max_arcsec,
+        catalog_basename=ref_path.name if ref_path else None,
+    )
+    if med_as is not None:
+        log.info(
+            'Final dispersion %s: mean=%.1f mas median=%.1f mas n_cal=%s '
+            '(internal max=%.1f mas)',
+            jhat.name,
+            1000.0 * float(mean_as or med_as),
+            1000.0 * float(med_as),
+            n_cal if n_cal is not None else 'NA',
+            1000.0 * float(internal_max_arcsec or 0.0),
+        )
+    return report
+
+
+def abs_ok_local(
+    residual_arcsec: float | None, *, n_calibrators: int | None = None
+) -> bool:
+    """Local wrapper so stamp helpers need not import frame_qa.abs_ok by name."""
+    from st123.stages.alignment.frame_qa import abs_ok as _abs_ok
+
+    return _abs_ok(residual_arcsec, n_calibrators=n_calibrators)
+
+
+def polish_hst_jhat_abs_residual(
+    jhat_path: str | Path,
+    refcat: str | Path,
+    *,
+    tol_arcsec: float = FRAME_ABS_RETIE_TOL_ARCSEC,
+    max_apply_arcsec: float = FRAME_ABS_RETIE_MAX_APPLY_ARCSEC,
+    min_matches: int = FRAME_MIN_MATCH_HEALTHY,
+) -> dict[str, Any]:
+    """
+    Catalog residual polish onto *refcat* when residual is in (tol, max_apply].
+
+    Mirrors JWST hub abs retie: small coherent CRVAL nudge then re-measure.
+    """
+
+    jhat = Path(jhat_path).expanduser().resolve()
+    ref = Path(refcat).expanduser().resolve()
+    report: dict[str, Any] = {
+        'path': str(jhat),
+        'applied': False,
+        'ok': False,
+    }
+    if not jhat.is_file() or not ref.is_file():
+        report['error'] = 'missing jhat/refcat'
+        return report
+    pre = measure_hst_narrowband_residual_vs_refcat(jhat, ref, match_radius_arcsec=0.5)
+    report['pre'] = pre
+    if not pre.get('ok'):
+        return report
+    n = int(pre.get('n_match') or 0)
+    shift = float(pre.get('abs_arcsec') or 0.0)
+    report['ok'] = shift <= coherent_tol_arcsec(n)
+    if n < int(min_matches):
+        report['skipped_sparse'] = True
+        return report
+    if shift <= float(tol_arcsec) or shift > float(max_apply_arcsec):
+        return report
+    dra_deg = float(pre['dra_deg'])
+    ddec_deg = float(pre['ddec_deg'])
+    with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
+        apply_sky_translation_to_sci(
+            hdul,
+            dra_deg,
+            ddec_deg,
+            comment='st123: abs residual polish vs refcat',
+        )
+        hdul[0].header['ST123VAB'] = (True, 'st123: abs residual polish')
+        hdul[0].header['ALGNMODE'] = ('VISIT_ABS', 'abs residual polish')
+        hdul.flush()
+    report['applied'] = True
+    post = measure_hst_narrowband_residual_vs_refcat(jhat, ref, match_radius_arcsec=0.5)
+    report['post'] = post
+    if post.get('ok'):
+        report['ok'] = float(post['residual_arcsec']) <= coherent_tol_arcsec(
+            int(post.get('n_match') or 0)
+        )
+    log.info(
+        'Abs residual polish %s: %.1f -> %.1f mas (n=%s)',
+        jhat.name,
+        1000.0 * shift,
+        1000.0 * float((post.get('residual_arcsec') or shift)),
+        post.get('n_match') or n,
+    )
+    return report
+
+
+def finalize_hst_jhat_dir_quality(
+    jhat_dir: str | Path,
+    results: list[dict],
+    *,
+    refcat: str | Path | None = None,
+    abs_ref: str | Path | None = None,
+) -> dict[str, Any]:
+    """
+    Post-harmonize abs polish + stamp quality headers + write frame_qa.
+
+    Returns the aggregated ``frame_qa`` report.
+    """
+    from collections import defaultdict
+
+    from st123.utils.helpers import get_filter, get_instrument
+
+    out = Path(jhat_dir).expanduser().resolve()
+    ref_phot = Path(refcat).expanduser().resolve() if refcat else find_hst_l3_refcat(out)
+    hub = Path(abs_ref).expanduser().resolve() if abs_ref else find_hst_abs_ref_image(out)
+
+    ok_paths: list[Path] = []
+    for r in results:
+        if r.get('status') == 'ok' and r.get('outpath'):
+            p = Path(r['outpath'])
+            if p.is_file():
+                ok_paths.append(p.resolve())
+
+    # Internal max |Delta| per instrument+filter group.
+    groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    for p in ok_paths:
+        try:
+            inst = get_instrument(p).split('_')[0].lower()
+            filt = str(get_filter(p)).lower()
+        except Exception:
+            inst, filt = 'hst', 'unknown'
+        groups[(inst, filt)].append(p)
+
+    internal_by_path: dict[Path, float] = {}
+    for (_inst, _filt), paths in groups.items():
+        if len(paths) < 2:
+            for p in paths:
+                internal_by_path[p] = 0.0
+            continue
+        qa = validate_hst_group_internal_alignment(paths)
+        max_as = float(qa.get('max_abs_arcsec') or 0.0)
+        for p in paths:
+            internal_by_path[p] = max_as
+
+    # Optional catalog polish then stamp.
+    frame_rows: list[dict[str, Any]] = []
+    if ref_phot is not None and ref_phot.is_file():
+        for p in ok_paths:
+            polish_hst_jhat_abs_residual(p, ref_phot)
+
+    for r in results:
+        p = Path(r.get('outpath') or '')
+        if r.get('status') != 'ok' or not p.is_file():
+            frame_rows.append(
+                {
+                    'path': str(r.get('path') or p),
+                    'filter': 'NA',
+                    'status': str(r.get('status') or 'failed'),
+                    'n_calibrators': 'NA',
+                    'dispersion_mas': 'NA',
+                    'internal_max_delta_mas': 'NA',
+                    'align_mode': 'FAILED',
+                    'algnref': 'NA',
+                    'aligned_to': 'NA',
+                    'mission': 'hst',
+                }
+            )
+            continue
+        mode = str(r.get('align_mode') or 'JHAT')
+        stamped = stamp_hst_jhat_quality(
+            p,
+            refcat=ref_phot,
+            abs_ref=hub,
+            align_mode=mode,
+            internal_max_arcsec=internal_by_path.get(p.resolve()),
+        )
+        r['quality'] = stamped
+        try:
+            filt = str(get_filter(p)).lower()
+        except Exception:
+            filt = 'NA'
+        frame_rows.append(
+            {
+                'path': p.name,
+                'filter': filt,
+                'status': 'ok',
+                'n_calibrators': stamped.get('n_calibrators'),
+                'dispersion_mas': stamped.get('dispersion_mas'),
+                'internal_max_delta_mas': stamped.get('internal_max_delta_mas'),
+                'align_mode': stamped.get('align_mode') or mode,
+                'algnref': stamped.get('algnref'),
+                'aligned_to': stamped.get('aligned_to'),
+                'mission': 'hst',
+            }
+        )
+
+    abs_vals = [
+        float(r['dispersion_mas'])
+        for r in frame_rows
+        if isinstance(r.get('dispersion_mas'), (int, float))
+    ]
+    int_vals = [
+        float(r['internal_max_delta_mas'])
+        for r in frame_rows
+        if isinstance(r.get('internal_max_delta_mas'), (int, float))
+    ]
+    n_cals = [
+        int(r['n_calibrators'])
+        for r in frame_rows
+        if isinstance(r.get('n_calibrators'), int)
+    ]
+    qa = build_frame_qa(
+        mission='hst',
+        hub_id=hub.name if hub else None,
+        align_mode='JHAT',
+        abs_ref=str(hub) if hub else (str(ref_phot) if ref_phot else None),
+        residual_mas=max(abs_vals) if abs_vals else None,
+        n_calibrators=min(n_cals) if n_cals else None,
+        abs_method='catalog_residual',
+        max_delta_mas=max(int_vals) if int_vals else None,
+        frames=frame_rows,
+    )
+    write_frame_qa(out, qa)
+    write_alignment_summary_table(frame_rows, out / 'alignment_summary.txt')
+    warn_if_frame_qa_soft(qa, log=log, context=out.name)
+    return qa

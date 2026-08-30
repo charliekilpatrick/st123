@@ -21,6 +21,7 @@ from astropy import units as u
 from astropy import wcs
 from astropy.convolution import convolve_fft
 from astropy.io import fits
+from st123.datamodels import as_datamodel
 from astropy.modeling import models
 from astropy.nddata import CCDData
 from astropy.stats import sigma_clipped_stats as scs
@@ -32,14 +33,16 @@ from jwst.associations import asn_from_list
 from jwst.associations.lib.rules_level3_base import DMS_Level3_Base
 from jwst.pipeline import calwebb_image3
 from matplotlib.patches import Polygon
-from photutils.psf.matching import SplitCosineBellWindow, create_matching_kernel
 from reproject.mosaicking import find_optimal_celestial_wcs
 
-from st123.mast import parse_s_region
+from st123.stages.download import parse_s_region
 from st123.utils.compatibility import (
     ensure_local_crds_context,
     patch_jwst_for_photutils3,
+    psf_matching_imports,
 )
+
+SplitCosineBellWindow, create_matching_kernel = psf_matching_imports()
 from st123.utils.helpers import create_filter_table, input_list
 from st123.utils.logging import capture_output
 
@@ -54,7 +57,7 @@ def _shape_and_wcs_for_mosaic(path: str | Path) -> tuple[tuple[int, int], wcs.WC
     (``CPDIS``) are resolved via the open HDUList, or stripped on failure so
     ``find_optimal_celestial_wcs`` can accept ``(shape, wcs)`` pairs for HST.
     """
-    with fits.open(path) as hdul:
+    with as_datamodel(path).open() as hdul:
         sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
         try:
             w = wcs.WCS(sci.header, fobj=hdul, naxis=2)
@@ -74,7 +77,7 @@ def _shape_and_wcs_for_mosaic(path: str | Path) -> tuple[tuple[int, int], wcs.WC
 
 def _sky_footprint_coords(path: str | Path) -> np.ndarray:
     """Return ``(N, 2)`` RA/Dec vertices from ``S_REGION`` or WCS footprint."""
-    with fits.open(path) as hdul:
+    with as_datamodel(path).open() as hdul:
         sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
         region = sci.header.get('S_REGION')
         if not region:
@@ -168,7 +171,7 @@ def nircam_sw_filter_code(filter_name: str) -> int:
     Returns
     -------
     int
-        Full numeric code (``F1130W`` → ``1130``). Returns a large sentinel
+        Full numeric code (``F1130W`` -> ``1130``). Returns a large sentinel
         when the name cannot be parsed.
     """
     match = re.match(r'f(\d+)', str(filter_name).lower())
@@ -178,7 +181,7 @@ def nircam_sw_filter_code(filter_name: str) -> int:
 def is_nircam_sw_broadband(filter_name: str) -> bool:
     """
     True for NIRCam short-wavelength broadband filters (excludes narrowbands
-    and MIRI, whose codes are ≥560).
+    and MIRI, whose codes are >=560).
     """
     name = str(filter_name).lower()
     if 'n' in name:
@@ -218,13 +221,30 @@ def mosaic_pixel_scale_arcsec(
     return NIRCAM_SW_PIXEL_SCALE
 
 
+_PC_CDELT_KEYS = ('PC1_1', 'PC1_2', 'PC2_1', 'PC2_2', 'CDELT1', 'CDELT2')
+
+
 def _ensure_pc_cdelt_header(hdr: fits.Header, w: wcs.WCS | None = None) -> fits.Header:
-    """Ensure ``PC*`` + ``CDELT*`` keywords exist for :func:`create_gwcs`."""
+    """Ensure ``PC*`` + ``CDELT*`` keywords exist for :func:`create_gwcs`.
+
+    Astropy ``WCS.to_header()`` omits zero PC off-diagonals (FITS default 0).
+    A north-up stamp therefore often has ``PC1_1``/``PC2_2`` + ``CDELT*`` but
+    no ``PC1_2``/``PC2_1``, and ``header['PC1_2']`` raises ``KeyError``.
+    """
     out = hdr.copy()
+    if all(k in out for k in _PC_CDELT_KEYS):
+        return out
+    # Partial PC+CDELT: fill omitted identity off-diagonals (do not rebuild).
+    if 'CDELT1' in out and 'PC1_1' in out:
+        if 'CDELT2' not in out:
+            c1 = float(out['CDELT1'])
+            out['CDELT2'] = abs(c1) if c1 != 0 else 1.0
+        out.setdefault('PC1_2', 0.0)
+        out.setdefault('PC2_1', 0.0)
+        out.setdefault('PC2_2', 1.0)
+        return out
     if w is None:
         w = wcs.WCS(out)
-    if 'PC1_1' in out and 'CDELT1' in out:
-        return out
     cd = np.asarray(w.pixel_scale_matrix, dtype=float)
     cdelt = np.array(
         [np.hypot(cd[0, 0], cd[1, 0]), np.hypot(cd[0, 1], cd[1, 1])],
@@ -359,6 +379,58 @@ def stamp_sky_polygon(box_wcs: wcs.WCS):
     return shapely.Polygon(box_wcs.calc_footprint(center=False))
 
 
+def resolve_existing_box_dir(
+    base_dir: str | Path,
+    existing_box: str | Path,
+) -> Path:
+    """
+    Resolve ``--existing-box`` under a project root or reduction workdir.
+
+    Relative values are tried as:
+
+    1. ``<base>/<path>``
+    2. ``<base>/reference/<path>``
+    3. ``<base>/reduction/reference/<path>``
+    4. ``<base>/reduction/<path>``
+
+    Absolute paths are returned unchanged when they exist as directories.
+    """
+    base = Path(base_dir).expanduser().resolve()
+    raw = Path(existing_box).expanduser()
+    if raw.is_absolute():
+        if raw.is_dir():
+            return raw.resolve()
+        raise FileNotFoundError(
+            f'existing box directory not found for {existing_box!r}'
+        )
+
+    if raw.parts and raw.parts[0] == 'reference':
+        candidates = [
+            (base / raw).resolve(),
+            (base / 'reduction' / raw).resolve(),
+        ]
+    else:
+        candidates = [
+            (base / raw).resolve(),
+            (base / 'reference' / raw).resolve(),
+            (base / 'reduction' / 'reference' / raw).resolve(),
+            (base / 'reduction' / raw).resolve(),
+        ]
+    for path in candidates:
+        if path.is_dir():
+            return path
+    tried = ', '.join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        f'existing box directory not found for {existing_box!r} (tried: {tried})'
+    )
+
+
+def box_coadd_i2d_paths(box_dir: str | Path) -> list[str]:
+    """Sorted ``coadd*i2d.fits`` paths in a ``ref_*`` stamp directory."""
+    out = Path(box_dir)
+    return sorted({str(p.resolve()) for p in out.glob('coadd*i2d.fits')})
+
+
 def stamp_diagonal_deg(box_wcs: wcs.WCS) -> float:
     """Approximate stamp diagonal on-sky in degrees."""
     from astropy.coordinates import SkyCoord
@@ -383,7 +455,7 @@ def write_stamp_wcs(outdir: str | Path, box_wcs: wcs.WCS) -> Path:
         int(box_wcs._naxis[0]),
         int(box_wcs._naxis[1]),
     )
-    hdr = box_wcs.to_header(relax=True)
+    hdr = _ensure_pc_cdelt_header(box_wcs.to_header(relax=True), box_wcs)
     hdr['MOSNX'] = (int(nx), 'Stamp NAXIS1 (pixels)')
     hdr['MOSNY'] = (int(ny), 'Stamp NAXIS2 (pixels)')
     hdr['STAMPWCS'] = (True, 'Shared mosaic stamp WCS')
@@ -397,14 +469,26 @@ def load_stamp_wcs(outdir: str | Path) -> wcs.WCS | None:
 
     Returns ``None`` when neither is available.
     """
+    import warnings
+
+    from astropy.wcs import FITSFixedWarning
+
     out = Path(outdir)
     stamp_path = out / STAMP_WCS_BASENAME
     if stamp_path.is_file():
-        with fits.open(stamp_path) as hdul:
-            hdr = hdul[0].header
-            stamp = wcs.WCS(hdr, naxis=2)
+        with as_datamodel(stamp_path).open() as hdul:
+            hdr = hdul[0].header.copy()
             nx = int(hdr.get('MOSNX') or hdr.get('NAXIS1') or 0)
             ny = int(hdr.get('MOSNY') or hdr.get('NAXIS2') or 0)
+            # Header-only stamps are stored with NAXIS=0; seed 2-D axis cards
+            # before WCS() so Astropy does not warn about axes vs image.
+            if nx > 0 and ny > 0:
+                hdr['NAXIS'] = 2
+                hdr['NAXIS1'] = nx
+                hdr['NAXIS2'] = ny
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', FITSFixedWarning)
+                stamp = wcs.WCS(hdr, naxis=2)
             if nx > 0 and ny > 0:
                 stamp.pixel_shape = (nx, ny)
                 stamp._naxis = [nx, ny]
@@ -419,7 +503,7 @@ def load_stamp_wcs(outdir: str | Path) -> wcs.WCS | None:
         cands = sorted(out.glob(pattern))
         if not cands:
             continue
-        with fits.open(cands[0]) as hdul:
+        with as_datamodel(cands[0]).open() as hdul:
             sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
             stamp = wcs.WCS(sci.header, naxis=2)
             ny, nx = sci.data.shape[-2:]
@@ -535,7 +619,7 @@ def filter_frames_overlapping_box(
     min_overlap: float = 0.01,
 ) -> list[str]:
     """
-    Keep frames whose sky footprint overlaps *bbox* by ≥ *min_overlap*.
+    Keep frames whose sky footprint overlaps *bbox* by >= *min_overlap*.
 
     When *mosaic_wcs* is given, *bbox* is interpreted in that WCS's pixel
     space (as produced by :class:`split_observations`). Otherwise *bbox*
@@ -572,6 +656,40 @@ def filter_frames_overlapping_box(
         except Exception as exc:
             logger.warning(
                 'Could not test box overlap for %s (%s); dropping',
+                path,
+                exc,
+            )
+    return kept
+
+
+def filter_frames_covering_point(
+    paths: Sequence[str | Path],
+    ra: float,
+    dec: float,
+) -> list[str]:
+    """
+    Keep frames whose sky footprint contains the given RA/Dec (degrees).
+
+    Use this when coadds must have coverage at a target (e.g. SN position)
+    rather than merely overlapping the stamp polygon.
+    """
+    import shapely
+
+    pt = shapely.geometry.Point(float(ra), float(dec))
+    kept: list[str] = []
+    for path in paths:
+        try:
+            sky = _sky_footprint_coords(path)
+            frame_poly = shapely.Polygon(sky)
+            if not frame_poly.is_valid:
+                frame_poly = frame_poly.buffer(0)
+            if frame_poly.is_empty:
+                continue
+            if frame_poly.contains(pt) or frame_poly.intersects(pt):
+                kept.append(str(path))
+        except Exception as exc:
+            logger.warning(
+                'Could not test sky coverage for %s (%s); dropping',
                 path,
                 exc,
             )
@@ -865,7 +983,7 @@ class split_observations(object):
         for b in range(len(self.split_boxes)):
             bbox, reftable, refpgons = self.split_boxes[b], self.reftables[b], self.refpgons[b]
             filters = np.unique(reftable['filter'])
-            # Full numeric codes (F1130W → 1130). Truncating to three digits
+            # Full numeric codes (F1130W -> 1130). Truncating to three digits
             # previously misclassified MIRI F1130W as NIRCam SW.
             swmask = np.array([is_nircam_sw_broadband(i) for i in filters])
 
@@ -984,7 +1102,7 @@ def create_default_mosaic(
     preferred_ctx = None
     if len(table) > 0:
         try:
-            preferred_ctx = fits.getval(str(table['image'][0]), 'CRDS_CTX', ext=0)
+            preferred_ctx = as_datamodel(str(table['image'][0])).keyword('CRDS_CTX', ext=0)
         except Exception:
             preferred_ctx = None
     ensure_local_crds_context(preferred=preferred_ctx)
@@ -1077,7 +1195,7 @@ def create_coadd_mosaic(
     preferred_ctx = None
     if len(table) > 0:
         try:
-            preferred_ctx = fits.getval(str(table['image'][0]), 'CRDS_CTX', ext=0)
+            preferred_ctx = as_datamodel(str(table['image'][0])).keyword('CRDS_CTX', ext=0)
         except Exception:
             preferred_ctx = None
     ensure_local_crds_context(preferred=preferred_ctx)
@@ -1124,6 +1242,159 @@ def create_coadd_mosaic(
 
     filepath = f'{outdir}/out_{filt}/{filt}_i2d.fits'
     return filepath
+
+
+def _parallel_image3_budget(n_jobs: int, ncores: int) -> int:
+    """Return worker count for parallel per-filter ``Image3Pipeline`` runs."""
+    n_jobs = max(1, int(n_jobs))
+    ncores = max(1, int(ncores))
+    return min(n_jobs, ncores)
+
+
+def jwst_filter_image3_worker(job: dict[str, Any]) -> dict[str, Any]:
+    """
+    Run one filter's ``create_coadd_mosaic`` + local ``coadd`` rename.
+
+    Designed for :class:`~concurrent.futures.ProcessPoolExecutor` (spawn).
+    ``job`` must be picklable: image paths, WCS header cards, scalars only.
+    """
+    from st123.utils.logging import (
+        configure_runtime_warnings,
+        configure_worker_logging,
+    )
+
+    # Spawn workers do not inherit parent warning filters / log handlers.
+    configure_worker_logging()
+    configure_runtime_warnings()
+    patch_jwst_for_photutils3()
+
+    filter_name = str(job['filter_name'])
+    instrument = str(job.get('instrument') or 'nircam')
+    images = [str(p) for p in job['images']]
+    box_outdir = str(job['box_outdir'])
+    group_id = int(job['group_id'])
+    box_index = job['box_index']
+    verbose = bool(job.get('verbose', False))
+    base_dir_arg = job.get('base_dir_arg')
+    pixel_scale = float(job['pixel_scale'])
+
+    record: dict[str, Any] = {
+        'filter': filter_name,
+        'instrument': instrument,
+        'status': 'pending',
+        'coadd': None,
+        'error': None,
+    }
+    try:
+        hdr = fits.Header(job['wcs_header'])
+        box_wcs = wcs.WCS(hdr)
+        if 'NAXIS1' in hdr and 'NAXIS2' in hdr:
+            box_wcs.pixel_shape = (int(hdr['NAXIS1']), int(hdr['NAXIS2']))
+        filt_hdr = rescale_wcs_to_pixel_scale(box_wcs, pixel_scale)
+        gwcs_path = create_gwcs(
+            outdir=box_outdir,
+            sci_header=filt_hdr,
+            filename=f'mosaic_gwcs_{filter_name}.asdf',
+        )
+        if verbose:
+            logger.info(
+                'Mosaicking %s (%s) at %.3f"/pix onto shared footprint',
+                filter_name,
+                instrument,
+                pixel_scale,
+            )
+        table = Table(
+            {
+                'image': images,
+                'instrument': [instrument] * len(images),
+                'filter': [filter_name] * len(images),
+            }
+        )
+        driz_image = create_coadd_mosaic(
+            table,
+            outdir=box_outdir,
+            filt=filter_name,
+            gwcs_file=gwcs_path,
+            pixel_scale=pixel_scale,
+        )
+        coadd_filename = os.path.join(
+            box_outdir,
+            mosaic_coadd_basename(group_id, box_index, filter_name),
+        )
+        coadd([driz_image], filter_name, coadd_filename)
+        apply_wcs_to_coadd(coadd_filename)
+        record['status'] = 'ok'
+        record['coadd'] = coadd_filename
+        if verbose:
+            logger.info(
+                'Wrote coadd %s; run dolphot-prep --base-dir %s',
+                coadd_filename,
+                base_dir_arg,
+            )
+    except Exception as exc:
+        record['status'] = 'failed'
+        record['error'] = f'{type(exc).__name__}: {exc}'
+        logger.error(
+            'JWST Image3 failed for filter %s: %s', filter_name, exc
+        )
+    return record
+
+
+def run_jwst_filter_image3_jobs(
+    jobs: Sequence[dict[str, Any]],
+    *,
+    ncores: int = 1,
+    parallel: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Run per-filter JWST ``Image3Pipeline`` jobs serially or in a process pool.
+
+    ``ncores`` caps the number of concurrent filter mosaics (each Image3 run
+    remains single-threaded internally). Copy/harmonize must finish before
+    calling this; unify should run after.
+    """
+    if not jobs:
+        return []
+    n_workers = _parallel_image3_budget(len(jobs), ncores)
+    use_pool = bool(parallel) and n_workers > 1 and len(jobs) > 1
+    if not use_pool:
+        return [jwst_filter_image3_worker(job) for job in jobs]
+
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    logger.info(
+        'Parallel JWST filter Image3: %d filter(s), workers=%d (ncores=%d)',
+        len(jobs),
+        n_workers,
+        max(1, int(ncores)),
+    )
+    ctx = mp.get_context('spawn')
+    ordered: list[dict[str, Any] | None] = [None] * len(jobs)
+    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+        future_map = {
+            pool.submit(jwst_filter_image3_worker, job): i
+            for i, job in enumerate(jobs)
+        }
+        for fut in as_completed(future_map):
+            idx = future_map[fut]
+            try:
+                ordered[idx] = fut.result()
+            except Exception as exc:
+                job = jobs[idx]
+                ordered[idx] = {
+                    'filter': job.get('filter_name'),
+                    'instrument': job.get('instrument'),
+                    'status': 'failed',
+                    'coadd': None,
+                    'error': f'{type(exc).__name__}: {exc}',
+                }
+                logger.error(
+                    'JWST Image3 worker crashed for %s: %s',
+                    job.get('filter_name'),
+                    exc,
+                )
+    return [r for r in ordered if r is not None]
 
 
 def create_gwcs(
@@ -1306,7 +1577,7 @@ def convolve_images(
         psf_kernel = create_psf_kernel(target_filter, filt)
         tbl = filter_table[filt]
         for im in tbl['image']:
-            hdu = fits.open(im)
+            hdu = as_datamodel(im).open()
             sci, err = hdu['SCI'].data, hdu['ERR'].data
             sci_con = convolve_fft(sci, psf_kernel, normalize_kernel=True)
             err_con = convolve_fft(err, psf_kernel, normalize_kernel=True)
@@ -1316,6 +1587,7 @@ def convolve_images(
             hdu['SCI'].header, hdu['SCI'].data = sci_header, sci_con
             hdu['ERR'].data = err_con
             hdu.writeto(im, overwrite=True)
+            hdu.close()
 
 def create_ccddata(file: str) -> CCDData:
     """
@@ -1331,7 +1603,7 @@ def create_ccddata(file: str) -> CCDData:
     CCDData
         Science data, uncertainty, WCS, and zero mask.
     """
-    hdu = fits.open(file)
+    hdu = as_datamodel(file).open()
     sci_data = hdu['SCI'].data
     
     uncertainty = nddata.StdDevUncertainty(array = hdu['ERR'].data)
@@ -1340,6 +1612,7 @@ def create_ccddata(file: str) -> CCDData:
     mask = sci_data == 0
     ccd_data = CCDData(data = sci_data, uncertainty = uncertainty, 
                        wcs = w, unit = data_unit)
+    hdu.close()
     
     return ccd_data
 
@@ -1362,12 +1635,19 @@ def update_photmjsr(
     float
         Sigma-clipped median conversion factor (MJy/sr per count).
     """
-    ccd_mjsr = np.sum([ccd.data for ccd in ccddata], axis = 0)
-    ccd_cps = np.sum([ccd.data/phot for ccd, phot in list(zip(ccddata, phots))], axis = 0)
-    mjsr = ccd_mjsr/ccd_cps
-    _, mjsr_med, _ = scs(mjsr)
-
-    return mjsr_med
+    ccd_mjsr = np.sum([ccd.data for ccd in ccddata], axis=0)
+    ccd_cps = np.sum(
+        [ccd.data / phot for ccd, phot in zip(ccddata, phots)],
+        axis=0,
+    )
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mjsr = ccd_mjsr / ccd_cps
+    finite = np.isfinite(mjsr)
+    if not np.any(finite):
+        return float('nan')
+    # Finite-only input avoids Astropy sigma_clip "invalid values" warnings.
+    _, mjsr_med, _ = scs(mjsr[finite])
+    return float(mjsr_med) if mjsr_med is not None else float('nan')
 
 def coadd(
     ref_files: Sequence[str],
@@ -1391,31 +1671,33 @@ def coadd(
     None
     """
     #edit specific header keys
-    hdu_template = fits.open(ref_files[0])
+    hdu_template = as_datamodel(ref_files[0]).open()
     hdr_update = {'EFFEXPTM': [], 'TMEASURE': [], 'DURATION': []}
     filters, phots = [], []
     #WHT data for coadded image
     wht_data = []
     
     for file in ref_files:
-        hdul = fits.open(file)
+        hdul = as_datamodel(file).open()
         for key in list(hdr_update.keys()):
-            hdr_update[key].append(fits.getval(file, key, ext = 0))
-        filter_name = fits.getval(file, 'FILTER', ext = 0)
+            hdr_update[key].append(as_datamodel(file).keyword(key, ext = 0))
+        filter_name = as_datamodel(file).keyword('FILTER', ext = 0)
         filters.append(filter_name)
-        phots.append(fits.getval(file, 'PHOTMJSR', ext = 1))
+        phots.append(as_datamodel(file).keyword('PHOTMJSR', ext = 1))
         # #inverse variance weighting
-        wht_data.append(hdul['WHT'].data/fits.getval(file, 'DURATION', ext = 0))
+        wht_data.append(hdul['WHT'].data/as_datamodel(file).keyword('DURATION', ext = 0))
         hdul.close()
 
-    combiner_weights = np.array(wht_data)
-    combiner_weights /= np.sum(combiner_weights, axis = 0)
-    
-    for i, weight in enumerate(combiner_weights):
-        invalid = np.isnan(weight) | np.isinf(weight)
-        weight[invalid] = 0
-        combiner_weights[i] = weight 
-    combiner_weights = np.array(combiner_weights)
+    # Normalize only where coverage exists; empty WHT sums are 0/0 otherwise.
+    combiner_weights = np.asarray(wht_data, dtype=float)
+    weight_sum = np.sum(combiner_weights, axis=0)
+    np.divide(
+        combiner_weights,
+        weight_sum,
+        out=combiner_weights,
+        where=weight_sum > 0,
+    )
+    combiner_weights[~np.isfinite(combiner_weights)] = 0.0
     
     #coadd images using ccdproc
     ccddata_ = []
@@ -1520,6 +1802,10 @@ def copy_files(filter_table: dict[str, Table], outdir: str) -> None:
     """
     Copy all science images listed in a filter table dict into ``outdir``.
 
+    JWST destinations are sanitized in place (finite SCI/ERR, DQ/WHT
+    consistency, materialized DATE-*/OBSGEO-L/B/H) so mosaic never mutates
+    the global ``jhat/`` store while still ingesting a clean local copy.
+
     Parameters
     ----------
     filter_table : dict
@@ -1531,9 +1817,16 @@ def copy_files(filter_table: dict[str, Table], outdir: str) -> None:
     -------
     None
     """
+    from st123.datamodels import sanitize_science_fits
+
     infiles = np.hstack([filter_table[i]['image'].value for i in filter_table.keys()])
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
     for file in infiles:
-        shutil.copy(file, outdir)
+        src = Path(file)
+        dest = out / src.name
+        shutil.copy(src, dest)
+        sanitize_science_fits(dest, materialize_headers=True)
 
 def update_path(
     filter_table: dict[str, Table],
@@ -1569,14 +1862,19 @@ def write_dolphot_frame_list(
     frames: Sequence[str],
     group: int = 0,
     box: int | str = 0,
+    merge: bool = True,
 ) -> str:
     """
     Write a manifest of coadd + JHAT frames for ``dolphot-prep`` mosaic discovery.
 
+    When *merge* is True and ``dolphot_frames.txt`` already exists (e.g. HST
+    remosaic wrote it first), keep prior frame paths and prefer a JWST
+    ``*_i2d.fits`` as ``# ref`` so ``nircammask`` stays valid.
+
     Parameters
     ----------
     box_outdir : str
-        Mosaic box directory (``reference/group_G/ref_B`` or ``…/ref_full``).
+        Mosaic box directory (``reference/group_G/ref_B`` or ``.../ref_full``).
     refimage : str
         Path to the coadd ``*_i2d.fits`` reference.
     frames : sequence
@@ -1584,20 +1882,56 @@ def write_dolphot_frame_list(
     group : int, optional
         Group index used by ``dolphot-prep`` for ``phot_{group}_{box}``.
     box : int or str, optional
-        Box index (``0``, ``1``, …) or :data:`FULL_GROUP_LABEL` (``'full'``).
+        Box index (``0``, ``1``, ...) or :data:`FULL_GROUP_LABEL` (``'full'``).
+    merge : bool, optional
+        If True (default), union frames with an existing manifest.
 
     Returns
     -------
     str
         Path to ``dolphot_frames.txt``.
     """
-    out = os.path.join(box_outdir, 'dolphot_frames.txt')
-    with open(out, 'w') as fh:
+    outdir = Path(box_outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / 'dolphot_frames.txt'
+    existing: list[str] = []
+    if merge and out.is_file():
+        try:
+            for line in out.read_text(encoding='utf-8').splitlines():
+                s = line.strip()
+                if not s or s.startswith('#'):
+                    continue
+                existing.append(str(Path(s).resolve()))
+        except OSError:
+            existing = []
+    frame_paths = sorted(
+        {
+            str(Path(p).resolve())
+            for p in existing + [str(p) for p in frames]
+        }
+    )
+    ref_out = Path(refimage).resolve()
+    # Prefer any on-disk JWST i2d (requested ref first, then SW-ish names).
+    if not str(ref_out).lower().endswith('_i2d.fits') or not ref_out.is_file():
+        i2ds = sorted(outdir.glob('coadd_*_i2d.fits'))
+        if i2ds:
+            def _rank(p: Path) -> tuple[int, str]:
+                name = p.name.lower()
+                for i, key in enumerate(
+                    ('f150w2', 'f200w', 'f150w', 'f115w', 'f090w', 'f070w')
+                ):
+                    if f'_{key}_' in name:
+                        return (i, name)
+                return (99, name)
+
+            i2ds.sort(key=_rank)
+            ref_out = i2ds[0].resolve()
+    with open(out, 'w', encoding='utf-8') as fh:
         fh.write(f'# group={int(group)} box={box}\n')
-        fh.write(f'# ref {os.path.abspath(refimage)}\n')
-        for path in frames:
-            fh.write(f'{os.path.abspath(path)}\n')
-    return out
+        fh.write(f'# ref {ref_out}\n')
+        for path in frame_paths:
+            fh.write(f'{path}\n')
+    return str(out)
 
 
 @dataclass
@@ -1686,7 +2020,7 @@ def plan_mosaic_boxes(
         outdir = group_dirs[gid]
         weight_pgons = None
         if weights_mode == 'auto' and not full_group:
-            from st123.mosaic.footprints import (
+            from st123.stages.mosaic.footprints import (
                 build_weight_pgons,
                 collect_footprint_weight_paths,
             )
@@ -1721,7 +2055,7 @@ def plan_mosaic_boxes(
             box_ids: list[int | str] = [FULL_GROUP_LABEL]
             if verbose:
                 logger.info(
-                    'Full-group mosaic: group %s (%d frames) → %s/',
+                    'Full-group mosaic: group %s (%d frames) -> %s/',
                     gid,
                     len(group_table),
                     mosaic_box_dirname(FULL_GROUP_LABEL),
@@ -1793,6 +2127,8 @@ def plan_existing_box(
     inputfiles: Sequence[str | Path],
     *,
     min_overlap: float = 0.01,
+    require_coverage_ra: float | None = None,
+    require_coverage_dec: float | None = None,
     verbose: bool = False,
 ) -> MosaicPlan:
     """
@@ -1801,6 +2137,11 @@ def plan_existing_box(
     Uses ``stamp_wcs.fits`` when present, else a boxed ``*_i2d.fits`` (prefer
     F150W2/F200W) as the shared sky WCS so remosaics keep the on-disk stamp
     without re-running overlap box-splitting.
+
+    Frames must overlap the stamp FoV. By default they must also cover the
+    stamp center (same rule as :func:`plan_centered_box`). Pass
+    *require_coverage_ra* / *require_coverage_dec* to require a different
+    sky point instead.
     """
     base = Path(base_dir)
     out = Path(box_outdir)
@@ -1835,6 +2176,21 @@ def plan_existing_box(
         mosaic_wcs=None,
         min_overlap=float(min_overlap),
     )
+    if require_coverage_ra is not None and require_coverage_dec is not None:
+        cov_ra = float(require_coverage_ra)
+        cov_dec = float(require_coverage_dec)
+    else:
+        cov_ra, cov_dec = stamp_sky_center(stamp_wcs)
+    before = len(kept)
+    kept = filter_frames_covering_point(kept, cov_ra, cov_dec)
+    if verbose:
+        logger.info(
+            'Existing-box coverage filter RA=%.6f Dec=%.6f: %d -> %d frame(s)',
+            cov_ra,
+            cov_dec,
+            before,
+            len(kept),
+        )
     if verbose:
         logger.info(
             'Existing-box plan %s: stamp=%s frames=%d/%d',
@@ -1938,7 +2294,7 @@ def plan_centered_box(
     Build a one-box plan for a stamp centered on specific sky coordinates.
 
     Useful when a target sits near the edge of an auto-split ``ref_*`` stamp.
-    The stamp size defaults to ~the NIRCam SW stamp (~68″×51″) or, when
+    The stamp size defaults to ~the NIRCam SW stamp (~68"x51") or, when
     *ref_wcs* is supplied, that WCS's on-sky width/height.
     """
     base = Path(base_dir).expanduser().resolve()
@@ -1977,10 +2333,13 @@ def plan_centered_box(
         mosaic_wcs=None,
         min_overlap=float(min_overlap),
     )
+    # Stamp is built around (ra, dec): require that point to be covered.
+    before_cov = len(kept)
+    kept = filter_frames_covering_point(kept, float(ra), float(dec))
     if verbose:
         logger.info(
-            'Centered-box plan %s: RA=%.6f Dec=%.6f size=%.1f"×%.1f" '
-            'shape=%sx%s frames=%d/%d',
+            'Centered-box plan %s: RA=%.6f Dec=%.6f size=%.1f"x%.1f" '
+            'shape=%sx%s frames=%d/%d (coverage %d->%d)',
             out,
             float(ra),
             float(dec),
@@ -1990,6 +2349,8 @@ def plan_centered_box(
             stamp.pixel_shape[1],
             len(kept),
             len(list(inputfiles)),
+            before_cov,
+            len(kept),
         )
 
     table = input_list(kept) if kept else Table()
@@ -2081,7 +2442,7 @@ def apply_wcs_to_coadd(coadd_file: str, output: str | None = None) -> str:
     from jwst import datamodels
 
     out_path = output or coadd_file
-    with fits.open(coadd_file) as hdul:
+    with as_datamodel(coadd_file).open() as hdul:
         wcs_hdr = hdul['SCI'].header
     im = datamodels.open(coadd_file)
     wcsobj = assign_gwcs(box_outdir=os.path.dirname(coadd_file), wcs_hdr=wcs_hdr)
@@ -2150,24 +2511,46 @@ def harmonize_jwst_frames_to_ref(
     max_residual_arcsec: float = JWST_ALIGN_MAX_ARCSEC,
     max_search_arcsec: float = 2.0,
     bin_arcsec: float = 0.02,
+    max_apply_arcsec: float | None = None,
+    min_peak: int = 3,
+    ncores: int = 1,
 ) -> dict[str, Any]:
     """
     Shift JHAT CRVALs onto a common absolute reference (coadd or frame).
 
     Uses the same 2-D histogram sky-offset estimator as HST L3 unify. Designed
     to remove cross-program / cross-filter NIRCam systematics before mosaicing.
+
+    Parameters
+    ----------
+    max_apply_arcsec : float or None, optional
+        If set, measured offsets larger than this are **not** applied (logged
+        as skipped). Use to reject multimodal false peaks; re-JHAT those
+        frames to the hub catalog instead.
+    min_peak : int, optional
+        Minimum 2-D histogram peak count required to trust a measurement.
+    ncores : int, optional
+        Thread pool size for per-frame measure/apply (default 1 = serial).
     """
-    from st123.alignment.hst_jhat import measure_hst_sky_offset_2dhist
-    from st123.mosaic.hst_drizzle import apply_sky_shift_to_fits
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from st123.stages.alignment.hst_jhat import measure_hst_sky_offset_2dhist
+    from st123.stages.mosaic.hst_drizzle import apply_sky_shift_to_fits
 
     ref = Path(abs_ref)
     report: dict[str, Any] = {
         'ok': True,
         'abs_ref': str(ref),
         'max_residual_arcsec': float(max_residual_arcsec),
+        'max_apply_arcsec': (
+            None if max_apply_arcsec is None else float(max_apply_arcsec)
+        ),
+        'min_peak': int(min_peak),
         'n_shifted': 0,
         'n_ok': 0,
         'n_fail_measure': 0,
+        'n_skip_large': 0,
+        'n_weak_peak': 0,
         'frames': [],
     }
     if not ref.is_file():
@@ -2175,48 +2558,59 @@ def harmonize_jwst_frames_to_ref(
         report['error'] = f'abs_ref missing: {ref}'
         return report
 
-    max_abs = 0.0
-    for path in frames:
-        fp = Path(path)
+    frame_list = [Path(p) for p in frames]
+    if not frame_list:
+        report['max_abs_arcsec'] = 0.0
+        return report
+
+    def _one(fp: Path) -> dict[str, Any]:
         row: dict[str, Any] = {'frame': str(fp), 'applied': False}
         if not fp.is_file():
             row['error'] = 'missing'
-            report['frames'].append(row)
-            report['ok'] = False
-            continue
-        if fp.resolve() == ref.resolve():
-            row['skipped'] = 'abs_ref'
-            report['frames'].append(row)
-            report['n_ok'] += 1
-            continue
+            row['_status'] = 'missing'
+            return row
+        try:
+            if fp.resolve() == ref.resolve():
+                row['skipped'] = 'abs_ref'
+                row['_status'] = 'ok'
+                return row
+        except OSError:
+            pass
         off = measure_hst_sky_offset_2dhist(
             fp,
             ref,
             max_offset_arcsec=float(max_search_arcsec),
             bin_arcsec=float(bin_arcsec),
             nbright=500,
-            min_peak=3,
+            min_peak=int(min_peak),
             exclude_zero_arcsec=min(0.35, max(0.08, 2.0 * float(bin_arcsec))),
         )
+        peak = int(off.get('peak_count') or 0)
         row['measure'] = {
             'ok': bool(off.get('ok')),
             'abs_arcsec': off.get('abs_arcsec'),
             'dra_arcsec': off.get('dra_arcsec'),
             'ddec_arcsec': off.get('ddec_arcsec'),
             'n_pairs': off.get('n_pairs'),
-            'peak_count': off.get('peak_count'),
+            'peak_count': peak,
         }
         if not off.get('ok'):
-            report['n_fail_measure'] += 1
-            report['frames'].append(row)
-            continue
+            row['_status'] = 'fail_measure'
+            return row
+        if peak < int(min_peak):
+            row['skipped'] = 'weak_peak'
+            row['_status'] = 'weak_peak'
+            return row
         abs_as = float(off['abs_arcsec'])
-        max_abs = max(max_abs, abs_as)
+        row['_abs_arcsec'] = abs_as
         if abs_as <= float(max_residual_arcsec):
-            report['n_ok'] += 1
-            report['frames'].append(row)
-            continue
-        # img−ref → apply −Δ so the frame moves onto abs_ref.
+            row['_status'] = 'ok'
+            return row
+        if max_apply_arcsec is not None and abs_as > float(max_apply_arcsec):
+            row['skipped'] = 'max_apply'
+            row['abs_arcsec'] = abs_as
+            row['_status'] = 'skip_large'
+            return row
         dra_deg = -float(off['dra_deg'])
         ddec_deg = -float(off['ddec_deg'])
         apply_sky_shift_to_fits(
@@ -2228,16 +2622,57 @@ def harmonize_jwst_frames_to_ref(
         row['applied'] = True
         row['dra_arcsec'] = -float(off['dra_arcsec'])
         row['ddec_arcsec'] = -float(off['ddec_arcsec'])
-        report['n_shifted'] += 1
-        report['n_ok'] += 1
+        row['_status'] = 'shifted'
+        return row
+
+    n_workers = max(1, min(int(ncores), len(frame_list)))
+    if n_workers == 1:
+        rows = [_one(fp) for fp in frame_list]
+    else:
+        by_idx: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_map = {
+                pool.submit(_one, fp): i for i, fp in enumerate(frame_list)
+            }
+            for fut in as_completed(future_map):
+                by_idx[future_map[fut]] = fut.result()
+        rows = [by_idx[i] for i in range(len(frame_list))]
+
+    max_abs = 0.0
+    for row in rows:
+        status = row.pop('_status', None)
+        abs_as = float(row.pop('_abs_arcsec', 0.0) or 0.0)
+        if abs_as:
+            max_abs = max(max_abs, abs_as)
         report['frames'].append(row)
-        logger.info(
-            'JWST harmonize %s → %s: dRA=%+.1f mas dDec=%+.1f mas',
-            fp.name,
-            ref.name,
-            -float(off['dra_arcsec']) * 1000.0,
-            -float(off['ddec_arcsec']) * 1000.0,
-        )
+        if status == 'missing':
+            report['ok'] = False
+        elif status == 'fail_measure':
+            report['n_fail_measure'] += 1
+        elif status == 'weak_peak':
+            report['n_weak_peak'] += 1
+        elif status == 'skip_large':
+            report['n_skip_large'] += 1
+            logger.warning(
+                'JWST harmonize skip %s -> %s: |Delta|=%.1f mas > max_apply '
+                '%.0f mas (re-JHAT instead of CRVAL shift)',
+                Path(row['frame']).name,
+                ref.name,
+                abs_as * 1000.0,
+                float(max_apply_arcsec or 0.0) * 1000.0,
+            )
+        elif status == 'shifted':
+            report['n_shifted'] += 1
+            report['n_ok'] += 1
+            logger.info(
+                'JWST harmonize %s -> %s: dRA=%+.1f mas dDec=%+.1f mas',
+                Path(row['frame']).name,
+                ref.name,
+                float(row.get('dra_arcsec') or 0.0) * 1000.0,
+                float(row.get('ddec_arcsec') or 0.0) * 1000.0,
+            )
+        else:
+            report['n_ok'] += 1
 
     report['max_abs_arcsec'] = max_abs
     if report['n_fail_measure'] and not report['n_shifted'] and report['n_ok'] == 0:
@@ -2252,19 +2687,23 @@ def unify_jwst_astrometric_frame(
     max_search_arcsec: float = 2.0,
     remosaic: bool = False,
     box_wcs=None,
+    apply_shifts: bool = True,
 ) -> dict[str, Any]:
     """
     Put in-box JWST ``*_i2d.fits`` coadds (and their ASN JHAT inputs) on one frame.
 
-    Prefers F200W as the absolute reference. Applies CRVAL shifts to each
-    non-reference coadd and its Level-2 JHAT members. Optional remosaic rebuilds
-    each shifted filter onto *box_wcs* (same sky stamp).
+    Prefers F200W as the absolute reference. When *apply_shifts* is True, applies
+    CRVAL shifts to each non-reference coadd and its Level-2 JHAT members.
+    Optional remosaic rebuilds each shifted filter onto *box_wcs* (same sky stamp).
+
+    When *apply_shifts* is False (mosaic default: ``align`` owns registration),
+    only measure residuals and write QA -- no WCS edits or remosaic.
     """
     import json
     import re
 
-    from st123.alignment.hst_jhat import measure_hst_sky_offset_2dhist
-    from st123.mosaic.hst_drizzle import apply_sky_shift_to_fits
+    from st123.stages.alignment.hst_jhat import measure_hst_sky_offset_2dhist
+    from st123.stages.mosaic.hst_drizzle import apply_sky_shift_to_fits
 
     out = Path(outdir)
     report: dict[str, Any] = {
@@ -2333,6 +2772,12 @@ def unify_jwst_astrometric_frame(
         if abs_as <= float(max_residual_arcsec):
             report['groups'].append(row)
             continue
+        if not apply_shifts:
+            row['skipped_shift'] = True
+            row['reason'] = 'assume_aligned'
+            row['abs_arcsec'] = abs_as
+            report['groups'].append(row)
+            continue
         dra_deg = -float(off['dra_deg'])
         ddec_deg = -float(off['ddec_deg'])
         frames = _jwst_asn_members(out, filt) if filt else []
@@ -2353,7 +2798,7 @@ def unify_jwst_astrometric_frame(
         row['dra_arcsec'] = -float(off['dra_arcsec'])
         row['ddec_arcsec'] = -float(off['ddec_arcsec'])
         logger.info(
-            'JWST unify %s → %s: dRA=%+.1f mas dDec=%+.1f mas (%d L2)%s',
+            'JWST unify %s -> %s: dRA=%+.1f mas dDec=%+.1f mas (%d L2)%s',
             coadd.name,
             abs_ref.name,
             row['dra_arcsec'] * 1000.0,
@@ -2402,29 +2847,66 @@ def unify_jwst_astrometric_frame(
         report['groups'].append(row)
 
     report['max_abs_arcsec'] = max_abs
-    # Re-measure after shifts for the pass/fail gate.
-    final_max = 0.0
-    for coadd in coadds:
-        if coadd.resolve() == abs_ref.resolve():
-            continue
-        off = measure_hst_sky_offset_2dhist(
-            coadd,
-            abs_ref,
-            max_offset_arcsec=float(max_search_arcsec),
-            bin_arcsec=0.05,
-            nbright=800,
-            min_peak=3,
-            exclude_zero_arcsec=0.15,
-        )
-        if off.get('ok'):
-            final_max = max(final_max, float(off['abs_arcsec']))
+    # Re-measure after shifts for the pass/fail gate (or use pre-measure when QA-only).
+    if not apply_shifts:
+        final_max = max_abs
+    else:
+        final_max = 0.0
+        for coadd in coadds:
+            if coadd.resolve() == abs_ref.resolve():
+                continue
+            off = measure_hst_sky_offset_2dhist(
+                coadd,
+                abs_ref,
+                max_offset_arcsec=float(max_search_arcsec),
+                bin_arcsec=0.05,
+                nbright=800,
+                min_peak=3,
+                exclude_zero_arcsec=0.15,
+            )
+            if off.get('ok'):
+                final_max = max(final_max, float(off['abs_arcsec']))
     report['final_max_abs_arcsec'] = final_max
     report['ok'] = final_max <= float(max_residual_arcsec)
+    report['apply_shifts'] = bool(apply_shifts)
     qa_path = out / 'jwst_astrometric_frame_qa.json'
     qa_path.write_text(json.dumps(report, indent=2, default=str))
     report['qa_path'] = str(qa_path)
+    try:
+        from st123.stages.alignment.frame_qa import (
+            build_frame_qa,
+            read_frame_qa,
+            warn_if_frame_qa_soft,
+            write_frame_qa,
+        )
+
+        jhat_qa = None
+        for parent in (out.parent.parent / 'jhat', out.parent / 'jhat'):
+            jhat_qa = read_frame_qa(parent)
+            if jhat_qa:
+                break
+        mosaic_qa = build_frame_qa(
+            mission='jwst',
+            hub_id=Path(abs_ref).name if abs_ref else None,
+            align_mode='MOSAIC_QA',
+            abs_ref=str(abs_ref) if abs_ref else None,
+            residual_mas=(
+                (jhat_qa.get('abs') or {}).get('residual_mas') if jhat_qa else None
+            ),
+            n_calibrators=(
+                (jhat_qa.get('abs') or {}).get('n_calibrators') if jhat_qa else None
+            ),
+            abs_method='align_frame_qa' if jhat_qa else 'coadd_pairwise',
+            max_delta_mas=float(final_max) * 1000.0,
+            frames=(jhat_qa.get('frames') if jhat_qa else None),
+            extra={'mosaic_coadd_qa': report, 'assume_aligned': not apply_shifts},
+        )
+        write_frame_qa(out, mosaic_qa)
+        warn_if_frame_qa_soft(mosaic_qa, log=logger, context=out.name)
+    except Exception as exc:
+        logger.warning('Could not write JWST mosaic frame_qa.json: %s', exc)
     logger.info(
-        'JWST unify %s: final max |Δ|=%.1f mas (limit %.1f mas) → %s',
+        'JWST unify %s: final max |Delta|=%.1f mas (limit %.1f mas) -> %s',
         out.name,
         final_max * 1000.0,
         float(max_residual_arcsec) * 1000.0,

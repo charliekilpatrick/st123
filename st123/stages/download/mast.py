@@ -137,8 +137,8 @@ def prepare_mast_auth(token: Optional[str] = None) -> bool:
     """
     Optionally authenticate to MAST; never abort a public-data download.
 
-    * No token → log once that only public data will be queried; return False.
-    * Token present → login once per process (cached). Login failure warns and
+    * No token -> log once that only public data will be queried; return False.
+    * Token present -> login once per process (cached). Login failure warns and
       continues with public data only (return False).
 
     Returns
@@ -391,7 +391,7 @@ def observation_matches_calib_stage(calib_level: object, stage: int) -> bool:
     """Return True if a MAST ``calib_level`` can satisfy ``stage``.
 
     MAST uses ``calib_level=-1`` (or missing) when no calibrated products exist
-    yet — e.g. APT placeholders or unexecuted visits. Observations that only
+    yet - e.g. APT placeholders or unexecuted visits. Observations that only
     reach a lower level than requested are also not relevant for download.
     Unknown / unparseable levels are treated as potentially relevant so we do
     not silently drop rows that might still have products.
@@ -715,7 +715,7 @@ def filter_jwst_products(
     product_list: Table,
     stage: int = 2,
     *,
-    mirimage_only: bool = False,
+    instrument: object | None = None,
 ) -> Table:
     """Filter JWST products to science CAL (stage 2) or I2D (stage 3) files.
 
@@ -725,8 +725,10 @@ def filter_jwst_products(
         Raw MAST product list from ``Observations.get_product_list``.
     stage : int, optional
         Calibration stage to keep: ``2`` for CAL, ``3`` for I2D (default 2).
-    mirimage_only : bool, optional
-        When ``True``, keep only filenames containing ``mirimage``.
+    instrument : object or None, optional
+        MAST ``instrument_name`` for this observation. When it indicates MIRI,
+        only imager products (``*mirimage*`` filenames) are kept; MRS/IFU and
+        other non-imager MIRI products are dropped. NIRCam is unaffected.
 
     Returns
     -------
@@ -739,7 +741,7 @@ def filter_jwst_products(
         If ``stage`` is not ``2`` or ``3``.
     """
     masks = [[str(p).upper() == 'SCIENCE' for p in product_list['productType']]]
-    if mirimage_only:
+    if instrument is not None and 'MIRI' in str(instrument).upper():
         masks.append(
             ['mirimage' in str(name).lower() for name in product_list['productFilename']]
         )
@@ -929,13 +931,15 @@ def download_jwst_observations(
     token: Optional[str] = None,
     *,
     layout: str = DEFAULT_DOWNLOAD_LAYOUT,
-    mirimage_only: bool = False,
     dry_run: bool = False,
 ) -> int:
     """Download filtered JWST products for each observation into ``outdir``.
 
     Pass ``token`` (or set ``MAST_API_TOKEN``) to authenticate before downloading
     proprietary products, matching the hst123 ``Observations.login`` flow.
+
+    MIRI observations always keep imager ``*mirimage*`` products only (MRS/IFU
+    and other non-imager products are dropped). NIRCam products are unchanged.
 
     Parameters
     ----------
@@ -953,8 +957,6 @@ def download_jwst_observations(
     layout : str, optional
         Per-observation subdirectory layout (default
         :data:`DEFAULT_DOWNLOAD_LAYOUT`). See :func:`observation_download_subdir`.
-    mirimage_only : bool, optional
-        When ``True``, keep only ``*mirimage*`` product filenames (MIRI imager).
     dry_run : bool, optional
         When ``True``, list products without downloading.
 
@@ -976,7 +978,7 @@ def download_jwst_observations(
     if n_skipped:
         # Observations with calib_level=-1 / below the requested stage are not
         # expected to have matching products (e.g. APT placeholders). Skip
-        # silently aside from a one-line tally — do not per-obs "tried".
+        # silently aside from a one-line tally - do not per-obs "tried".
         logger.info(
             'Skipping %d observation(s) with no calib_level>=%d products available',
             n_skipped,
@@ -1017,7 +1019,7 @@ def download_jwst_observations(
             product_list = filter_jwst_products(
                 raw_products,
                 stage=stage,
-                mirimage_only=mirimage_only,
+                instrument=instrument,
             )
         except Exception as exc:
             logger.warning('could not get products for obsid=%s: %s', obsid, exc)
@@ -1084,7 +1086,7 @@ def filter_hst_products(
 ) -> Table:
     """Keep HST flt/flc/c0m/c1m SCIENCE products for *instrument*.
 
-    WFPC2 ``c1m`` DQ companions are always retained — they are required for
+    WFPC2 ``c1m`` DQ companions are always retained - they are required for
     AstroDrizzle and ``wfpc2mask``.
 
     Parameters
@@ -1205,8 +1207,8 @@ def download_hst_observations(
         already present). ``n_failed`` counts product-list / download failures
         after retries. ``0`` ready only when nothing usable was found.
     """
-    # Lazy import avoids circular import with st123.mast.download.
-    from st123.mast.download import MastDownloadResult
+    # Lazy import avoids circular import with st123.stages.download.download.
+    from st123.stages.download.download import MastDownloadResult
 
     # Auth is normally done in query_hst; keep a cached no-op for standalone use.
     prepare_mast_auth(token)
@@ -1263,7 +1265,7 @@ def download_hst_observations(
                 n_skipped_local += 1
                 n_skipped_existing += len(local)
                 logger.info(
-                    '[%d/%d] %s: %d science product(s) already on disk — '
+                    '[%d/%d] %s: %d science product(s) already on disk - '
                     'skipping MAST product list',
                     i,
                     n_obs,
@@ -1345,7 +1347,7 @@ def download_hst_observations(
             seen_filenames.add(fname)
             keep_idx.append(j)
         if not keep_idx:
-            # Already on disk (or duplicate of another obsid) — treat as success.
+            # Already on disk (or duplicate of another obsid) - treat as success.
             n_ready += 1
             logger.info(
                 '[%d/%d] %s: all science products already downloaded or duplicated',
@@ -1400,6 +1402,17 @@ def download_hst_observations(
                 n_obs,
                 subdir,
                 len(flat),
+            )
+        from st123.datamodels.hst import prune_bad_hst_expflag
+
+        pruned = prune_bad_hst_expflag(download_dir, remove=True)
+        if pruned:
+            logger.warning(
+                '[%d/%d] %s: removed %d bad-EXPFLAG HST product(s)',
+                i,
+                n_obs,
+                subdir,
+                len(pruned),
             )
         n_downloaded += 1
         n_ready += 1

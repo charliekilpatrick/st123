@@ -10,12 +10,11 @@ from pathlib import Path
 
 import numpy as np
 from astropy import units as u
-from astropy.io import fits
 from astropy.wcs import WCS
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
-from st123.mosaic.region import SRegionPolygon, illuminated_s_region_from_fits
+from st123.stages.mosaic.region import SRegionPolygon, illuminated_s_region_from_fits
 
 warnings.filterwarnings('ignore')
 
@@ -33,7 +32,7 @@ class AreaMetrics:
     arcmin2 : float
         Solid angle in square arcminutes.
     fraction_of_roi : float
-        Fraction of the illuminated science ROI (0–1, or NaN if ROI area is zero).
+        Fraction of the illuminated science ROI (0-1, or NaN if ROI area is zero).
     """
 
     pixels2: float
@@ -87,7 +86,7 @@ class AreaMetrics:
         Returns
         -------
         str
-            Formatted string with pixels², arcmin², and ROI fraction.
+            Formatted string with pixels^2, arcmin^2, and ROI fraction.
         """
         return (
             f'{self.pixels2:.3f} pixels^2 | {self.arcmin2:.6f} arcmin^2 | '
@@ -139,20 +138,24 @@ class ScienceFootprint:
         return self.pixel_area_arcmin2 * 3600.0
 
     @classmethod
-    def from_fits(cls, path: str) -> ScienceFootprint:
-        """Load an illuminated footprint from a science FITS file.
+    def from_fits(cls, image) -> ScienceFootprint:
+        """Load an illuminated footprint from a science datamodel.
 
         Parameters
         ----------
-        path : str
-            Path to a science FITS file with ``S_REGION`` and WCS headers.
+        image
+            Science datamodel or FITS path with ``S_REGION`` and WCS headers.
 
         Returns
         -------
         ScienceFootprint
             Parsed footprint with sky and pixel polygons.
         """
-        s_region, _, wcs, _, _, _ = illuminated_s_region_from_fits(path)
+        from st123.datamodels.instrument import as_datamodel, path_of
+
+        model = as_datamodel(image)
+        path = str(path_of(model))
+        s_region, _, wcs, _, _, _ = illuminated_s_region_from_fits(model)
         verts = np.asarray(s_region.vertices, dtype=float)
         center_ra = float(np.mean(verts[:, 0]))
         center_dec = float(np.mean(verts[:, 1]))
@@ -189,7 +192,7 @@ class ScienceFootprint:
         )
 
     def metrics_from_sky_arcsec2(self, area_arcsec2: float) -> AreaMetrics:
-        """Convert a tangent-plane area (arcsec²) into science-pixel metrics.
+        """Convert a tangent-plane area (arcsec^2) into science-pixel metrics.
 
         Parameters
         ----------
@@ -269,13 +272,13 @@ class BestOverlap:
         return self.science_path
 
 
-def load_header_s_region(fits_path: str, extname: str = 'SCI') -> SRegionPolygon:
-    """Parse ``S_REGION`` from a FITS science header.
+def load_header_s_region(image, extname: str = 'SCI') -> SRegionPolygon:
+    """Parse ``S_REGION`` from a science datamodel.
 
     Parameters
     ----------
-    fits_path : str
-        Path to a FITS file containing an ``S_REGION`` keyword.
+    image
+        Datamodel or FITS path containing an ``S_REGION`` keyword.
     extname : str, optional
         HDU extension name to read (default ``'SCI'``).
 
@@ -284,7 +287,15 @@ def load_header_s_region(fits_path: str, extname: str = 'SCI') -> SRegionPolygon
     SRegionPolygon
         Parsed sky polygon from the header.
     """
-    with fits.open(fits_path) as hdul:
+    from st123.datamodels.instrument import as_datamodel
+
+    model = as_datamodel(image)
+    if str(extname).upper() == 'SCI':
+        text = model.s_region
+        if not text:
+            raise KeyError(f'No S_REGION in {model.path}')
+        return SRegionPolygon.parse(text)
+    with model.open() as hdul:
         return SRegionPolygon.parse(hdul[extname].header['S_REGION'])
 
 
@@ -304,26 +315,30 @@ def polygon_area(polygon: Polygon) -> float:
     return 0.0 if polygon.is_empty else float(polygon.area)
 
 
-def compute_overlap(science: ScienceFootprint, ref_path: str) -> OverlapResult:
+def compute_overlap(science: ScienceFootprint, ref) -> OverlapResult:
     """Compute footprint overlap in a local sky tangent plane.
 
     Intersection is performed on ``S_REGION`` polygons expressed as
     arcsecond offsets from the science footprint center. Reported areas are
-    converted to science pixels² via the science pixel solid angle.
+    converted to science pixels^2 via the science pixel solid angle.
 
     Parameters
     ----------
     science : ScienceFootprint
         Illuminated science footprint (from :meth:`ScienceFootprint.from_fits`).
-    ref_path : str
-        Path to a reference FITS file with an ``S_REGION`` header keyword.
+    ref
+        Reference datamodel or FITS path with an ``S_REGION`` header keyword.
 
     Returns
     -------
     OverlapResult
         Reference and overlap areas in science-pixel units.
     """
-    ref_s_region = load_header_s_region(ref_path)
+    from st123.datamodels.instrument import as_datamodel, path_of
+
+    ref_model = as_datamodel(ref)
+    ref_path = str(path_of(ref_model))
+    ref_s_region = load_header_s_region(ref_model)
     ref_sky = ref_s_region.to_tangent_polygon(
         science.center_ra_deg,
         science.center_dec_deg,
@@ -386,7 +401,7 @@ def overlap_area_pixels(
     science_image: str,
     ref_image: str,
 ) -> tuple[float, Polygon, Polygon]:
-    """Return overlap area (science pixels²) and the two sky-tangent polygons.
+    """Return overlap area (science pixels^2) and the two sky-tangent polygons.
 
     Parameters
     ----------

@@ -252,7 +252,7 @@ def test_input_list_builds_obstable(tmp_path: Path):
         exptime=75.0,
         filt='F200W',
     )
-    # Need S_REGION for edit_visits_groups → get_sky_pgons
+    # Need S_REGION for edit_visits_groups -> get_sky_pgons
     for path in (a, b):
         with fits.open(path, mode='update') as hdul:
             wcs_hdr = hdul['SCI'].header
@@ -270,6 +270,12 @@ def test_input_list_builds_obstable(tmp_path: Path):
     assert 'visit' in obstable.colnames
     assert 'group' in obstable.colnames
     assert set(obstable['filter']) == {'f150w', 'f200w'}
+
+    from st123.datamodels import as_datamodel
+
+    again = helpers.input_list([as_datamodel(a), as_datamodel(b)])
+    assert len(again) == 2
+    assert set(again['filter']) == {'f150w', 'f200w'}
 
 
 def test_package_reexports():

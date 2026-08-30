@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence, TypeVar, Union
 
 from astropy.io import fits
+from st123.datamodels import as_datamodel
 
-from st123.utils.helpers import get_detector_chip
 from st123.utils.logging import run_logged_subprocess
 
 _T = TypeVar('_T')
@@ -53,20 +53,20 @@ def _repair_zero_exptime_fits(path: PathLike) -> float | None:
     """
     Repair ``EXPTIME<=0`` from EXPSTART/EXPEND on a FITS file (in place).
 
-    Delegates to :func:`st123.mosaic.hst_drizzle._repair_zero_exptime`.
+    Delegates to :func:`st123.stages.mosaic.hst_drizzle._repair_zero_exptime`.
     """
-    from st123.mosaic.hst_drizzle import _repair_zero_exptime
+    from st123.stages.mosaic.hst_drizzle import _repair_zero_exptime
 
     p = Path(path)
     if not p.is_file():
         return None
     try:
-        with fits.open(p, mode='update', memmap=False) as hdul:
+        with as_datamodel(p).open(mode='update', memmap=False) as hdul:
             repaired = _repair_zero_exptime(hdul)
             if repaired is not None:
                 hdul.flush()
                 logger.info(
-                    'Repaired EXPTIME=0 → %.3fs from EXPSTART/EXPEND on %s',
+                    'Repaired EXPTIME=0 -> %.3fs from EXPSTART/EXPEND on %s',
                     repaired,
                     p.name,
                 )
@@ -156,7 +156,7 @@ def sanitize_dolphot_wcs(path: PathLike, *, fit_inverse: bool = False) -> bool:
     Returns True when the header was modified.
     """
     p = Path(path)
-    with fits.open(p, mode='readonly') as hdul:
+    with as_datamodel(p).open(mode='readonly') as hdul:
         hdu_idx = None
         for i, hdu in enumerate(hdul):
             data = hdu.data
@@ -277,7 +277,7 @@ def sanitize_dolphot_wcs(path: PathLike, *, fit_inverse: bool = False) -> bool:
                 continue
             new_wcs_hdr[key] = val
 
-    with fits.open(p, mode='update') as hdul:
+    with as_datamodel(p).open(mode='update') as hdul:
         src = hdul[hdu_idx].header
         for key in list(src.keys()):
             if _is_dolphot_wcs_card(key):
@@ -311,7 +311,7 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
     import tempfile
 
     p = Path(path)
-    with fits.open(p, mode='readonly') as hdul:
+    with as_datamodel(p).open(mode='readonly') as hdul:
         if len(hdul) == 1 and hdul[0].data is not None and hdul[0].data.ndim >= 2:
             return False
         sci_hdu = None
@@ -323,7 +323,7 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
         if sci_hdu is None:
             raise ValueError(f'No image data to flatten in {p}')
         hdr = sci_hdu.header.copy()
-        # Preserve useful primary cards (GAIN, INSTRUME, WCS fallbacks, …).
+        # Preserve useful primary cards (GAIN, INSTRUME, WCS fallbacks, ...).
         for key, val in hdul[0].header.items():
             if key in hdr or key in (
                 'SIMPLE', 'BITPIX', 'NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3',
@@ -365,7 +365,7 @@ def ensure_dolphot_cd_matrix(path: PathLike) -> bool:
     import tempfile
 
     p = Path(path)
-    with fits.open(p, mode='readonly') as hdul:
+    with as_datamodel(p).open(mode='readonly') as hdul:
         if hdul[0].data is None or getattr(hdul[0].data, 'ndim', 0) < 2:
             return False
         hdr = hdul[0].header.copy()
@@ -398,7 +398,7 @@ def ensure_dolphot_cd_matrix(path: PathLike) -> bool:
         if tmp.is_file():
             tmp.unlink()
         raise
-    logger.info('Rewrote PC+CDELT → CD matrix on %s', p.name)
+    logger.info('Rewrote PC+CDELT -> CD matrix on %s', p.name)
     return True
 
 
@@ -460,7 +460,7 @@ _JWST_INSTRUMENTS = frozenset({'nircam', 'miri'})
 
 
 def _hst_mask_instrument(kind: str) -> str:
-    """Map :func:`classify_image_kind` result → ``acsmask`` / ``wfc3mask`` / ``wfpc2mask``."""
+    """Map :func:`classify_image_kind` result -> ``acsmask`` / ``wfc3mask`` / ``wfpc2mask``."""
     k = kind.lower()
     if k == 'acs':
         return 'acs'
@@ -482,7 +482,7 @@ def _classify_hst_science(path: PathLike) -> str:
         pass
     name = p.name.lower()
     if 'wfpc2' in name or name.startswith('u'):
-        # WFPC2 roots are often uNNNN…; prefer header, but filename last-resort.
+        # WFPC2 roots are often uNNNN...; prefer header, but filename last-resort.
         if 'wfpc2' in name or '_c0m' in name:
             return 'wfpc2'
     if 'acs' in name:
@@ -497,7 +497,7 @@ def _is_jwst_dolphot_reference(path: PathLike) -> bool:
     Return True when *path* is a JWST (NIRCam/MIRI) reference for HST prep.
 
     Used to skip HST ``*mask`` / ``calcsky`` on a staged NIRCam ``img0`` during
-    NIRCam→HST warmstart. Detection prefers ``INSTRUME`` / ``TELESCOP``, then
+    NIRCam->HST warmstart. Detection prefers ``INSTRUME`` / ``TELESCOP``, then
     filename tokens (``_i2d``, ``nircam``, ``miri``).
     """
     p = Path(path)
@@ -510,7 +510,7 @@ def _is_jwst_dolphot_reference(path: PathLike) -> bool:
     if not p.is_file() or p.stat().st_size == 0:
         return '_i2d' in name or 'nircam' in name
     try:
-        with fits.open(p, memmap=True) as hdul:
+        with as_datamodel(p).open(memmap=True) as hdul:
             for hdu in hdul:
                 hdr = hdu.header
                 inst = str(hdr.get('INSTRUME', '') or '').upper()
@@ -537,10 +537,17 @@ def _companion_sky_path(fits_path: Path) -> Optional[Path]:
 
 def _parse_box_token(token: str) -> int | str:
     """Parse a mosaic box id from a manifest header or directory name."""
-    value = str(token).strip().lower()
-    if value == 'full':
+    value = str(token).strip()
+    if not value:
+        raise ValueError('empty box token')
+    lower = value.lower()
+    if lower == 'full':
         return 'full'
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        # Custom stamp labels (e.g. ``sn`` from ``ref_sn`` / ``box=sn``).
+        return value
 
 
 @dataclass(frozen=True)
@@ -629,7 +636,7 @@ def dolphot_bin_dir(
 
     Defaults to PATH discovery via :func:`resolve_dolphot_bin`. When
     ``required`` is True (default), missing DOLPHOT raises
-    ``FileNotFoundError`` — use this before programmatically invoking
+    ``FileNotFoundError`` - use this before programmatically invoking
     ``nircammask`` / ``mirimask`` / ``calcsky`` / ``dolphot``.
 
     Parameters
@@ -697,7 +704,7 @@ def parse_dolphot_frame_list(
         Mosaic group index from the ``# group=`` header or inferred from the path.
     box : int or str
         Reference box id from the ``# box=`` header or inferred from the path
-        (``0``, ``1``, … or ``'full'`` for whole-group mosaics).
+        (``0``, ``1``, ... or ``'full'`` for whole-group mosaics).
 
     Raises
     ------
@@ -859,6 +866,80 @@ def resolve_coadd_ref(
     return Path(fallback)
 
 
+# Preferred NIRCam free-photometry reference filters (SW first).
+NIRCAM_SW_REF_FILTERS: tuple[str, ...] = (
+    'F150W2',
+    'F200W',
+    'F150W',
+    'F115W',
+    'F090W',
+    'F070W',
+    'F182M',
+    'F210M',
+    'F187N',
+    'F212N',
+)
+
+
+def resolve_nircam_coadd_ref(
+    box_dir: PathLike,
+    ref_filter: Optional[str] = None,
+    *,
+    fallback: Optional[PathLike] = None,
+) -> Path:
+    """
+    Prefer a NIRCam SW ``*_i2d.fits`` coadd as the DOLPHOT reference.
+
+    Never returns an HST ``*_drc`` / ``*_drz`` product (``nircammask`` cannot
+    process those). Tries *ref_filter*, then :data:`NIRCAM_SW_REF_FILTERS`, then
+    any non-MIRI ``*_i2d.fits`` in the box.
+    """
+    box = Path(box_dir)
+    tried: list[str] = []
+    if ref_filter:
+        tried.append(str(ref_filter))
+    for filt in NIRCAM_SW_REF_FILTERS:
+        if filt not in tried:
+            tried.append(filt)
+    for filt in tried:
+        try:
+            path = resolve_coadd_ref(box, filt, fallback=None)
+        except FileNotFoundError:
+            continue
+        if path.name.lower().endswith('_i2d.fits'):
+            return path
+    i2ds = sorted(
+        p
+        for p in box.glob('coadd_*_i2d.fits')
+        if 'miri' not in p.name.lower()
+        and '_f770w_' not in p.name.lower()
+        and '_f1000w_' not in p.name.lower()
+        and '_f1130w_' not in p.name.lower()
+        and '_f1280w_' not in p.name.lower()
+        and '_f1500w_' not in p.name.lower()
+        and '_f1800w_' not in p.name.lower()
+        and '_f2100w_' not in p.name.lower()
+        and '_f2550w_' not in p.name.lower()
+    )
+    if i2ds:
+        # Prefer shorter-wavelength / wider SW filters by name rank.
+        def _rank(p: Path) -> tuple[int, str]:
+            name = p.name.lower()
+            for i, filt in enumerate(NIRCAM_SW_REF_FILTERS):
+                if f'_{filt.lower()}_' in name:
+                    return (i, name)
+            return (len(NIRCAM_SW_REF_FILTERS), name)
+
+        i2ds.sort(key=_rank)
+        return i2ds[0]
+    if fallback is not None and str(fallback).lower().endswith('_i2d.fits'):
+        return Path(fallback)
+    raise FileNotFoundError(
+        f'No NIRCam *_i2d.fits coadd under {box} '
+        f'(tried filters {tried}; nircammask requires a JWST reference)'
+    )
+
+
 def discover_mosaic_phot_jobs(
     reduction_dir: PathLike,
     *,
@@ -888,8 +969,8 @@ def discover_mosaic_phot_jobs(
         Parent directory for staging runs. Default: *reduction_dir*.
         MIRI/HST runs typically use ``<project>/dolphot``.
     outdir_prefix : str, optional
-        Staging directory name prefix (default ``'phot'`` → ``phot_0_0``;
-        use ``'miri'`` / ``'hst'`` → ``miri_0_0`` / ``hst_0_0``).
+        Staging directory name prefix (default ``'phot'`` -> ``phot_0_0``;
+        use ``'miri'`` / ``'hst'`` -> ``miri_0_0`` / ``hst_0_0``).
 
     Returns
     -------
@@ -905,17 +986,68 @@ def discover_mosaic_phot_jobs(
     if not ref_root.is_dir():
         return jobs
 
+    inst = (instrument or '').lower() or None
+
+    def _collect_jhat(inst_name: str | None) -> list[Path]:
+        jhat_dirs = [
+            root / 'jhat_jwst',
+            root / 'jhat_hst',
+            root / 'jhat',
+        ]
+        found: list[Path] = []
+        for jd in jhat_dirs:
+            if jd.is_dir():
+                found.extend(
+                    sorted(
+                        p
+                        for p in jd.glob('*jhat.fits')
+                        if not p.name.lower().startswith('coadd_')
+                    )
+                )
+        if inst_name is not None:
+            found = filter_frames_for_instrument(found, inst_name)
+        return found
+
     manifests = sorted(ref_root.glob('group_*/ref_*/' + _FRAME_LIST_NAME))
     if manifests:
         for manifest in manifests:
             refimage, frames, group, box = parse_dolphot_frame_list(manifest)
-            refimage = resolve_coadd_ref(
-                manifest.parent,
-                ref_filter,
-                fallback=refimage,
-            )
-            if instrument is not None:
-                frames = filter_frames_for_instrument(frames, instrument)
+            box_dir = manifest.parent
+            if inst == 'nircam':
+                try:
+                    refimage = resolve_nircam_coadd_ref(
+                        box_dir, ref_filter, fallback=None
+                    )
+                except FileNotFoundError as exc:
+                    logger.warning('Skipping box %s: %s', box_dir, exc)
+                    continue
+            else:
+                refimage = resolve_coadd_ref(
+                    box_dir,
+                    ref_filter,
+                    fallback=refimage,
+                )
+            if inst is not None:
+                frames = filter_frames_for_instrument(frames, inst)
+            if not frames and inst == 'nircam':
+                # Shared dolphot_frames.txt may be HST-only after remosaic;
+                # recover NIRCam paths from any tagged lists in this box.
+                seen: set[Path] = set()
+                recovered: list[Path] = []
+                for tagged in sorted(box_dir.glob('dolphot_frames*.txt')):
+                    try:
+                        _r, tagged_frames, _g, _b = parse_dolphot_frame_list(
+                            tagged
+                        )
+                    except Exception:
+                        continue
+                    for p in filter_frames_for_instrument(tagged_frames, 'nircam'):
+                        key = p.resolve()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        recovered.append(p)
+                frames = recovered
             if not frames:
                 logger.warning(
                     'No %s frames in %s; skipping box',
@@ -936,17 +1068,7 @@ def discover_mosaic_phot_jobs(
         return jobs
 
     # Fallback: coadd present, no manifest (legacy mosaic run).
-    jhat_dirs = [
-        root / 'jhat_jwst',
-        root / 'jhat_hst',
-        root / 'jhat',
-    ]
-    jhat: list[Path] = []
-    for jd in jhat_dirs:
-        if jd.is_dir():
-            jhat.extend(sorted(jd.glob('*jhat.fits')))
-    if instrument is not None:
-        jhat = filter_frames_for_instrument(jhat, instrument)
+    jhat = _collect_jhat(inst)
     coadd_globs = (
         'group_*/ref_*/coadd_*_i2d.fits',
         'group_*/ref_*/coadd_*_drc.fits',
@@ -962,10 +1084,16 @@ def discover_mosaic_phot_jobs(
             match = _GROUP_BOX_RE.search(coadd.as_posix())
             group = int(match.group(1)) if match else 0
             box: int | str = _parse_box_token(match.group(2)) if match else 0
-            refimage = resolve_coadd_ref(box_dir, ref_filter, fallback=coadd)
-            if ref_filter and refimage.resolve() != coadd.resolve():
-                # Another coadd in this box may be the chosen ref; still stage.
-                pass
+            if inst == 'nircam':
+                try:
+                    refimage = resolve_nircam_coadd_ref(
+                        box_dir, ref_filter, fallback=coadd
+                    )
+                except FileNotFoundError as exc:
+                    logger.warning('Skipping box %s: %s', box_dir, exc)
+                    continue
+            else:
+                refimage = resolve_coadd_ref(box_dir, ref_filter, fallback=coadd)
             if not jhat:
                 continue
             jobs.append(
@@ -1072,62 +1200,9 @@ def classify_image_kind(path: PathLike) -> str:
     ValueError
         If the frame cannot be classified from the filename or FITS headers.
     """
-    name = os.path.basename(str(path)).lower()
-    chip = get_detector_chip(str(path))
-    if chip:
-        chip_l = chip.lower()
-        if 'mir' in chip_l:
-            return 'miri'
-        if 'long' in chip_l:
-            return 'long'
-        if 'nrc' in chip_l:
-            return 'short'
+    from st123.datamodels import classify_image_kind as classify_kind
 
-    if 'mirimage' in name or '/miri/' in str(path).lower():
-        return 'miri'
-
-    try:
-        with fits.open(path, memmap=True) as hdul:
-            for hdu in hdul:
-                inst = str(hdu.header.get('INSTRUME', '')).upper()
-                if inst == 'MIRI':
-                    return 'miri'
-                if inst == 'NIRCAM':
-                    det = str(hdu.header.get('DETECTOR', '')).upper()
-                    return 'long' if 'LONG' in det else 'short'
-                if inst == 'ACS':
-                    return 'acs'
-                if inst == 'WFPC2':
-                    return 'wfpc2'
-                if inst == 'WFC3':
-                    det = str(hdu.header.get('DETECTOR', '')).upper()
-                    aper = str(hdul[0].header.get('APERTURE', '')).upper()
-                    phot = str(hdu.header.get('PHOTMODE', '')).upper()
-                    if 'IR' in det or aper.startswith('IR') or ' WFC3 IR' in f' {phot}':
-                        return 'wfc3_ir'
-                    return 'wfc3'
-            # JHAT may strip INSTRUME; fall back to PHOTMODE / APERTURE.
-            for hdu in hdul:
-                phot = str(hdu.header.get('PHOTMODE', '')).upper()
-                if phot.startswith('ACS') or ',ACS' in phot:
-                    return 'acs'
-                if phot.startswith('WFPC2') or 'WFPC2,' in phot:
-                    return 'wfpc2'
-                if phot.startswith('WFC3'):
-                    if ' IR' in f' {phot}' or phot.split()[1:2] == ['IR']:
-                        return 'wfc3_ir'
-                    return 'wfc3'
-            aper = str(hdul[0].header.get('APERTURE', '')).upper()
-            if aper.startswith('UVIS'):
-                return 'wfc3'
-            if aper.startswith('IR'):
-                return 'wfc3_ir'
-            if aper.startswith('WFC') or aper.startswith('HRC'):
-                return 'acs'
-    except OSError:
-        pass
-
-    raise ValueError(f'Cannot classify DOLPHOT image kind for {path}')
+    return classify_kind(path)
 
 
 def per_image_params(kind: str) -> Mapping[str, str]:
@@ -1265,7 +1340,7 @@ def apply_mirimask(
     """
     Run ``mirimask`` on science frames (in-place).
 
-    Default flags follow ``dolphotMIRI.pdf`` §3.3 recommendations:
+    Default flags follow ``dolphotMIRI.pdf`` Sec.3.3 recommendations:
     ``-estnoise`` on, ETC exposure time on (do **not** pass ``-noetctime``).
     Back up originals before calling; ``mirimask`` rewrites the FITS files.
 
@@ -1343,8 +1418,8 @@ def calc_sky(
 
     Defaults follow the instrument manuals / hst123 detector defaults:
 
-    - NIRCam: rin=15, rout=25, step=-64, σ=2.25/2.00
-    - MIRI: rin=10, rout=25, step=-64, σ=2.25/2.00 (``dolphotMIRI.pdf`` §3.4)
+    - NIRCam: rin=15, rout=25, step=-64, sigma=2.25/2.00
+    - MIRI: rin=10, rout=25, step=-64, sigma=2.25/2.00 (``dolphotMIRI.pdf`` Sec.3.4)
     - ACS / WFC3 UVIS: rin=15, rout=35, step=4
     - WFPC2: rin=10, rout=25, step=2
 
@@ -1425,31 +1500,16 @@ def calc_sky(
     _parallel_map(_one, names, ncores=ncores, label='calcsky')
 
 
-def _wfpc2_dq_companion(science: Path) -> Optional[Path]:
+def _wfpc2_dq_companion(science) -> Optional[Path]:
     """Locate ``*_c1m.fits`` next to a WFPC2 ``*_c0m`` / ``*_jhat`` MEF."""
-    name = science.name
-    candidates: list[Path] = []
-    if name.endswith('_c0m.fits'):
-        candidates.append(science.with_name(name.replace('_c0m.fits', '_c1m.fits')))
-    elif name.endswith('_jhat.fits'):
-        stem = name[: -len('_jhat.fits')]
-        candidates.append(science.with_name(f'{stem}_c1m.fits'))
-        # Also look beside the original raw name if JHAT kept the root.
-        candidates.append(science.with_name(f'{stem}_c0m'.replace('_c0m', '') + '_c1m.fits'))
-        raw_sib = science.parent.parent / 'raw' / f'{stem}_c1m.fits'
-        candidates.append(raw_sib)
-        candidates.append(science.parent / f'{stem}_c1m.fits')
-    else:
-        stem = name[:-5] if name.endswith('.fits') else name
-        candidates.append(science.with_name(f'{stem}_c1m.fits'))
-        if '_c0m' in stem:
-            candidates.append(
-                science.with_name(stem.replace('_c0m', '_c1m') + '.fits')
-            )
-    for cand in candidates:
-        if cand.is_file():
-            return cand
-    return None
+    from st123.datamodels.hst.wfpc2 import WFPC2DataModel
+    from st123.datamodels.instrument import InstrumentDataModel, as_datamodel
+
+    model = science if isinstance(science, WFPC2DataModel) else as_datamodel(science)
+    if isinstance(model, WFPC2DataModel) and model.has_dq():
+        return model.dq_path
+    path = model.path if isinstance(model, InstrumentDataModel) else Path(science)
+    return WFPC2DataModel.find_dq_beside(path)
 
 
 def apply_hst_mask(
@@ -1653,7 +1713,7 @@ def apply_splitgroups(
         for chip in chips:
             keep = False
             try:
-                with fits.open(chip, mode='update') as hdul:
+                with as_datamodel(chip).open(mode='update') as hdul:
                     hdr = hdul[0].header
                     extname = str(hdr.get('EXTNAME') or '').upper()
                     data = hdul[0].data
@@ -1707,7 +1767,7 @@ def prepare_frames(
     """
     Mask then compute sky for science frames.
 
-    Order is always mask → calcsky. Within each step, independent frames are
+    Order is always mask -> calcsky. Within each step, independent frames are
     processed in parallel when ``ncores > 1``.
 
     Parameters
@@ -1764,18 +1824,18 @@ def prepare_hst_frames(
     xytfile: Optional[PathLike] = None,
 ) -> Path:
     """
-    Stage HST frames for DOLPHOT: splitgroups → mask → calcsky → paramfile.
+    Stage HST frames for DOLPHOT: splitgroups -> mask -> calcsky -> paramfile.
 
     Pipeline order is preserved per frame family:
 
     1. WFPC2 MEF ``wfpc2mask`` (needs ``c1m``) before split
-    2. ``splitgroups`` on each MEF → ``*.chipN.fits``
+    2. ``splitgroups`` on each MEF -> ``*.chipN.fits``
     3. ACS/WFC3 ``*mask`` on chip products (WFPC2 chips inherit BADPIX)
     4. ``calcsky`` on each chip / frame
-    5. Coadd reference mask + calcsky (img0) — **skipped** for JWST/NIRCam
+    5. Coadd reference mask + calcsky (img0) - **skipped** for JWST/NIRCam
        references (warmstart); reuse an existing ``.sky.fits`` sidecar
 
-    Steps 1–4 fan out across independent files with a thread pool of size
+    Steps 1-4 fan out across independent files with a thread pool of size
     ``ncores``; stages still run strictly in the order above.
 
     Parameters
@@ -1816,9 +1876,16 @@ def prepare_hst_frames(
 
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    src_files = [Path(p) for p in files]
+    from st123.datamodels.hst import filter_paths_for_stage
+
+    src_files = filter_paths_for_stage(
+        [Path(p) for p in files],
+        stage='dolphot-prep',
+    )
     if not src_files:
-        raise ValueError('prepare_hst_frames requires at least one science frame')
+        raise ValueError(
+            'prepare_hst_frames: no science frames remain after EXPFLAG filtering'
+        )
     ref_src = Path(refimage) if refimage is not None else src_files[0]
     ref_is_jwst = _is_jwst_dolphot_reference(ref_src)
 
@@ -1889,7 +1956,7 @@ def prepare_hst_frames(
     for mef in science_mefs:
         _repair_zero_exptime_fits(mef)
 
-    # Map staged MEF → mask instrument.
+    # Map staged MEF -> mask instrument.
     mef_mask_inst: dict[Path, str] = {}
     for mef in science_mefs:
         mp = Path(mef)
@@ -1977,7 +2044,7 @@ def prepare_hst_frames(
         if not skip_mask:
             try:
                 # Ensure uncovered SCI is sky-filled before mask rewrites DMIN.
-                from st123.mosaic.hst_drizzle import fill_drizzle_uncovered_with_sky
+                from st123.stages.mosaic.hst_drizzle import fill_drizzle_uncovered_with_sky
 
                 fill_drizzle_uncovered_with_sky(staged_ref)
             except Exception as exc:
@@ -2036,7 +2103,7 @@ def prepare_hst_frames(
                 staged_ref.name,
             )
         # NIRCam/MIRI i2d (+ sky) are still MEFs; HST chips are single-HDU.
-        # Flatten so DOLPHOT does not abort with "Number of extensions…".
+        # Flatten so DOLPHOT does not abort with "Number of extensions...".
         # Flattened img0 is processed as EXTENSION 0; remap xyt col-1 from the
         # NIRCam SCI convention (1) so readwarm does not keep 0 stars.
         try:
@@ -2062,7 +2129,7 @@ def prepare_hst_frames(
         sci_for_param = list(work)
 
     # Rewrite L2 chip + L3 ref WCS into DOLPHOT-parseable TAN / TAN-SIP
-    # (strip orphaned Lookup/D2IM; ensure SIP ≤ order 5 + reverse coeffs).
+    # (strip orphaned Lookup/D2IM; ensure SIP <= order 5 + reverse coeffs).
     wcs_targets = [Path(p) for p in sci_for_param]
     if staged_ref.is_file():
         wcs_targets.append(Path(staged_ref))
@@ -2110,7 +2177,7 @@ def write_paramfile(
     refimage : str or os.PathLike
         Reference image path (basename written as ``img0_file``).
     images : sequence of str or os.PathLike
-        Science image paths (basenames written as ``img1_file``, …).
+        Science image paths (basenames written as ``img1_file``, ...).
     global_params : dict or None, optional
         Global DOLPHOT keywords merged into the parameter file. Defaults to
         :data:`st123.utils.settings.base_params`, with MIRI keys added when
@@ -2191,9 +2258,9 @@ def setup_paramfile(
 
     Supports NIRCam and MIRI frames and an optional warm-start ``xytfile``.
     When the science-image count exceeds the soft limit
-    (:data:`st123.photometry.dolphot_split.DOLPHOT_MAX_NIMG`, default 400),
+    (:data:`st123.stages.photometry.dolphot_split.DOLPHOT_MAX_NIMG`, default 400),
     the run is split into roughly equal parts that share the same reference
-    (see :func:`st123.photometry.dolphot_split.write_split_paramfiles`).
+    (see :func:`st123.stages.photometry.dolphot_split.write_split_paramfiles`).
 
     Parameters
     ----------
@@ -2216,7 +2283,7 @@ def setup_paramfile(
     max_nimg : int or None, optional
         Soft per-run image cap. Defaults to ``DOLPHOT_MAX_NIMG`` (400).
     return_plan : bool, optional
-        If True, return a :class:`~st123.photometry.dolphot_split.DolphotRunPlan`
+        If True, return a :class:`~st123.stages.photometry.dolphot_split.DolphotRunPlan`
         instead of the primary parameter-file path.
 
     Returns
@@ -2225,7 +2292,7 @@ def setup_paramfile(
         Primary ``dolphot.param`` path, or the full run plan when
         ``return_plan`` is True.
     """
-    from st123.photometry.dolphot_split import (
+    from st123.stages.photometry.dolphot_split import (
         DOLPHOT_MAX_NIMG,
         write_split_paramfiles,
     )
@@ -2234,9 +2301,13 @@ def setup_paramfile(
     outdir.mkdir(parents=True, exist_ok=True)
 
     if copy_files:
+        from st123.datamodels import sanitize_science_fits
+
         shutil.copy(refimage, outdir)
+        sanitize_science_fits(outdir / Path(refimage).name, materialize_headers=True)
         for src in files:
             shutil.copy(src, outdir)
+            sanitize_science_fits(outdir / Path(src).name, materialize_headers=True)
 
     staged_ref = outdir / Path(refimage).name if copy_files else Path(refimage)
     staged = (
@@ -2449,10 +2520,10 @@ MIRI_WARMSTART_XYT_TYPES = (1,)
 MIRI_WARMSTART_SNR_MIN = 10.0
 MIRI_WARMSTART_CROWD_MAX = 0.5
 MIRI_WARMSTART_SHARP2_MAX = 0.01
-# ~0.30" on a 0.031"/pix NIRCam reference → ~10 pix.
+# ~0.30" on a 0.031"/pix NIRCam reference -> ~10 pix.
 MIRI_WARMSTART_MIN_SEP_ARCSEC = 0.30
 
-# HST warmstart from NIRCam: denser fields → milder SNR / separation cuts.
+# HST warmstart from NIRCam: denser fields -> milder SNR / separation cuts.
 HST_WARMSTART_XYT_TYPES = (1,)
 HST_WARMSTART_SNR_MIN = 5.0
 HST_WARMSTART_CROWD_MAX = 0.5
@@ -2471,7 +2542,7 @@ def nearest_phot_source(
     """
     Return the *n* nearest DOLPHOT catalog rows to (*ra*, *dec*).
 
-    Uses the reference image WCS to convert sky → pixel, then sorts by
+    Uses the reference image WCS to convert sky -> pixel, then sorts by
     Euclidean distance in reference pixels. Each row dict includes global
     fit columns (x, y, chi, snr, sharp, crowd, type) plus ``dist_pix``.
 
@@ -2499,7 +2570,7 @@ def nearest_phot_source(
     data = np.loadtxt(phot)
     if data.ndim == 1:
         data = data[None, :]
-    with fits.open(refimage) as hdul:
+    with as_datamodel(refimage).open() as hdul:
         hdu = hdul['SCI'] if 'SCI' in hdul else hdul[0]
         wcs = WCS(hdu.header)
     x0, y0 = wcs.world_to_pixel(SkyCoord(ra, dec, unit='deg'))
@@ -2543,7 +2614,7 @@ def parse_param_image_list(param_file: PathLike) -> tuple[str, list[str]]:
     ref_base : str
         ``img0_file`` basename (without ``.fits``).
     image_bases : list of str
-        ``img1_file``, ``img2_file``, … basenames in parameter-file order.
+        ``img1_file``, ``img2_file``, ... basenames in parameter-file order.
 
     Raises
     ------

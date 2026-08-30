@@ -111,7 +111,7 @@ class SRegionPolygon:
         """
         Project vertices into ``wcs`` pixel coordinates.
 
-        Rejects projections whose sky→pixel→sky round-trip exceeds
+        Rejects projections whose sky->pixel->sky round-trip exceeds
         ``max_roundtrip_arcsec`` so far off-axis vertices are not treated as
         valid detector-plane footprint corners.
 
@@ -545,7 +545,7 @@ def infer_coordinate_frame(header: fits.Header, s_region: str | None = None) -> 
 
 
 def illuminated_s_region_from_fits(
-    fits_path: str | Path,
+    image,
     *,
     hdu_index: int | None = None,
     simplify_tolerance: float = 2.0,
@@ -557,12 +557,13 @@ def illuminated_s_region_from_fits(
     Build an S_REGION polygon for the right-hand illuminated region.
 
     Illuminated pixels are selected from the DQ extension (DQ < dq_threshold),
-    not from NaNs in the science image.
+    not from NaNs in the science image. WFPC2 uses the sibling ``c1m`` when
+    DQ is not in the science MEF.
 
     Parameters
     ----------
-    fits_path : str or Path
-        Path to a calibrated science FITS file.
+    image
+        Science datamodel or FITS path.
     hdu_index : int or None, optional
         Science HDU index; ``None`` selects the first 2D HDU with WCS.
     simplify_tolerance : float, optional
@@ -590,15 +591,17 @@ def illuminated_s_region_from_fits(
     valid_mask : numpy.ndarray
         Boolean mask of pixels with DQ below the threshold.
     """
-    with fits.open(fits_path) as hdulist:
+    from st123.datamodels.instrument import as_datamodel
+
+    model = as_datamodel(image)
+    with model.open() as hdulist:
         if hdu_index is None:
             hdu_index, hdu = find_image_hdu(hdulist)
         else:
             hdu = hdulist[hdu_index]
 
-        dq_hdu = find_dq_hdu(hdulist, hdu, hdu_index)
+        dq = np.asarray(model.matching_dq_array(hdulist, hdu, hdu_index))
         data = np.asarray(hdu.data, dtype=float)
-        dq = np.asarray(dq_hdu.data)
         header = hdu.header
         wcs = WCS(header)
         frame = infer_coordinate_frame(header, header.get("S_REGION"))
@@ -623,7 +626,7 @@ def illuminated_s_region_from_fits(
 
 
 def illuminated_s_region_string(
-    fits_path: str | Path,
+    image,
     *,
     hdu_index: int | None = None,
     simplify_tolerance: float = 2.0,
@@ -637,8 +640,8 @@ def illuminated_s_region_string(
 
     Parameters
     ----------
-    fits_path : str or Path
-        Path to a calibrated science FITS file.
+    image
+        Science datamodel or FITS path.
     hdu_index : int or None, optional
         Science HDU index; ``None`` selects the first 2D HDU with WCS.
     simplify_tolerance : float, optional
@@ -658,7 +661,7 @@ def illuminated_s_region_string(
         ``POLYGON <frame> ra dec ...`` header value.
     """
     s_region_polygon, _, _, _, _, _ = illuminated_s_region_from_fits(
-        fits_path,
+        image,
         hdu_index=hdu_index,
         simplify_tolerance=simplify_tolerance,
         adjacency_pixels=adjacency_pixels,
