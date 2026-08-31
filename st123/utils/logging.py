@@ -27,6 +27,7 @@ import os
 import subprocess
 import time
 import uuid
+import warnings
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,69 @@ _QUIET_THIRD_PARTY = (
     'astropy',
     'ccdproc',
 )
+_RUNTIME_WARNINGS_CONFIGURED = False
+
+
+def configure_runtime_warnings() -> None:
+    """
+    Silence known-noisy third-party warnings during mosaic / Image3 / WCS I/O.
+
+    Safe to call repeatedly (re-applies filters). Does **not** import Astropy
+    (so logging setup can stay ahead of ``AstropyLogger`` registration).
+    Covers:
+    * ``FITSFixedWarning`` text (``datfix`` / ``obsfix`` / header-only stamp)
+    * Astropy sigma-clip chatter on NaN edges from JWST resample
+    * NumPy ``nanvar`` empty-slice RuntimeWarnings from those same clips
+    * Deprecated ``photutils.psf.matching`` import path
+    * Astropy ``WCS.all_world2pix`` divergence on pathological HST / WFPC2 WCS
+    """
+    global _RUNTIME_WARNINGS_CONFIGURED
+
+    # Match by message so we do not import astropy.wcs here.
+    warnings.filterwarnings(
+        'ignore',
+        message=r'(?s).*\bdatfix\b.*',
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r'(?s).*\bobsfix\b.*',
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r'.*more axes \(2\) than the image.*',
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r'Input data contains invalid values.*',
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r'photutils\.psf\.matching is deprecated.*',
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r'Degrees of freedom <= 0 for slice.*',
+        category=RuntimeWarning,
+    )
+    # HST SIP / WFPC2: Astropy emits one UserWarning per failed all_world2pix
+    # iteration. Suppress globally; call sites should still use quiet=True /
+    # sky-space matching so work is not wasted on divergent solves.
+    warnings.filterwarnings(
+        'ignore',
+        message=r".*all_world2pix.*failed to converge.*",
+    )
+    warnings.filterwarnings(
+        'ignore',
+        message=r".*solution is diverging at least for one input point.*",
+    )
+    # Message-only: do not import astropy here (that registers AstropyLogger
+    # and breaks later ``import astropy``). Truncated FITS comments match
+    # this text whether or not VerifyWarning is loaded yet.
+    warnings.filterwarnings(
+        'ignore',
+        message=r'Card is too long.*',
+    )
+    _RUNTIME_WARNINGS_CONFIGURED = True
 
 _ST_FMT = '[$BOLD%(filename)s::%(lineno)d$RESET] [%(levelname)s]  %(message)s'
 _F_FMT = '[$BOLD%(asctime)s::%(filename)s::%(lineno)d$RESET] [%(levelname)s] %(message)s'
@@ -388,11 +452,14 @@ def configure_worker_logging() -> None:
 
     Reads :data:`LOG_FILE_ENV`. No-op when unset or already configured.
     Workers do not attach a StreamHandler (parent owns the console).
+    Always re-applies :func:`configure_runtime_warnings` (spawn children do not
+    inherit the parent's warning filters).
 
     Returns
     -------
     None
     """
+    configure_runtime_warnings()
     path = os.environ.get(LOG_FILE_ENV)
     if not path:
         return
@@ -462,6 +529,7 @@ def setup_script_logging(
     package_logger.addHandler(stream_handler)
     package_logger.addHandler(file_handler)
     _quiet_third_party_loggers()
+    configure_runtime_warnings()
 
     os.environ[LOG_FILE_ENV] = str(log_path)
     package_logger.info('Logging to %s', log_path)

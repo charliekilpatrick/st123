@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare NIRCam→MIRI/HST DOLPHOT warm-start runs (does not execute dolphot)."""
+"""Prepare NIRCam->MIRI/HST DOLPHOT warm-start runs (does not execute dolphot)."""
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from st123.scripts.utils.options import (
@@ -22,6 +23,30 @@ from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
 
+# Seed / free-run dirs: phot_G_B, nircam_G_B (not nircam_miri_* / nircam_hst_*).
+_SEED_DIR_RE = re.compile(
+    r'^(?:phot|nircam)_(\d+)_(.+)$',
+    re.IGNORECASE,
+)
+
+
+def group_box_from_seed_dirname(name: str) -> tuple[int, int | str]:
+    """
+    Parse ``group`` / ``box`` from a free DOLPHOT seed directory name.
+
+    Examples: ``phot_0_sn`` -> ``(0, 'sn')``; ``nircam_1_2`` -> ``(1, 2)``.
+    Falls back to ``(0, 0)`` when the name does not match.
+    """
+    match = _SEED_DIR_RE.match(Path(name).name)
+    if not match:
+        return 0, 0
+    group = int(match.group(1))
+    token = match.group(2)
+    try:
+        return group, int(token)
+    except ValueError:
+        return group, token
+
 def resolve_warmstart_targets(
     instruments: list[str] | None,
     *,
@@ -30,7 +55,7 @@ def resolve_warmstart_targets(
     """
     Map ``--instruments`` / legacy ``--target`` to warm-start target list.
 
-    ``MIRI`` → ``miri``; ``HST`` / ``ACS`` / ``WFC3`` / ``WFPC2`` → ``hst``.
+    ``MIRI`` -> ``miri``; ``HST`` / ``ACS`` / ``WFC3`` / ``WFPC2`` -> ``hst``.
     NIRCam tokens are ignored (seed catalog, not a warm-start science target).
     """
     plan = resolve_warmstart_plan(instruments, legacy_target=legacy_target)
@@ -43,7 +68,7 @@ def resolve_warmstart_plan(
     legacy_target: str | None = None,
 ) -> list[tuple[str, list[str] | None]]:
     """
-    Return ``[(target, hst_instrument_filter), …]``.
+    Return ``[(target, hst_instrument_filter), ...]``.
 
     For HST, *hst_instrument_filter* is ``None`` when the user asked for bare
     ``HST`` (all cameras), or e.g. ``['ACS', 'WFC3']`` when those were named
@@ -75,7 +100,7 @@ def resolve_warmstart_plan(
         if want_miri:
             plan.append(('miri', None))
         if want_all_hst or hst_named:
-            # Bare HST → all cameras; ACS WFC3 → those only (no WFPC2).
+            # Bare HST -> all cameras; ACS WFC3 -> those only (no WFPC2).
             hst_filter = hst_named if hst_named else None
             plan.append(('hst', hst_filter))
         if not plan:
@@ -95,9 +120,9 @@ def create_parser():
         description=(
             'Prepare a warm-start DOLPHOT directory from an existing free '
             'NIRCam (or phot_*) run (xytfile mode). Example:\n'
-            '  dolphot-warmstart-prep --instruments MIRI --base-dir "$PROJ" '
-            '--dolphot-dir "$PHOTDIR" --prune-xyt --ncores "$NCORES" -v\n'
-            'Stages overlapping MIRI or HST JHAT science against the NIRCam '
+            '  dolphot-warmstart --instruments MIRI --base-dir "$PROJ" '
+            '--ref-dir "$PHOTDIR" --prune-xyt --ncores "$NCORES" -v\n'
+            'Stages overlapping MIRI or HST JHAT science against the seed '
             'reference. Does not execute dolphot (use run-dolphot afterward).'
         ),
     )
@@ -105,9 +130,9 @@ def create_parser():
         parser,
         required=False,
         help=(
-            'Project root (…/<object> containing JWST/ or HST/, reduction/, '
-            'dolphot/). Defaults: reduction/phot_0_0 seed and '
-            'dolphot/nircam_miri_0_0 or dolphot/nircam_hst_0_0 outdirs.'
+            'Project root (.../<object> containing JWST/ or HST/, reduction/, '
+            'dolphot/). Defaults: reduction/phot_0_0 seed; outdirs inherit '
+            'group/box from --ref-dir (e.g. phot_0_sn -> nircam_miri_0_sn).'
         ),
     )
     parser.add_argument(
@@ -131,16 +156,16 @@ def create_parser():
         ),
     )
     parser.add_argument(
-        '--dolphot-dir',
-        '--nircam-dir',
-        dest='dolphot_dir',
+        '--ref-dir',
+        dest='ref_dir',
         type=str,
         default=None,
         help=(
             'Existing free DOLPHOT run directory to seed from '
             '(dolphot.param + .phot). Typically $PHOTDIR from dolphot-prep / '
-            'run-dolphot. Alias: --nircam-dir. '
-            'Default: <base-dir>/reduction/phot_0_0.'
+            'run-dolphot (e.g. reduction/phot_0_sn). '
+            'Default: <base-dir>/reduction/phot_0_0. When --outdir is omitted, '
+            'group/box are taken from this directory name.'
         ),
     )
     parser.add_argument(
@@ -149,7 +174,8 @@ def create_parser():
         default=None,
         help=(
             'Warm-start run directory to create. '
-            'Default: <base-dir>/dolphot/nircam_miri_0_0 or nircam_hst_0_0. '
+            'Default: <base-dir>/dolphot/nircam_{miri,hst}_{group}_{box} '
+            'using group/box from --ref-dir (or phot_0_0). '
             'With multiple --instruments, omit --outdir to use each default.'
         ),
     )
@@ -309,7 +335,7 @@ def _resolve_warmstart_paths(
 ) -> tuple[str, str, str | None, str | None]:
     """Return seed_dir, outdir, data_root, alignment_summary for one target."""
     target = (target or getattr(args, 'target', None) or 'miri').lower()
-    seed = getattr(args, 'dolphot_dir', None) or getattr(args, 'nircam_dir', None)
+    seed = getattr(args, 'ref_dir', None)
     if seed and args.outdir:
         data_root = (
             str(resolve_project_root(args.base_dir))
@@ -323,7 +349,7 @@ def _resolve_warmstart_paths(
 
     if args.base_dir is None and not seed:
         raise ValueError(
-            'provide --base-dir or both --dolphot-dir and --outdir'
+            'provide --base-dir or both --ref-dir and --outdir'
         )
 
     if args.base_dir is None:
@@ -334,12 +360,13 @@ def _resolve_warmstart_paths(
 
     base = Path(args.base_dir)
     seed_dir = seed or str(default_phot_dir(base))
+    group, box = group_box_from_seed_dirname(Path(seed_dir).name)
     if args.outdir:
         outdir = args.outdir
     elif target == 'hst':
-        outdir = str(default_hst_warmstart_outdir(base))
+        outdir = str(default_hst_warmstart_outdir(base, group=group, box=box))
     else:
-        outdir = str(default_warmstart_outdir(base))
+        outdir = str(default_warmstart_outdir(base, group=group, box=box))
     data_root = str(resolve_project_root(base))
     summary = args.alignment_summary
     if summary is None and target == 'miri':
@@ -390,7 +417,7 @@ def _run_one_target(
     force_xy = [force_xy_pt] if force_xy_pt is not None else None
 
     if target == 'hst':
-        from st123.photometry.warmstart import setup_hst_warmstart
+        from st123.stages.photometry.warmstart import setup_hst_warmstart
 
         result = setup_hst_warmstart(
             seed_dir,
@@ -416,7 +443,7 @@ def _run_one_target(
             ncores=args.ncores,
         )
     else:
-        from st123.photometry.warmstart import setup_miri_warmstart
+        from st123.stages.photometry.warmstart import setup_miri_warmstart
 
         result = setup_miri_warmstart(
             seed_dir,
@@ -478,10 +505,6 @@ def main(argv=None) -> int:
                 'omit --outdir to use each target default, or prep one at a time'
             )
             return 2
-
-        # Expose resolved seed path under both names for path helper / tests.
-        if getattr(args, 'dolphot_dir', None):
-            args.nircam_dir = args.dolphot_dir
 
         rc = 0
         for target, hst_instruments in plan:

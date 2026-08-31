@@ -48,7 +48,7 @@ def main(argv=None) -> int:
         import numpy as np
         import pandas as pd
 
-        from st123.photometry.catalog import create_common_catalog
+        from st123.stages.photometry.catalog import create_common_catalog
 
         photdir = args.base_dir
 

@@ -142,7 +142,7 @@ def discover_dolphot_runs(
 
 def resolve_dolphot_executable(dolphot_bin: str | Path | None = None) -> str:
     """Return path to the ``dolphot`` binary (or bare name on PATH)."""
-    from st123.photometry.dolphot import resolve_dolphot_bin
+    from st123.stages.photometry.dolphot import resolve_dolphot_bin
 
     bin_dir = resolve_dolphot_bin(dolphot_bin, required=False)
     if bin_dir is not None:
@@ -196,7 +196,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=['nircam'],
         help=(
             'Which prepared runs to execute. Mission aliases: hst (mixed HST '
-            'dirs), jwst (→ nircam), or explicit nircam|miri|acs|wfc3|wfpc2. '
+            'dirs), jwst (-> nircam), or explicit nircam|miri|acs|wfc3|wfpc2. '
             'Alias: --instrument.'
         ),
     )
@@ -318,7 +318,7 @@ def _write_run_hdf5(
     force: bool = False,
 ) -> Path | None:
     """Write compressed HDF5 for one finished run; return path or None."""
-    from st123.photometry.dolphot_catalog_hdf5 import ensure_dolphot_catalog_hdf5
+    from st123.stages.photometry.dolphot_catalog_hdf5 import ensure_dolphot_catalog_hdf5
 
     return ensure_dolphot_catalog_hdf5(
         run.outdir,
@@ -326,6 +326,47 @@ def _write_run_hdf5(
         force=force,
         compression=True,
     )
+
+
+def _assert_run_hst_quality(run: DolphotRun) -> None:
+    """
+    Refuse to launch when staged HST science frames fail the EXPFLAG gate.
+
+    JWST-only dirs (no HST science suffixes) pass through. Call after prep so
+    remosaic / re-prep is the recovery path.
+    """
+    from st123.datamodels.hst import (
+        filter_good_hst_frames,
+        is_hst_science_path,
+        log_rejected_hst_frames,
+    )
+    from st123.stages.photometry.dolphot import parse_param_image_list
+
+    param = run.outdir / run.param_file
+    if not param.is_file():
+        return
+    try:
+        _ref, bases = parse_param_image_list(param)
+    except Exception:
+        return
+    paths: list[Path] = []
+    for base in bases:
+        for cand in (
+            run.outdir / f'{base}.fits',
+            run.outdir / base,
+        ):
+            if cand.is_file() and is_hst_science_path(cand):
+                paths.append(cand)
+                break
+    if not paths:
+        return
+    _kept, rejected = filter_good_hst_frames(paths)
+    if rejected:
+        log_rejected_hst_frames(rejected, stage=f'run-dolphot:{run.label}')
+        raise RuntimeError(
+            f'{run.label}: {len(rejected)} staged HST frame(s) fail EXPFLAG; '
+            f're-run dolphot-prep after filtering raw/jhat'
+        )
 
 
 def _format_command(run: DolphotRun, *, ncores: int, dolphot_bin: str | None) -> str:
@@ -431,6 +472,11 @@ def main(argv=None) -> int:
                 run, ncores=ncores, dolphot_bin=args.dolphot_bin
             )
             logger.info('  [%s] %s', run.label, cmd)
+            try:
+                _assert_run_hst_quality(run)
+            except RuntimeError as exc:
+                logger.error('%s', exc)
+                return 1
 
         if args.dry_run:
             logger.info(
@@ -466,7 +512,7 @@ def main(argv=None) -> int:
                 )
             logger.info(
                 'Background launch done (%d process(es)); run-dolphot exiting. '
-                'HDF5 sidecars are not written in background mode — run '
+                'HDF5 sidecars are not written in background mode - run '
                 'dolphot-hdf5 --base-dir %s after jobs finish.',
                 len(procs),
                 args.base_dir,
@@ -502,7 +548,7 @@ def main(argv=None) -> int:
                 if rc != 0:
                     continue
                 try:
-                    from st123.photometry.dolphot_catalog_hdf5 import (
+                    from st123.stages.photometry.dolphot_catalog_hdf5 import (
                         hdf5_path_for_phot_base,
                         phot_catalog_base_for_run,
                     )

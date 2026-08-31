@@ -10,7 +10,7 @@ from astropy.io import fits
 from astropy.table import Table
 
 from helpers import make_wcs_header
-from st123.alignment import align as align_lib
+from st123.stages.alignment import align as align_lib
 from st123.scripts import align as align_script
 from st123.scripts.utils.options import add_pair_align_args, create_parser as build_parser
 
@@ -145,7 +145,7 @@ def test_align_pair_main_success(tmp_path: Path):
     fits.PrimaryHDU(np.ones((5, 5))).writeto(ref)
     fits.PrimaryHDU(np.ones((5, 5))).writeto(image)
     with patch(
-        'st123.alignment.align.run_alignment',
+        'st123.stages.alignment.align.run_alignment',
         return_value=((0.1, -0.2), str(tmp_path / 'out')),
     ):
         rc = align_script.main(

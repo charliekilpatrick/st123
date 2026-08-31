@@ -11,14 +11,14 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
 
-from st123.mosaic.footprints import (
+from st123.stages.mosaic.footprints import (
     build_weight_pgons,
     collect_footprint_weight_paths,
     project_sky_polygons_to_wcs,
     sky_polygons_from_fits,
 )
-from st123.mosaic.hst_drizzle import drizzle_project, group_hst_frames
-from st123.mosaic.mosaic import split_observations
+from st123.stages.mosaic.hst_drizzle import drizzle_project, group_hst_frames
+from st123.stages.mosaic.mosaic import split_observations
 from st123.scripts import mosaic as mosaic_script
 
 
@@ -131,7 +131,7 @@ def test_mosaic_resolve_instruments_all():
 
 
 def test_orchestrated_mosaic_runs_jwst_and_hst_sequential(tmp_path):
-    from st123.mosaic.mosaic import MosaicPlan
+    from st123.stages.mosaic.mosaic import MosaicPlan
 
     calls: list[str] = []
 
@@ -174,7 +174,7 @@ def test_orchestrated_mosaic_runs_jwst_and_hst_sequential(tmp_path):
             side_effect=lambda base, mission: [f'/{mission}_a_jhat.fits'],
         ),
         patch(
-            'st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
+            'st123.stages.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
         ),
         patch.object(mosaic_script, '_run_jwst_mosaic', side_effect=_jwst),
         patch.object(mosaic_script, '_run_hst_mosaic', side_effect=_hst),
@@ -190,7 +190,7 @@ def test_orchestrated_mosaic_runs_jwst_and_hst_sequential(tmp_path):
     assert any(c.endswith(':8:plan=True') for c in calls if c.startswith('jwst:'))
     assert any(c.endswith(':8:plan=True') for c in calls if c.startswith('hst:'))
     jwst_call = next(c for c in calls if c.startswith('jwst:'))
-    # Default: no --filters → per-box "all present" (forced_filters=None).
+    # Default: no --filters -> per-box "all present" (forced_filters=None).
     assert jwst_call.startswith('jwst::')
 
 
@@ -251,7 +251,7 @@ def test_collect_miri_raw_only_when_no_miri_jhat(tmp_path: Path):
         raw / 'jw01234567001_02101_00001_mirimage_cal.fits',
         s_region=region,
     )
-    # No MIRI JHAT yet → raw counts
+    # No MIRI JHAT yet -> raw counts
     found = collect_footprint_weight_paths(work)
     assert found == [raw_miri.resolve()]
 
@@ -283,7 +283,7 @@ def test_boxsplit_weights_force_earlier_split():
         shapely.box(0, 20, 10, 30),
         shapely.box(20, 20, 30, 30),
     ]
-    # Weights cover the same areas → each science frame has a twin weight.
+    # Weights cover the same areas -> each science frame has a twin weight.
     weight_pgons = [shapely.box(*p.bounds) for p in sci_pgons]
 
     table = Table({'image': [f'/fake/sci_{i}.fits' for i in range(4)]})
@@ -294,7 +294,7 @@ def test_boxsplit_weights_force_earlier_split():
     w.wcs.crval = [180.0, 0.0]
     w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
 
-    # Without weights: 4 science < N_max=6 → one box
+    # Without weights: 4 science < N_max=6 -> one box
     split_plain = split_observations(
         table=table,
         N_max=6,
@@ -305,7 +305,7 @@ def test_boxsplit_weights_force_earlier_split():
     split_plain.boxsplit()
     assert len(split_plain.split_boxes) == 1
 
-    # With weights: 4 sci + 4 weight = 8 >= 6 → must split
+    # With weights: 4 sci + 4 weight = 8 >= 6 -> must split
     split_w = split_observations(
         table=table,
         N_max=6,
@@ -334,8 +334,8 @@ def test_build_weight_pgons_projects_sky(tmp_path: Path):
 
 
 def test_drizzle_project_instruments_empty_when_only_wfpc2(tmp_path: Path):
-    """--instruments ACS WFC3 with only WFPC2 JHAT → no groups."""
-    from st123.mosaic.mosaic import MosaicBox, MosaicPlan
+    """--instruments ACS WFC3 with only WFPC2 JHAT -> no groups."""
+    from st123.stages.mosaic.mosaic import MosaicBox, MosaicPlan
 
     jhat = tmp_path / 'jhat_hst'
     out = tmp_path / 'reference'
@@ -360,7 +360,7 @@ def test_drizzle_project_instruments_empty_when_only_wfpc2(tmp_path: Path):
         table=Table(),
         boxes=[box],
     )
-    with patch('st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan):
+    with patch('st123.stages.mosaic.mosaic.plan_mosaic_boxes', return_value=plan):
         results = drizzle_project(
             jhat, out, instruments=['ACS', 'WFC3'], num_cores=1
         )
@@ -368,7 +368,7 @@ def test_drizzle_project_instruments_empty_when_only_wfpc2(tmp_path: Path):
 
 
 def test_drizzle_project_instruments_skips_wfpc2(tmp_path: Path):
-    from st123.mosaic.mosaic import MosaicBox, MosaicPlan, mosaic_hst_coadd_basename
+    from st123.stages.mosaic.mosaic import MosaicBox, MosaicPlan, mosaic_hst_coadd_basename
 
     jhat = tmp_path / 'jhat_hst'
     out = tmp_path / 'reference'
@@ -390,14 +390,6 @@ def test_drizzle_project_instruments_skips_wfpc2(tmp_path: Path):
         hdul[0].header['FILTNAM1'] = 'F814W'
 
     coadd = box_outdir / mosaic_hst_coadd_basename(0, 5, 'acs', 'f814w')
-    harm = {
-        'ok': True,
-        'method': 'single',
-        'anchor': str(acs),
-        'pre': {'max_abs_arcsec': 0.01},
-        'post': {'max_abs_arcsec': 0.01},
-    }
-    qa = {'ok': True, 'max_abs_arcsec': 0.01, 'failed_pairs': [], 'scope': 'full_group'}
     box = MosaicBox(
         group_id=0,
         box_id=5,
@@ -413,26 +405,31 @@ def test_drizzle_project_instruments_skips_wfpc2(tmp_path: Path):
     )
 
     with (
-        patch('st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan),
+        patch('st123.stages.mosaic.mosaic.plan_mosaic_boxes', return_value=plan),
         patch(
-            'st123.alignment.hst_jhat.find_hst_l3_refcat', return_value=None
+            'st123.stages.alignment.hst_jhat.find_hst_l3_refcat', return_value=None
         ),
         patch(
-            'st123.alignment.hst_jhat.harmonize_hst_group_wcs', return_value=harm
+            'st123.stages.alignment.hst_jhat.heal_hst_partial_chip_refine',
+            return_value={'n_healed': 0, 'n_failed': 0, 'frames': []},
         ),
         patch(
-            'st123.alignment.hst_jhat.validate_hst_group_internal_alignment',
-            return_value=qa,
+            'st123.stages.alignment.hst_jhat.validate_hst_multi_sci_chip_refine',
+            return_value={'ok': True, 'n_failed': 0, 'frames': []},
         ),
         patch(
-            'st123.mosaic.hst_drizzle.drizzle_filter_group', return_value=coadd
+            'st123.stages.alignment.hst_jhat.validate_hst_coadds_alignment',
+            return_value={
+                'ok': True,
+                'max_abs_arcsec': 0.01,
+                'failed_pairs': [],
+            },
+        ),
+        patch(
+            'st123.stages.mosaic.hst_drizzle.drizzle_filter_group', return_value=coadd
         ) as mock_driz,
         patch(
-            'st123.mosaic.hst_drizzle._write_group_frame_list', return_value=None
-        ),
-        patch(
-            'st123.mosaic.hst_drizzle.unify_hst_astrometric_frame',
-            return_value={'ok': True},
+            'st123.stages.mosaic.hst_drizzle._write_group_frame_list', return_value=None
         ),
     ):
         results = drizzle_project(

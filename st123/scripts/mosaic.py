@@ -25,10 +25,7 @@ from st123.scripts.utils.options import (
     resolve_reduction_dir,
 )
 from st123.utils.logging import shutdown_logging
-from st123.utils.settings import (
-    DEFAULT_MIRI_MOSAIC_FILTERS,
-    DEFAULT_NIRCAM_MOSAIC_FILTERS,
-)
+from st123.datamodels import MIRIDataModel, NIRCamDataModel, as_datamodel
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +49,7 @@ def create_parser():
         default=None,
         help=(
             'Mission shorthand, equivalent to the default --instruments set: '
-            'hst → ACS WFC3 WFPC2; jwst → NIRCAM MIRI. When omitted, mosaics '
+            'hst -> ACS WFC3 WFPC2; jwst -> NIRCAM MIRI. When omitted, mosaics '
             'JWST JHAT frames onto shared stamps (or use --instruments).'
         ),
     )
@@ -61,7 +58,7 @@ def create_parser():
         required=False,
         default='.',
         help=(
-            'Project root (…/<object>) or reduction workdir. Coadds are '
+            'Project root (.../<object>) or reduction workdir. Coadds are '
             'written under <reduction>/reference/. Aliases: --basedir, '
             '--workdir, --data-dir.'
         ),
@@ -81,7 +78,7 @@ def create_parser():
         '--full-group',
         action='store_true',
         help=(
-            'Skip overlap box-splitting (ref_0, ref_1, …). For each group, '
+            'Skip overlap box-splitting (ref_0, ref_1, ...). For each group, '
             'mosaic every JHAT frame of each filter into one coadd under '
             'reference/group_<G>/ref_full/ (JWST: coadd_<G>_full_<filter>_i2d.fits; '
             'HST: coadd_<G>_full_<inst>_<filter>_drc.fits).'
@@ -126,11 +123,10 @@ def create_parser():
     add_filters(
         parser,
         help=(
-            'Comma-separated filter list to mosaic (e.g. F150W,F444W,F560W). '
+            'Comma-separated filter list to mosaic (e.g. F150W,F444W,F160W). '
             'When omitted: mosaic every JWST filter present in each shared '
-            'stamp (``stamp_wcs.fits``), with NIRCam harmonize + coadd unify. '
-            'When set, each listed filter is mosaicked separately onto that '
-            'same sky footprint with the JWST-recommended pixel scale. JWST only.'
+            'stamp, and every HST instrument+filter group. When set, only '
+            'matching JWST and/or HST filters are mosaicked onto the stamp.'
         ),
     )
     parser.add_argument(
@@ -155,57 +151,133 @@ def create_parser():
         help='Only mosaic boxes whose sky footprint contains this Dec (deg).',
     )
     parser.add_argument(
-        '--existing-box',
-        type=str,
-        default=None,
+        '--require-coverage',
+        action='store_true',
         help=(
-            'Remosaic a single existing reference/group_*/ref_* directory, '
-            'keeping its on-disk i2d stamp WCS (avoids box renumbering from '
-            're-planning). Example: reduction/reference/group_0/ref_5'
+            'For auto-split ref_* boxes only: keep frames that cover a sky '
+            'point (--contains-ra/dec or the stamp center). Implied already '
+            'for --center-ra/dec custom stamps and --existing-box remosaics '
+            '(those modes always drop frames outside the stamp FoV / center).'
         ),
     )
     parser.add_argument(
-        '--center-ra',
+        '--require-coverage-ra',
         type=float,
         default=None,
         help=(
-            'Build one custom stamp centered on this RA (deg), same on-sky '
-            'size as a typical NIRCam SW stamp (or --stamp-size). Use with '
-            '--center-dec when a target sits near an auto-split stamp edge.'
+            'RA (deg) that every input frame must cover (with '
+            '--require-coverage-dec). Overrides the implied stamp center for '
+            '--center-ra/dec / --existing-box.'
         ),
     )
     parser.add_argument(
-        '--center-dec',
+        '--require-coverage-dec',
         type=float,
         default=None,
-        help='Declination (deg) for --center-ra custom stamp.',
-    )
-    parser.add_argument(
-        '--stamp-size',
-        type=str,
-        default=None,
         help=(
-            'Custom stamp size in arcsec: S (square) or W,H. Default ~68x51 '
-            'or the size of --stamp-ref when given.'
+            'Dec (deg) that every input frame must cover (with '
+            '--require-coverage-ra). Overrides the implied stamp center for '
+            '--center-ra/dec / --existing-box.'
         ),
     )
     parser.add_argument(
-        '--stamp-ref',
-        type=str,
-        default=None,
+        '--visit-coadds',
+        action='store_true',
         help=(
-            'Optional coadd/i2d or stamp_wcs.fits whose orientation and pixel '
-            'scale are copied into the --center-ra/dec stamp.'
+            'HST only: also write visit-tagged sidecars '
+            '(coadd_*_<visit>_drc/drz.fits). Default is one combined coadd '
+            'per instrument+filter (all visits stacked), like NIRCam.'
         ),
     )
     parser.add_argument(
-        '--stamp-id',
-        type=str,
-        default='sn',
-        help='Box id for --center-ra/dec stamp (directory ref_<id>; default sn).',
+        '--drop-outlier-visits',
+        action='store_true',
+        help=(
+            'HST only: drop cross-visit outliers from the primary '
+            'instrument+filter stack. Recommended when remosaicing multi-epoch '
+            'fields (e.g. --existing-box). Default keeps all visits in the '
+            'combined coadd. Bad EXPFLAG frames are always excluded.'
+        ),
     )
     add_common_runtime(parser, ncores=True, ncores_default=4, plot=False, verbose=True)
     return parser
+
+
+
+def resolve_existing_box_path(
+    base_dir: str | Path,
+    existing_box: str | Path,
+) -> Path:
+    """
+    Resolve ``--existing-box`` under a reduction workdir or project root.
+
+    Relative values are tried as ``<base>/<path>``, ``<base>/reference/<path>``,
+    and the ``reduction/`` variants of those (canonical ``group_*/ref_*``).
+    Absolute paths are returned unchanged when they exist as directories.
+    """
+    from st123.stages.mosaic.mosaic import resolve_existing_box_dir
+
+    return resolve_existing_box_dir(base_dir, existing_box)
+
+
+def _resolve_coverage_sky(
+    args,
+    *,
+    plan=None,
+    box=None,
+) -> tuple[float | None, float | None]:
+    """
+    Sky point that every JHAT frame must cover, or ``(None, None)``.
+
+    Priority:
+
+    1. Explicit ``--require-coverage-ra/dec``
+    2. ``--center-ra/dec`` (implied for custom stamps)
+    3. Stamp center when ``--existing-box`` remosaics a shared FoV
+    4. Opt-in ``--require-coverage`` for auto-split boxes (uses
+       ``--contains-ra/dec`` or the stamp center)
+
+    Custom ``--center-ra/dec`` stamps and ``--existing-box`` remosaics always
+    filter frames to the stamp FoV (and its center); ``--require-coverage`` is
+    only needed for auto-planned ``ref_*`` boxes.
+    """
+    ra = getattr(args, 'require_coverage_ra', None)
+    dec = getattr(args, 'require_coverage_dec', None)
+    if ra is not None and dec is not None:
+        return float(ra), float(dec)
+    if (ra is None) ^ (dec is None):
+        raise ValueError(
+            '--require-coverage-ra and --require-coverage-dec must be given together'
+        )
+
+    cra = getattr(args, 'center_ra', None)
+    cdec = getattr(args, 'center_dec', None)
+    if cra is not None and cdec is not None:
+        return float(cra), float(cdec)
+
+    from st123.stages.mosaic.mosaic import stamp_sky_center
+
+    def _stamp_center() -> tuple[float | None, float | None]:
+        target = box
+        if target is None and plan is not None and getattr(plan, 'boxes', None):
+            target = plan.boxes[0]
+        if target is not None and getattr(target, 'wcs', None) is not None:
+            return stamp_sky_center(target.wcs)
+        return None, None
+
+    # --existing-box: match the on-disk stamp FoV; require its center.
+    if getattr(args, 'existing_box', None):
+        return _stamp_center()
+
+    if not bool(getattr(args, 'require_coverage', False)):
+        return None, None
+
+    cra = getattr(args, 'contains_ra', None)
+    cdec = getattr(args, 'contains_dec', None)
+    if cra is not None and cdec is not None:
+        return float(cra), float(cdec)
+
+    return _stamp_center()
 
 
 def _parse_stamp_size(raw: str | None) -> float | tuple[float, float] | None:
@@ -223,16 +295,15 @@ def _parse_stamp_size(raw: str | None) -> float | tuple[float, float] | None:
 
 def _load_stamp_ref_wcs(path: str | Path):
     """Load a WCS from stamp_wcs.fits or a coadd SCI extension."""
-    from astropy.io import fits
     from astropy.wcs import WCS
 
-    from st123.mosaic.mosaic import STAMP_WCS_BASENAME, load_stamp_wcs
+    from st123.stages.mosaic.mosaic import STAMP_WCS_BASENAME, load_stamp_wcs
 
     p = Path(path)
     if p.is_dir():
         return load_stamp_wcs(p)
     if p.name == STAMP_WCS_BASENAME or p.suffix.lower() == '.fits':
-        with fits.open(p) as hdul:
+        with as_datamodel(p).open() as hdul:
             if 'SCI' in hdul:
                 sci = hdul['SCI']
                 w = WCS(sci.header, naxis=2)
@@ -254,7 +325,7 @@ def _filter_plan_boxes(plan, args):
     """Restrict *plan.boxes* by --box-id and/or --contains-ra/dec."""
     from shapely.geometry import Point
 
-    from st123.mosaic.mosaic import stamp_sky_polygon
+    from st123.stages.mosaic.mosaic import stamp_sky_polygon
 
     boxes = list(plan.boxes)
     box_ids = getattr(args, 'box_id', None)
@@ -348,9 +419,9 @@ def default_jwst_filters_for_instruments(jwst_instruments: list[str]) -> list[st
     filters: list[str] = []
     upper = {str(i).upper() for i in jwst_instruments}
     if 'NIRCAM' in upper or 'NRC' in upper:
-        filters.extend(DEFAULT_NIRCAM_MOSAIC_FILTERS)
+        filters.extend(NIRCamDataModel.MOSAIC_FILTERS)
     if 'MIRI' in upper:
-        filters.extend(DEFAULT_MIRI_MOSAIC_FILTERS)
+        filters.extend(MIRIDataModel.MOSAIC_FILTERS)
     # Preserve order, drop dupes
     out: list[str] = []
     for f in filters:
@@ -399,9 +470,10 @@ def _run_hst_mosaic(
     instruments: list[str] | None = None,
     ncores: int | None = None,
     plan=None,
+    filters: list[str] | None = None,
 ) -> int:
     """AstroDrizzle HST frames into ``reference/group_*/ref_*`` boxes."""
-    from st123.mosaic.hst_drizzle import drizzle_project, drizzle_project_boxed
+    from st123.stages.mosaic.hst_drizzle import drizzle_project, drizzle_project_boxed
     from st123.utils.logging import _quiet_third_party_loggers
 
     _quiet_third_party_loggers()
@@ -413,15 +485,21 @@ def _run_hst_mosaic(
     if instruments is None:
         instruments = parse_instruments(getattr(args, 'instruments', None))
     cores = int(args.ncores if ncores is None else ncores)
+    if filters is None:
+        filters = parse_filter_list(getattr(args, 'filters', None))
+        if filters:
+            filters = [f.lower() for f in filters]
     if args.verbose:
         logger.info('Dataset: %s', dataset_label(args.base_dir))
         logger.info(
-            'HST drizzle: %s → %s/group_*/ref_*',
+            'HST drizzle: %s -> %s/group_*/ref_*',
             jhat_dir,
             base_dir / 'reference',
         )
         if instruments:
             logger.info('HST instruments: %s', ', '.join(instruments))
+        if filters:
+            logger.info('HST filters: %s', ', '.join(filters))
     if not jhat_dir.is_dir():
         logger.error('missing jhat_hst/ or jhat/ under %s', base_dir)
         return 1
@@ -433,18 +511,33 @@ def _run_hst_mosaic(
                 base_dir / 'reference',
                 num_cores=cores,
                 instruments=instruments,
+                filters=filters,
                 nmax=int(getattr(args, 'nmax', 150) or 150),
                 full_group=bool(getattr(args, 'full_group', False)),
                 footprint_weights=str(
                     getattr(args, 'footprint_weights', 'auto')
                 ),
+                drop_outlier_visits=bool(
+                    getattr(args, 'drop_outlier_visits', False)
+                ),
+                visit_coadds=bool(getattr(args, 'visit_coadds', False)),
+                require_coverage_ra=getattr(args, '_cov_ra', None),
+                require_coverage_dec=getattr(args, '_cov_dec', None),
             )
         else:
             results = drizzle_project_boxed(
                 plan,
                 instruments=instruments,
+                filters=filters,
                 num_cores=cores,
-                raise_on_unify_fail=True,
+                raise_on_unify_fail=False,
+                assume_aligned=True,
+                drop_outlier_visits=bool(
+                    getattr(args, 'drop_outlier_visits', False)
+                ),
+                visit_coadds=bool(getattr(args, 'visit_coadds', False)),
+                require_coverage_ra=getattr(args, '_cov_ra', None),
+                require_coverage_dec=getattr(args, '_cov_dec', None),
             )
     except RuntimeError as exc:
         logger.error('%s', exc)
@@ -457,7 +550,7 @@ def _run_hst_mosaic(
     for r in results:
         if r['status'] == 'ok':
             logger.info(
-                'OK %s/%s → %s (%d frames)',
+                'OK %s/%s -> %s (%d frames)',
                 r['instrument'],
                 r['filter'],
                 r['output'],
@@ -476,13 +569,17 @@ def _run_hst_mosaic(
 
 def _box_wcs_header(mosaic_wcs, bbox, *, box=None):
     """Resolve the shared stamp WCS (and header) for one mosaic box."""
-    from st123.mosaic.mosaic import ensure_box_stamp_wcs, slice_box_wcs
+    from st123.stages.mosaic.mosaic import (
+        _ensure_pc_cdelt_header,
+        ensure_box_stamp_wcs,
+        slice_box_wcs,
+    )
 
     if box is not None:
         box_wcs = ensure_box_stamp_wcs(box, mosaic_wcs=mosaic_wcs, bbox=bbox)
     else:
         box_wcs = slice_box_wcs(mosaic_wcs, bbox)
-    wcs_hdr = box_wcs.to_header()
+    wcs_hdr = _ensure_pc_cdelt_header(box_wcs.to_header(), box_wcs)
     naxis1, naxis2 = box_wcs.pixel_shape or (
         int(box_wcs._naxis[0]),
         int(box_wcs._naxis[1]),
@@ -492,7 +589,7 @@ def _box_wcs_header(mosaic_wcs, bbox, *, box=None):
 
 
 def _forced_filter_tables(reftable, forced_filters: list[str]) -> dict:
-    """Build a non-empty filter→table map for requested filters present in box."""
+    """Build a non-empty filter->table map for requested filters present in box."""
     from st123.utils.helpers import create_filter_table
 
     available = {str(f).lower() for f in reftable['filter']}
@@ -521,7 +618,7 @@ def _run_default_sw_coadd(
     verbose: bool,
 ) -> str:
     """Optimal SW-filter selection path: PSF-match and write one coadd."""
-    from st123.mosaic.mosaic import (
+    from st123.stages.mosaic.mosaic import (
         apply_wcs_to_coadd,
         coadd,
         convolve_images,
@@ -585,31 +682,28 @@ def _run_forced_filter_coadds(
     subimages,
     base_dir_arg,
     verbose: bool,
+    ncores: int = 1,
 ) -> list[str]:
     """
     Mosaic each requested filter onto the shared sky footprint.
 
     Pixel scale follows JWST channel recommendations; RA/Dec coverage matches
-    ``box_wcs``.
+    ``box_wcs``. When ``ncores > 1``, per-filter ``Image3Pipeline`` runs are
+    parallelized (each filter still uses a single Image3 process internally).
     """
-    from st123.mosaic.mosaic import (
+    from st123.stages.mosaic.mosaic import (
         JWST_ALIGN_MAX_ARCSEC,
-        apply_wcs_to_coadd,
-        coadd,
+        _ensure_pc_cdelt_header,
         copy_files,
-        create_coadd_mosaic,
-        create_gwcs,
-        harmonize_jwst_frames_to_ref,
-        mosaic_coadd_basename,
         mosaic_pixel_scale_arcsec,
-        rescale_wcs_to_pixel_scale,
+        run_jwst_filter_image3_jobs,
         unify_jwst_astrometric_frame,
         update_path,
         write_dolphot_frame_list,
     )
 
-    # Copy JHAT frames into the box first, then harmonize *those* copies onto
-    # a shared absolute frame (never mutate the global jhat/ store).
+    # Copy JHAT frames into the box (never mutate the global jhat/ store).
+    # Alignment is owned by ``align``; mosaic only coadds onto the stamp WCS.
     out_path = Path(box_outdir)
     local_tables: dict = {}
     for filter_name, ftable in filter_table.items():
@@ -617,100 +711,53 @@ def _run_forced_filter_coadds(
         copy_files(single, box_outdir)
         local_tables[filter_name] = update_path(single, box_outdir)[filter_name]
 
-    abs_ref = None
-    for name in (
-        'coadd_*_f200w_i2d.fits',
-        'coadd_*_f150w2_i2d.fits',
-        'coadd_*_f150w_i2d.fits',
-    ):
-        cands = sorted(out_path.glob(name))
-        if cands:
-            abs_ref = cands[0]
-            break
-    if abs_ref is None:
-        for key in ('f200w', 'f150w2', 'f150w'):
-            if key in local_tables and len(local_tables[key]) > 0:
-                abs_ref = Path(str(local_tables[key]['image'][0]))
-                break
-    if abs_ref is not None:
-        # NIRCam↔NIRCam only: MIRI vs F200W rarely yields usable matches.
-        nircam_frames = []
-        for fname, ftable in local_tables.items():
-            inst0 = str(ftable['instrument'][0]).lower()
-            if inst0 in {'nircam', 'nrc'} or (
-                str(fname).lower().startswith('f')
-                and str(fname).lower()
-                not in {
-                    'f560w',
-                    'f770w',
-                    'f1000w',
-                    'f1130w',
-                    'f1280w',
-                    'f1500w',
-                    'f1800w',
-                    'f2100w',
-                    'f2550w',
-                }
-            ):
-                if inst0.startswith('mir'):
-                    continue
-                nircam_frames.extend(str(p) for p in ftable['image'])
-        if nircam_frames:
-            harm = harmonize_jwst_frames_to_ref(
-                nircam_frames,
-                abs_ref,
-                max_residual_arcsec=JWST_ALIGN_MAX_ARCSEC,
-                max_search_arcsec=2.0,
-                bin_arcsec=0.05,
-            )
-            logger.info(
-                'JWST pre-mosaic harmonize box %s: shifted %d NIRCam frame(s), '
-                'measure-fail %d, max|Δ|=%.1f mas (ref=%s)',
-                box_index,
-                harm.get('n_shifted', 0),
-                harm.get('n_fail_measure', 0),
-                1000.0 * float(harm.get('max_abs_arcsec') or 0.0),
-                Path(str(abs_ref)).name,
-            )
+    wcs_header = _ensure_pc_cdelt_header(box_wcs.to_header(), box_wcs)
+    naxis1, naxis2 = box_wcs.pixel_shape or (
+        int(box_wcs._naxis[0]),
+        int(box_wcs._naxis[1]),
+    )
+    wcs_header['NAXIS1'] = int(naxis1)
+    wcs_header['NAXIS2'] = int(naxis2)
 
-    written: list[str] = []
-    for filter_name, ftable in local_tables.items():
+    jobs: list[dict] = []
+    for filter_name in sorted(local_tables.keys()):
+        ftable = local_tables[filter_name]
         inst = str(ftable['instrument'][0])
         pixscale = mosaic_pixel_scale_arcsec(filter_name, inst)
-        filt_hdr = rescale_wcs_to_pixel_scale(box_wcs, pixscale)
-        gwcs_path = create_gwcs(
-            outdir=box_outdir,
-            sci_header=filt_hdr,
-            filename=f'mosaic_gwcs_{filter_name}.asdf',
+        jobs.append(
+            {
+                'filter_name': filter_name,
+                'instrument': inst,
+                'images': [str(p) for p in ftable['image']],
+                'box_outdir': box_outdir,
+                'group_id': int(group_id),
+                'box_index': box_index,
+                'wcs_header': list(wcs_header.cards),
+                'pixel_scale': float(pixscale),
+                'base_dir_arg': base_dir_arg,
+                'verbose': bool(verbose),
+            }
         )
-        if verbose:
-            logger.info(
-                'Mosaicking %s (%s) at %.3f"/pix onto shared footprint',
-                filter_name,
-                inst,
-                pixscale,
-            )
 
-        driz_image = create_coadd_mosaic(
-            ftable,
-            outdir=box_outdir,
-            filt=filter_name,
-            gwcs_file=gwcs_path,
-            pixel_scale=pixscale,
-        )
-        coadd_filename = os.path.join(
-            box_outdir,
-            mosaic_coadd_basename(group_id, box_index, filter_name),
-        )
-        coadd([driz_image], filter_name, coadd_filename)
-        apply_wcs_to_coadd(coadd_filename)
-        written.append(coadd_filename)
-        if verbose:
-            logger.info(
-                'Wrote coadd %s; run dolphot-prep --base-dir %s',
-                coadd_filename,
-                base_dir_arg,
+    results = run_jwst_filter_image3_jobs(
+        jobs, ncores=max(1, int(ncores or 1)), parallel=True
+    )
+    written: list[str] = []
+    n_fail = 0
+    for rec in results:
+        if rec.get('status') == 'ok' and rec.get('coadd'):
+            written.append(str(rec['coadd']))
+        else:
+            n_fail += 1
+            logger.error(
+                'JWST mosaic failed for filter %s: %s',
+                rec.get('filter'),
+                rec.get('error') or 'unknown',
             )
+    if n_fail and not written:
+        raise RuntimeError(
+            f'All {n_fail} JWST filter Image3 job(s) failed in box {box_index}'
+        )
 
     # One manifest per box: all JHAT frames, first coadd as DOLPHOT reference.
     if written:
@@ -721,25 +768,28 @@ def _run_forced_filter_coadds(
             group=int(group_id),
             box=box_index,
         )
+        # Report pairwise residual only -- do not remosaic / shift coadds here.
         unify = unify_jwst_astrometric_frame(
             box_outdir,
             max_residual_arcsec=JWST_ALIGN_MAX_ARCSEC,
-            remosaic=True,
+            remosaic=False,
             box_wcs=box_wcs,
+            apply_shifts=False,
         )
+        max_mas = 1000.0 * float(unify.get('final_max_abs_arcsec') or 0.0)
         if not unify.get('ok'):
             logger.warning(
-                'JWST coadd unify soft-fail for box %s (final max |Δ|=%.1f mas); '
-                'see %s',
+                'JWST coadd residual for box %s (max |Delta|=%.1f mas); '
+                'coadds kept (align owns frame) -- see %s',
                 box_index,
-                1000.0 * float(unify.get('final_max_abs_arcsec') or 0.0),
+                max_mas,
                 unify.get('qa_path'),
             )
         elif verbose:
             logger.info(
-                'JWST coadd unify OK for box %s (final max |Δ|=%.1f mas)',
+                'JWST coadd QA OK for box %s (max |Delta|=%.1f mas)',
                 box_index,
-                1000.0 * float(unify.get('final_max_abs_arcsec') or 0.0),
+                max_mas,
             )
     return written
 
@@ -754,15 +804,14 @@ def _run_jwst_mosaic(
     """JWST resample coadds into ``reference/group_*/ref_*`` boxes."""
     import numpy as np
 
-    from st123.mosaic.mosaic import (
+    from st123.stages.mosaic.mosaic import (
         plan_mosaic_boxes,
         split_observations,
     )
     from st123.scripts.utils.options import resolve_jhat_dir
     from st123.utils.helpers import input_list
 
-    # ncores reserved for future JWST worker pools (symmetric with HST).
-    _ = ncores
+    cores = int(args.ncores if ncores is None else ncores)
 
     base_dir_path = Path(resolve_reduction_dir(args.base_dir))
     base_dir = str(base_dir_path)
@@ -795,7 +844,7 @@ def _run_jwst_mosaic(
         if not inputfiles:
             logger.error(
                 'no *jhat.fits under %s. '
-                'Pass --base-dir to the dataset root (…/<object>) or the '
+                'Pass --base-dir to the dataset root (.../<object>) or the '
                 'reduction workdir that contains jhat_jwst/ or jhat/.',
                 jhat_dir,
             )
@@ -823,6 +872,37 @@ def _run_jwst_mosaic(
         jwst_frames = box.frames_for_mission('jwst')
         if not jwst_frames:
             continue
+        try:
+            cov_ra = getattr(args, '_cov_ra', None)
+            cov_dec = getattr(args, '_cov_dec', None)
+            if cov_ra is None and cov_dec is None:
+                cov_ra, cov_dec = _resolve_coverage_sky(args, plan=plan, box=box)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
+        if cov_ra is not None and cov_dec is not None:
+            from st123.stages.mosaic.mosaic import filter_frames_covering_point
+
+            before = len(jwst_frames)
+            jwst_frames = filter_frames_covering_point(
+                jwst_frames, float(cov_ra), float(cov_dec)
+            )
+            if args.verbose:
+                logger.info(
+                    'JWST coverage filter group %s box %s: %d -> %d frame(s)',
+                    box.group_id,
+                    box.box_id,
+                    before,
+                    len(jwst_frames),
+                )
+            if not jwst_frames:
+                logger.warning(
+                    'No JWST frames cover RA=%.6f Dec=%.6f in box %s; skipping',
+                    cov_ra,
+                    cov_dec,
+                    box.box_id,
+                )
+                continue
         box_table = input_list(jwst_frames)
         # Default: every filter in the shared stamp on one sky grid + unify.
         group_forced = forced_filters
@@ -870,6 +950,7 @@ def _run_jwst_mosaic(
             subimages=jwst_frames,
             base_dir_arg=args.base_dir,
             verbose=args.verbose,
+            ncores=cores,
         )
     return 0
 
@@ -884,11 +965,8 @@ def run_orchestrated_mosaic(
     Plans boxes once from the combined JWST+HST JHAT set, then runs JWST and
     HST legs sequentially into those directories (avoids nested-process deadlock).
     """
-    from st123.mosaic.mosaic import plan_mosaic_boxes
-    from st123.utils.jwst_coverage import (
-        count_jwst_frames_on_disk,
-        should_skip_miri_only_jwst,
-    )
+    from st123.datamodels import JWSTDataModel, MIRIDataModel, NIRCamDataModel
+    from st123.stages.mosaic.mosaic import plan_mosaic_boxes
 
     try:
         jwst_inst, hst_inst = partition_mosaic_instruments(instruments)
@@ -898,12 +976,21 @@ def run_orchestrated_mosaic(
 
     base_dir = Path(resolve_reduction_dir(args.base_dir))
     force_miri = bool(getattr(args, 'force_miri', False))
-    n_nrc, n_miri = count_jwst_frames_on_disk(args.base_dir)
-    if jwst_inst and should_skip_miri_only_jwst(
-        n_nrc > 0,
-        n_miri > 0,
-        jwst_inst,
-        force_miri=force_miri,
+    want_nircam = any(NIRCamDataModel.matches(i) for i in jwst_inst)
+    want_miri = any(MIRIDataModel.matches(i) for i in jwst_inst)
+    data_root = Path(args.base_dir).expanduser().resolve()
+    n_nrc, n_miri = JWSTDataModel.coverage_under(
+        data_root / 'download' / 'JWST',
+        data_root / 'reduction' / 'raw',
+        data_root / 'raw',
+    )
+    if (
+        jwst_inst
+        and not force_miri
+        and want_nircam
+        and want_miri
+        and n_miri > 0
+        and n_nrc == 0
     ):
         logger.warning(
             'MIRI-only JWST field (NIRCam frames=%d, MIRI frames=%d); '
@@ -917,7 +1004,7 @@ def run_orchestrated_mosaic(
 
     ncores = max(1, int(getattr(args, 'ncores', 4) or 4))
     user_filters = parse_filter_list(getattr(args, 'filters', None))
-    # None → every JWST filter present in each shared stamp (per-box).
+    # None -> every JWST filter present in each shared stamp (per-box).
     # Explicit --filters still restricts; curated defaults remain available via
     # default_jwst_filters_for_instruments() for callers that want that list.
     jwst_filters = None
@@ -975,19 +1062,30 @@ def run_orchestrated_mosaic(
         return 2
 
     if existing_box:
-        from st123.mosaic.mosaic import plan_existing_box
+        from st123.stages.mosaic.mosaic import plan_existing_box
 
-        box_path = Path(existing_box)
-        if not box_path.is_absolute():
-            box_path = (base_dir / box_path).resolve()
+        try:
+            box_path = resolve_existing_box_path(base_dir, existing_box)
+        except FileNotFoundError as exc:
+            logger.error('%s', exc)
+            return 2
+        # Stamp FoV + center coverage are always applied inside plan_existing_box.
+        # Optional --require-coverage-ra/dec overrides the stamp center.
+        try:
+            cov_ra, cov_dec = _resolve_coverage_sky(args)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
         plan = plan_existing_box(
             base_dir,
             box_path,
             uniq_files,
+            require_coverage_ra=cov_ra,
+            require_coverage_dec=cov_dec,
             verbose=bool(args.verbose),
         )
     elif center_ra is not None and center_dec is not None:
-        from st123.mosaic.mosaic import plan_centered_box
+        from st123.stages.mosaic.mosaic import plan_centered_box
 
         ref_wcs = None
         stamp_ref = getattr(args, 'stamp_ref', None)
@@ -1032,6 +1130,19 @@ def run_orchestrated_mosaic(
         len(plan.boxes),
         plan.reference_dir,
     )
+    try:
+        cov_ra, cov_dec = _resolve_coverage_sky(args, plan=plan)
+    except ValueError as exc:
+        logger.error('%s', exc)
+        return 2
+    args._cov_ra = cov_ra
+    args._cov_dec = cov_dec
+    if cov_ra is not None and cov_dec is not None:
+        logger.info(
+            'Frame coverage filter: RA=%.6f Dec=%.6f',
+            cov_ra,
+            cov_dec,
+        )
 
     jobs: dict[str, int] = {}
     # Sequential legs: JWST first (writes i2d anchors), then HST into same boxes.
@@ -1072,7 +1183,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     configure_logging_from_args(args, 'mosaic')
     try:
-        # --telescope hst|jwst ≡ default --instruments for that mission.
+        # --telescope hst|jwst == default --instruments for that mission.
         multi = resolve_instruments_with_telescope(
             getattr(args, 'instruments', None),
             getattr(args, 'telescope', None),

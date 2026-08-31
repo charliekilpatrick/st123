@@ -9,7 +9,7 @@ HST one-target mixed run (all cameras, best coadd as ``img0``)::
 
     dolphot-prep --instruments hst --base-dir /path/to/Target --ncores 8
 
-See README "HST one-target end-to-end" for the full download→dolphot recipe.
+See README "HST one-target end-to-end" for the full download->dolphot recipe.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from st123.scripts.utils.options import (
     resolve_project_root,
     resolve_reduction_dir,
 )
-from st123.utils.settings import BEST_REFERENCE_FILTERS, hst_base_params, miri_base_params
+from st123.datamodels import HSTDataModel, MIRIDataModel
 from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def create_parser():
             'reference/group_*/ref_*/ (and dolphot_frames.txt) and prep every '
             'mosaic box for the requested instrument. Override with '
             '--files and/or --refimage for an explicit frame list. '
-            'HST: --instruments wfc3|wfpc2|acs --base-dir … stages under '
+            'HST: --instruments wfc3|wfpc2|acs --base-dir ... stages under '
             '<project>/dolphot/<instrument>_0_0/. '
             'Mixed: --instruments hst uses all JHAT frames and the '
             'best coadd reference under dolphot/hst_0_0/.'
@@ -62,7 +62,7 @@ def create_parser():
         default=['nircam'],
         help=(
             'Instrument / mission for DOLPHOT prep (case-insensitive). '
-            'Aliases: hst (mixed ACS+WFC3+WFPC2), jwst (→ nircam), or '
+            'Aliases: hst (mixed ACS+WFC3+WFPC2), jwst (-> nircam), or '
             'explicit nircam|miri|acs|wfc3|wfpc2. Selects mask binary, '
             'calcsky defaults, and frame filtering. Alias: --instrument.'
         ),
@@ -122,8 +122,23 @@ def create_parser():
         default=None,
         help=(
             'In mosaic mode, prefer coadd_*_<filter>_*.fits (JWST i2d or '
-            'HST drc/drz) as the reference. Default: F560W when '
-            '--instruments miri, else the manifest # ref line.'
+            'HST drc/drz) as the reference. Default: F560W for MIRI; for '
+            'NIRCam, auto-prefer SW i2d (F150W2, F200W, F150W, ...).'
+        ),
+    )
+    parser.add_argument(
+        '--group',
+        type=int,
+        default=None,
+        help='Only prep this mosaic group index (default: all discovered).',
+    )
+    parser.add_argument(
+        '--box',
+        type=str,
+        default=None,
+        help=(
+            'Only prep this mosaic box id (int or label, e.g. 0 or sn). '
+            'Default: all discovered boxes.'
         ),
     )
     parser.add_argument(
@@ -148,7 +163,7 @@ def create_parser():
     parser.add_argument(
         '--skip-split',
         action='store_true',
-        help='Skip HST splitgroups (multi-extension → per-chip).',
+        help='Skip HST splitgroups (multi-extension -> per-chip).',
     )
     add_common_runtime(parser, ncores=True, ncores_default=1, plot=False, verbose=True)
     return parser
@@ -162,7 +177,7 @@ def _log_run_commands(
     dolphot_bin: str | None,
     ncores: int,
 ) -> None:
-    from st123.photometry.dolphot import dolphot_command
+    from st123.stages.photometry.dolphot import dolphot_command
 
     logger.info(
         'Run DOLPHOT with:\n  %s',
@@ -199,8 +214,8 @@ def _pick_hst_reference(
     Also accepts legacy flat ``reference/coadd_*.fits``. When *instrument* is a
     single camera (``wfc3`` / ``acs`` / ``wfpc2``), coadds whose filename
     contains that instrument are preferred. For mixed ``hst`` (or ``None``),
-    prefer WFC3 → ACS → WFPC2, then
-    :data:`~st123.utils.settings.BEST_REFERENCE_FILTERS`.
+    prefer WFC3 -> ACS -> WFPC2, then
+    :attr:`HSTDataModel.BEST_REFERENCE_FILTERS`.
     """
     ref_dir = reduction / 'reference'
     coadds: list[Path] = []
@@ -233,8 +248,8 @@ def _pick_hst_reference(
                     inst_rank = 3
             else:
                 inst_rank = 0 if (inst and inst in name) else 1
-            filt_rank = len(BEST_REFERENCE_FILTERS)
-            for i, filt in enumerate(BEST_REFERENCE_FILTERS):
+            filt_rank = len(HSTDataModel.BEST_REFERENCE_FILTERS)
+            for i, filt in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
                 if f'_{filt}_' in name:
                     filt_rank = i
                     break
@@ -243,7 +258,7 @@ def _pick_hst_reference(
                     from st123.utils.helpers import get_filter
 
                     filt = get_filter(path)
-                    for i, pref in enumerate(BEST_REFERENCE_FILTERS):
+                    for i, pref in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
                         if filt == pref:
                             filt_rank = i
                             break
@@ -259,7 +274,8 @@ def _pick_hst_reference(
 
 def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
     """Prefer jhat frames; fall back to reduction/raw calibrated products."""
-    from st123.photometry.dolphot import filter_frames_for_instrument
+    from st123.datamodels.hst import filter_paths_for_stage
+    from st123.stages.photometry.dolphot import filter_frames_for_instrument
 
     jhat_dirs = (reduction / 'jhat_hst', reduction / 'jhat')
     raw = reduction / 'raw'
@@ -281,13 +297,14 @@ def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
         files = sorted(set(files))
     else:
         files = sorted(set(files))
+    files = filter_paths_for_stage(files, stage='dolphot-collect')
     if instrument.lower() == _HST_MIXED:
         return files
     return filter_frames_for_instrument(files, instrument)
 
 
 def _run_hst(args) -> int:
-    from st123.photometry.dolphot import (
+    from st123.stages.photometry.dolphot import (
         filter_frames_for_instrument,
         prepare_hst_frames,
     )
@@ -369,7 +386,7 @@ def _run_hst(args) -> int:
 
 
 def _run_from_mosaic(args) -> int:
-    from st123.photometry.dolphot import (
+    from st123.stages.photometry.dolphot import (
         MosaicPhotJob,
         discover_mosaic_phot_jobs,
         prepare_hst_frames,
@@ -409,13 +426,28 @@ def _run_from_mosaic(args) -> int:
         phot_outdir_root=out_root,
         outdir_prefix=outdir_prefix,
     )
+    want_group = getattr(args, 'group', None)
+    want_box = getattr(args, 'box', None)
+    if want_group is not None or want_box is not None:
+        box_token = None if want_box is None else str(want_box).strip()
+        filtered = []
+        for job in jobs:
+            if want_group is not None and int(job.group) != int(want_group):
+                continue
+            if box_token is not None and str(job.box) != box_token:
+                continue
+            filtered.append(job)
+        jobs = filtered
     if not jobs:
-        if hst_mode:
+        if hst_mode and want_group is None and want_box is None:
             # Legacy / no-box fallback: stage a single HST phot dir.
             return _run_hst(args)
         logger.error(
-            'no mosaic coadds / dolphot_frames.txt under %s',
+            'no mosaic coadds / dolphot_frames.txt under %s'
+            '%s%s',
             reduction / 'reference',
+            f' for group={want_group}' if want_group is not None else '',
+            f' box={want_box}' if want_box is not None else '',
         )
         return 1
 
@@ -483,7 +515,7 @@ def _run_from_mosaic(args) -> int:
 
 
 def _run_explicit(args) -> int:
-    from st123.photometry.dolphot import prepare_frames, setup_paramfile
+    from st123.stages.photometry.dolphot import prepare_frames, setup_paramfile
 
     if args.instrument in _HST_CLI_INSTRUMENTS:
         return _run_hst(args)
@@ -527,9 +559,9 @@ def _run_explicit(args) -> int:
             if not ref_dst.exists():
                 shutil.copy2(ref_src, ref_dst)
             if args.instrument == 'miri':
-                global_params = miri_base_params
+                global_params = MIRIDataModel.DOLPHOT_BASE_PARAMS
             elif args.instrument in _HST_INSTRUMENTS:
-                global_params = hst_base_params
+                global_params = HSTDataModel.DOLPHOT_BASE_PARAMS
             else:
                 global_params = None
             plan = setup_paramfile(

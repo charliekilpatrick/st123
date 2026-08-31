@@ -12,7 +12,7 @@ from astropy.table import Table
 import numpy as np
 from astropy.io import fits
 
-from st123.mast import (
+from st123.stages.download import (
     filter_hst_observations,
     filter_jwst_observations_by_stage,
     filter_jwst_products,
@@ -23,7 +23,7 @@ from st123.mast import (
     prune_non_full_frame_miri,
     resolve_mast_token,
 )
-from st123.mast.mast import (
+from st123.stages.download.mast import (
     download_hst_observations,
     download_jwst_observations,
     prepare_mast_auth,
@@ -74,6 +74,28 @@ def test_filter_jwst_products_stage2_and_3():
         filter_jwst_products(products, stage=9)
 
 
+def test_filter_jwst_products_miri_keeps_imager_only():
+    """MIRI observations always drop non-imager (e.g. MRS) products."""
+    products = Table(
+        {
+            'productType': ['SCIENCE', 'SCIENCE', 'SCIENCE'],
+            'productSubGroupDescription': ['CAL', 'CAL', 'CAL'],
+            'calib_level': [2, 2, 2],
+            'productFilename': [
+                'jw_x_mirimage_cal.fits',
+                'jw_x_mirifushort_cal.fits',
+                'jw_x_mirifulong_cal.fits',
+            ],
+        }
+    )
+    miri = filter_jwst_products(products, stage=2, instrument='MIRI')
+    assert len(miri) == 1
+    assert miri[0]['productFilename'] == 'jw_x_mirimage_cal.fits'
+    # NIRCam must not apply the mirimage filename filter.
+    nircam = filter_jwst_products(products, stage=2, instrument='NIRCAM')
+    assert len(nircam) == 3
+
+
 def test_observation_matches_calib_stage():
     assert observation_matches_calib_stage(3, 2) is True
     assert observation_matches_calib_stage(2, 2) is True
@@ -114,14 +136,15 @@ def test_download_skips_unavailable_calib_level_silently(caplog):
             'productType': ['SCIENCE'],
             'productSubGroupDescription': ['CAL'],
             'calib_level': [2],
-            'productFilename': ['jw_ok_cal.fits'],
+            'productFilename': ['jw_ok_mirimage_cal.fits'],
+            # MIRI stage-2 filter keeps imager (*mirimage*) CAL products only.
         }
     )
     with (
-        caplog.at_level(logging.INFO, logger='st123.mast'),
-        patch('st123.mast.mast.Observations.get_product_list', return_value=products),
-        patch('st123.mast.mast.Observations.download_products') as mock_dl,
-        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+        caplog.at_level(logging.INFO, logger='st123.stages.download'),
+        patch('st123.stages.download.mast.Observations.get_product_list', return_value=products),
+        patch('st123.stages.download.mast.Observations.download_products') as mock_dl,
+        patch('st123.stages.download.mast.resolve_mast_token', return_value=None),
     ):
         n = download_jwst_observations(
             obs, outdir='/tmp/st123_dl_test', stage=2, dry_run=True
@@ -183,7 +206,7 @@ def test_filter_hst_observations_pipeline_only_excludes_hap():
 
 def test_filter_hst_observations_keeps_acs_wfc_and_hrc():
     """Bare ACS downloads ACS/WFC (flc) and ACS/HRC (flt)."""
-    from st123.mast.mast import has_supported_hst_science_products
+    from st123.stages.download.mast import has_supported_hst_science_products
 
     assert has_supported_hst_science_products('ACS/WFC')
     assert has_supported_hst_science_products('ACS/HRC')
@@ -209,7 +232,7 @@ def test_filter_hst_observations_keeps_acs_wfc_and_hrc():
 
 
 def test_flatten_mast_download_dir(tmp_path: Path):
-    from st123.mast.mast import flatten_mast_download_dir
+    from st123.stages.download.mast import flatten_mast_download_dir
 
     obsid = tmp_path / 'HST' / 'ACS' / 'F814W' / '102617486'
     nested = obsid / 'mastDownload' / 'HST' / 'jey335ehq'
@@ -263,10 +286,10 @@ def test_download_hst_dedupes_product_filenames(tmp_path: Path, caplog):
         return products_a if int(obs_row['obsid']) == 101 else products_b
 
     with (
-        caplog.at_level(logging.INFO, logger='st123.mast.mast'),
-        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
-        patch('st123.mast.mast.Observations.download_products') as mock_dl,
-        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+        caplog.at_level(logging.INFO, logger='st123.stages.download.mast'),
+        patch('st123.stages.download.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.stages.download.mast.Observations.download_products') as mock_dl,
+        patch('st123.stages.download.mast.resolve_mast_token', return_value=None),
     ):
         n = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
 
@@ -300,7 +323,7 @@ def test_mast_login_success_and_cached(monkeypatch):
     monkeypatch.delenv('MAST_API_TOKEN', raising=False)
     monkeypatch.delenv('MAST_TOKEN', raising=False)
     reset_mast_login_state()
-    with patch('st123.mast.mast.Observations.login') as mock_login:
+    with patch('st123.stages.download.mast.Observations.login') as mock_login:
         assert mast_login('tok123', required=True) is True
         assert mast_login('tok123', required=True) is True
         mock_login.assert_called_once_with(token='tok123')
@@ -310,7 +333,7 @@ def test_prepare_mast_auth_public_without_token(monkeypatch, caplog):
     monkeypatch.delenv('MAST_API_TOKEN', raising=False)
     monkeypatch.delenv('MAST_TOKEN', raising=False)
     reset_mast_login_state()
-    with caplog.at_level(logging.INFO, logger='st123.mast.mast'):
+    with caplog.at_level(logging.INFO, logger='st123.stages.download.mast'):
         assert prepare_mast_auth(None) is False
     assert 'public data only' in caplog.text.lower()
 
@@ -333,10 +356,10 @@ def test_download_hst_skips_product_list_when_local(tmp_path: Path, caplog):
     (sub / 'jey312k5q_flc.fits').write_bytes(b'fits')
 
     with (
-        caplog.at_level(logging.INFO, logger='st123.mast.mast'),
-        patch('st123.mast.mast.Observations.get_product_list') as mock_plist,
-        patch('st123.mast.mast.Observations.download_products') as mock_dl,
-        patch('st123.mast.mast.resolve_mast_token', return_value=None),
+        caplog.at_level(logging.INFO, logger='st123.stages.download.mast'),
+        patch('st123.stages.download.mast.Observations.get_product_list') as mock_plist,
+        patch('st123.stages.download.mast.Observations.download_products') as mock_dl,
+        patch('st123.stages.download.mast.resolve_mast_token', return_value=None),
     ):
         n = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
 
@@ -347,7 +370,7 @@ def test_download_hst_skips_product_list_when_local(tmp_path: Path, caplog):
 
 
 def test_is_transient_mast_error_detects_timeouts():
-    from st123.mast.mast import _is_transient_mast_error
+    from st123.stages.download.mast import _is_transient_mast_error
 
     assert _is_transient_mast_error(TimeoutError('Timeout limit of 600 exceeded'))
     assert _is_transient_mast_error(ConnectionError('reset'))
@@ -357,8 +380,8 @@ def test_is_transient_mast_error_detects_timeouts():
 
 def test_download_hst_retries_transient_product_list(tmp_path: Path, monkeypatch):
     """Transient get_product_list failures retry then succeed (issue #4)."""
-    from st123.mast.download import MastDownloadResult
-    from st123.mast import mast as mast_mod
+    from st123.stages.download.download import MastDownloadResult
+    from st123.stages.download import mast as mast_mod
 
     monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
     obs = Table(
@@ -387,10 +410,10 @@ def test_download_hst_retries_transient_product_list(tmp_path: Path, monkeypatch
         return products
 
     with (
-        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
-        patch('st123.mast.mast.Observations.download_products') as mock_dl,
-        patch('st123.mast.mast.resolve_mast_token', return_value=None),
-        patch('st123.mast.mast.time.sleep'),
+        patch('st123.stages.download.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.stages.download.mast.Observations.download_products') as mock_dl,
+        patch('st123.stages.download.mast.resolve_mast_token', return_value=None),
+        patch('st123.stages.download.mast.time.sleep'),
     ):
         result = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
 
@@ -405,8 +428,8 @@ def test_download_hst_marks_failed_after_product_list_retries(
     tmp_path: Path, monkeypatch, caplog
 ):
     """Exhausted product-list retries count as incomplete (issue #4)."""
-    from st123.mast.download import MastDownloadResult
-    from st123.mast import mast as mast_mod
+    from st123.stages.download.download import MastDownloadResult
+    from st123.stages.download import mast as mast_mod
 
     monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
     obs = Table(
@@ -433,11 +456,11 @@ def test_download_hst_marks_failed_after_product_list_retries(
         return products
 
     with (
-        caplog.at_level(logging.ERROR, logger='st123.mast.mast'),
-        patch('st123.mast.mast.Observations.get_product_list', side_effect=_plist),
-        patch('st123.mast.mast.Observations.download_products') as mock_dl,
-        patch('st123.mast.mast.resolve_mast_token', return_value=None),
-        patch('st123.mast.mast.time.sleep'),
+        caplog.at_level(logging.ERROR, logger='st123.stages.download.mast'),
+        patch('st123.stages.download.mast.Observations.get_product_list', side_effect=_plist),
+        patch('st123.stages.download.mast.Observations.download_products') as mock_dl,
+        patch('st123.stages.download.mast.resolve_mast_token', return_value=None),
+        patch('st123.stages.download.mast.time.sleep'),
     ):
         result = download_hst_observations(obs, outdir=str(tmp_path), dry_run=False)
 
@@ -454,7 +477,7 @@ def test_resolve_mast_token_explicit():
 
 
 def test_normalize_filter_and_path_helpers():
-    from st123.mast.mast import (
+    from st123.stages.download.mast import (
         normalize_filter_name,
         normalize_instrument_dirname,
         normalize_telescope_dirname,

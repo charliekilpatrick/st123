@@ -15,7 +15,7 @@ Modes
 
 ``reference``
     Overlap-match science frames to ``reference/`` coadds and align
-    (REFERENCE → optional MIRI_REL); typically ``--instrument MIRI``.
+    (REFERENCE -> optional MIRI_REL); typically ``--instrument MIRI``.
 
 ``pair``
     Align one ``--image`` to a photometry catalog from ``--ref``
@@ -25,7 +25,7 @@ Modes
 Multi-instrument orchestration
 ------------------------------
 ``--instruments NIRCAM MIRI ACS WFC3`` (or ``ALL``) runs:
-NIRCam visit → HST visit → intermediate NIRCam mosaic → MIRI reference.
+NIRCam visit -> HST visit -> intermediate NIRCam mosaic -> MIRI reference.
 ``--instruments NIRCAM`` keeps the legacy visit-only path.
 """
 
@@ -61,6 +61,7 @@ from st123.scripts.utils.options import (
     sync_legacy_ncores,
 )
 from st123.utils.helpers import create_filter_table, input_list
+from st123.datamodels import as_datamodel
 from st123.utils.logging import shutdown_logging
 from st123.utils.settings import DEFAULT_PAIR_OUTDIR
 
@@ -89,7 +90,7 @@ def create_parser(default_data_dir: Path | None = None):
         description=(
             'Align JWST or HST imaging. Modes: visit (Gaia / visit mosaics '
             'under reduction/; HST with --telescope hst), hst (HST Gaia JHAT '
-            'batch), reference (science → reference/ coadds), or pair '
+            'batch), reference (science -> reference/ coadds), or pair '
             '(one --image to --ref; also selected when both are set).'
         )
     )
@@ -105,10 +106,10 @@ def create_parser(default_data_dir: Path | None = None):
             '--outdir',
         ),
         help=(
-            'Project root (…/<object>), or output directory in pair mode. '
+            'Project root (.../<object>), or output directory in pair mode. '
             'Visit mode uses <base-dir>/reduction; HST visit writes to '
             'reduction/jhat from reduction/raw. Reference mode expects '
-            f'JWST/<INSTRUMENT>/… and reference/ (default when omitted: '
+            f'JWST/<INSTRUMENT>/... and reference/ (default when omitted: '
             f'{default_data_dir}). Pair-mode default when omitted: '
             f'{DEFAULT_PAIR_OUTDIR}. '
             'Aliases: --workdir, --basedir, --data-dir, --download-dir, --outdir.'
@@ -120,7 +121,7 @@ def create_parser(default_data_dir: Path | None = None):
         default=None,
         help=(
             'Mission shorthand, equivalent to the default --instruments set: '
-            'hst → ACS WFC3 WFPC2; jwst → NIRCAM MIRI. When omitted, visit '
+            'hst -> ACS WFC3 WFPC2; jwst -> NIRCAM MIRI. When omitted, visit '
             'mode defaults to a single NIRCam run (or use --instruments / '
             '--instrument). --mode hst implies --telescope hst.'
         ),
@@ -143,7 +144,7 @@ def create_parser(default_data_dir: Path | None = None):
             'One or more instruments to align. Mission aliases: hst (= ACS '
             'WFC3 WFPC2), jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 '
             'WFPC2). Multi-instrument lists run an orchestrated pipeline: '
-            'NIRCam visit → HST visit → intermediate NIRCam mosaic → MIRI '
+            'NIRCam visit -> HST visit -> intermediate NIRCam mosaic -> MIRI '
             'reference. NIRCAM alone keeps the legacy visit-only path. '
             'Overrides --telescope defaults when set. Alias: --instrument.'
         ),
@@ -162,8 +163,10 @@ def create_parser(default_data_dir: Path | None = None):
         '--skip-intermediate-mosaic',
         action='store_true',
         help=(
-            'Orchestrator only: if reference coadds already exist, skip the '
-            'intermediate NIRCam mosaic before MIRI reference alignment.'
+            'Orchestrator only: if any reference coadds already exist, skip '
+            'the intermediate NIRCam mosaic before MIRI reference alignment. '
+            'Implied when --existing-box points at a stamp that already has '
+            'coadd*i2d.fits.'
         ),
     )
     parser.add_argument(
@@ -269,7 +272,7 @@ def create_parser(default_data_dir: Path | None = None):
     parser.add_argument(
         '--no-fallback',
         action='store_true',
-        help='Disable MIRI→MIRI relative fallback when REFERENCE alignment fails.',
+        help='Disable MIRI->MIRI relative fallback when REFERENCE alignment fails.',
     )
     parser.add_argument(
         '--max-nircam-dispersion-mas',
@@ -429,14 +432,14 @@ def run_hst_visit_alignment(
     instruments : list of str or None, optional
         Restrict to these HST instruments (e.g. ``['ACS', 'WFC3']``).
     """
-    from st123.alignment.hst_jhat import (
+    from st123.stages.alignment.hst_jhat import (
         HST_JHAT_GAIA_L3_PARAMS,
         HST_JHAT_L3REF_PARAMS,
         _jhat_hst_output_path,
         align_hst_raw_dir,
         write_hst_alignment_summary,
     )
-    from st123.alignment.hst_reference import (
+    from st123.stages.alignment.hst_reference import (
         ensure_preliminary_level3s,
         pick_best_level3,
     )
@@ -458,7 +461,7 @@ def run_hst_visit_alignment(
 
     if verbose:
         logger.info('Dataset: %s', dataset_label(base_dir))
-        logger.info('Mode: visit (HST JHAT ← best level-3 Gaia ref)')
+        logger.info('Mode: visit (HST JHAT <- best level-3 Gaia ref)')
         logger.info('Raw dir: %s', raw_dir)
         logger.info('JHAT outdir: %s', jhat_dir)
         if instruments:
@@ -470,12 +473,12 @@ def run_hst_visit_alignment(
         '1) CR clean  2) prelim L3 coadds  3) score L3 vs Gaia  '
         '4) Gaia-anchor best L3  5) JHAT every raw frame  '
         '6) within-filter WCS harmonize. '
-        'Cross-filter coadd↔coadd lives in mosaic, not align.'
+        'Cross-filter coadd<->coadd lives in mosaic, not align.'
     )
 
     if not skip_cosmic:
         try:
-            from st123.photometry.cosmic import clean_raw_directory
+            from st123.stages.photometry.cosmic import clean_raw_directory
 
             logger.info('[1/6] astroscrappy CR clean on raw frames under %s', raw_dir)
             cr_results = clean_raw_directory(raw_dir, add_crmask=True)
@@ -495,7 +498,7 @@ def run_hst_visit_alignment(
     if not skip_prelim_l3:
         try:
             logger.info(
-                '[2/6] preliminary L3 coadds → %s (reuse existing unless force)',
+                '[2/6] preliminary L3 coadds -> %s (reuse existing unless force)',
                 prelim_dir,
             )
             ensure_preliminary_level3s(
@@ -506,7 +509,7 @@ def run_hst_visit_alignment(
                 instruments=instruments,
             )
             # Score all L3 candidates once (Gaia queries are slow).
-            from st123.alignment.hst_reference import list_level3_products
+            from st123.stages.alignment.hst_reference import list_level3_products
             from st123.utils.helpers import get_instrument
 
             l3_candidates = list_level3_products(prelim_dir)
@@ -536,7 +539,7 @@ def run_hst_visit_alignment(
                 len(l3_candidates),
             )
             if l3_candidates:
-                from st123.alignment.gaia_catalog import ensure_gaia_catalog
+                from st123.stages.alignment.gaia_catalog import ensure_gaia_catalog
 
                 gaia_cache = work_dir / 'gaia'
                 # Include science frames so the cone covers requested footprints;
@@ -579,25 +582,24 @@ def run_hst_visit_alignment(
                 l3_jhat_path = (
                     expected_l3_jhat if expected_l3_jhat.is_file() else None
                 )
-                from st123.alignment.gaia_simple import (
+                from st123.stages.alignment.gaia_simple import (
                     align_image_to_gaia_simple,
                     rewrite_phot_radec,
                 )
-                from astropy.io import fits as _fits
 
                 # Fast L3 absolute anchor: gaia_simple CRPIX, then a *dense*
                 # DAOStarFinder phot catalog on that Gaia-tied L3 (not Gaia-only;
                 # sparse fields like NGC 3913 have too few Gaia for WFPC2 JHAT).
                 import shutil
 
-                from st123.alignment.hst_reference import ensure_l3_science_refcat
+                from st123.stages.alignment.hst_reference import ensure_l3_science_refcat
 
                 if l3_jhat_path is None:
                     l3_jhat_path = expected_l3_jhat
                     shutil.copy2(best_l3, l3_jhat_path)
                     logger.info(
                         '[4/6] Gaia-anchoring L3 with gaia_simple (cached Vizier) '
-                        '→ %s',
+                        '-> %s',
                         l3_jhat_path.name,
                     )
                     align_image_to_gaia_simple(
@@ -612,7 +614,7 @@ def run_hst_visit_alignment(
                     )
                     gaia_ok = False
                     try:
-                        with _fits.open(l3_jhat_path, memmap=True) as _h:
+                        with as_datamodel(l3_jhat_path).open(memmap=True) as _h:
                             gaia_ok = bool(_h[0].header.get('GAIASIMP'))
                     except Exception:
                         gaia_ok = False
@@ -639,7 +641,7 @@ def run_hst_visit_alignment(
                         exc,
                     )
                     try:
-                        from st123.alignment.gaia_catalog import write_gaia_refcat
+                        from st123.stages.alignment.gaia_catalog import write_gaia_refcat
 
                         write_gaia_refcat(
                             l3_jhat_path,
@@ -672,7 +674,7 @@ def run_hst_visit_alignment(
                 exc,
             )
     else:
-        logger.info('[2–4/6] skipped prelim L3 / Gaia anchor (skip_prelim_l3=True)')
+        logger.info('[2-4/6] skipped prelim L3 / Gaia anchor (skip_prelim_l3=True)')
 
     sci_params = (
         dict(HST_JHAT_L3REF_PARAMS)
@@ -681,7 +683,7 @@ def run_hst_visit_alignment(
     )
     if ref_phot is not None:
         logger.info(
-            '[5/6] JHAT every raw science frame → %s (refcat=%s); '
+            '[5/6] JHAT every raw science frame -> %s (refcat=%s); '
             'each frame can take minutes; JHAT stdout is captured',
             jhat_dir,
             Path(ref_phot).name,
@@ -713,16 +715,24 @@ def run_hst_visit_alignment(
     n_ok = sum(1 for r in results if r.get('status') == 'ok')
     n_fail = sum(1 for r in results if r.get('status') == 'failed')
     logger.info(
-        'HST JHAT summary: %d ok, %d failed → %s',
+        'HST JHAT summary: %d ok, %d failed -> %s',
         n_ok,
         n_fail,
         summary_path,
     )
     for row in results:
         if row.get('status') == 'ok':
-            logger.info('  OK  %s → %s', Path(row['path']).name, row.get('outpath'))
+            logger.info('  OK  %s -> %s', Path(row['path']).name, row.get('outpath'))
         else:
-            logger.error(
+            err = str(row.get('error') or '')
+            # Sparse / empty WFPC2 chips fail JHAT with soft_fail=True -- expected.
+            soft = (
+                'initial cut' in err.lower()
+                or err.startswith('KeyError')
+                or 'Only ' in err and 'objects pass' in err
+            )
+            log_fn = logger.warning if soft else logger.error
+            log_fn(
                 '  FAIL %s: %s',
                 Path(row['path']).name,
                 row.get('error'),
@@ -743,9 +753,23 @@ def run_hst_visit_alignment(
     return 0
 
 
+def _resolve_existing_box_dir(base_dir: str | Path, existing_box: str | Path) -> Path:
+    """Resolve ``--existing-box`` from a project root or reduction dir."""
+    from st123.stages.mosaic.mosaic import resolve_existing_box_dir
+
+    return resolve_existing_box_dir(base_dir, existing_box)
+
+
+def _coadds_in_existing_box(base_dir: str | Path, existing_box: str | Path) -> list[str]:
+    """``coadd*i2d.fits`` under ``--existing-box``, or raise if the box is missing."""
+    from st123.stages.mosaic.mosaic import box_coadd_i2d_paths
+
+    return box_coadd_i2d_paths(_resolve_existing_box_dir(base_dir, existing_box))
+
+
 def _existing_reference_coadds(base_dir: str | Path) -> list[str]:
     """Return existing mosaic coadds under the project / reduction tree."""
-    from st123.alignment.align import discover_ref_images
+    from st123.stages.alignment.align import discover_ref_images
 
     root = Path(base_dir).expanduser()
     found = list(discover_ref_images(root))
@@ -818,7 +842,7 @@ def run_orchestrated_alignment(
     instruments: list[str],
 ) -> int:
     """
-    Multi-mission align: NIRCam visit → HST visit → intermediate mosaic → MIRI ref.
+    Multi-mission align: NIRCam visit -> HST visit -> intermediate mosaic -> MIRI ref.
 
     Stages whose instruments were not requested are skipped. Exit code is
     nonzero if any required stage fails.
@@ -827,10 +851,7 @@ def run_orchestrated_alignment(
     disk, JWST stages are skipped (rc=0) unless ``--force-miri`` / explicit
     ``--instruments MIRI``.
     """
-    from st123.utils.jwst_coverage import (
-        count_jwst_frames_on_disk,
-        should_skip_miri_only_jwst,
-    )
+    from st123.datamodels import JWSTDataModel, MIRIDataModel, NIRCamDataModel
 
     try:
         jwst_inst, hst_inst = partition_align_instruments(instruments)
@@ -842,21 +863,26 @@ def run_orchestrated_alignment(
         logger.error('--base-dir is required for orchestrated multi-instrument align')
         return 2
 
-    want_nircam = any(i.upper() in ('NIRCAM', 'NRC') for i in jwst_inst)
-    want_miri = any(i.upper() == 'MIRI' for i in jwst_inst)
+    want_nircam = any(NIRCamDataModel.matches(i) for i in jwst_inst)
+    want_miri = any(MIRIDataModel.matches(i) for i in jwst_inst)
     ncores = int(getattr(args, 'ncores', 1) or 1)
     verbose = bool(getattr(args, 'verbose', False))
     stage_rcs: list[tuple[str, int]] = []
     force_miri = bool(getattr(args, 'force_miri', False))
 
-    n_nrc, n_miri = count_jwst_frames_on_disk(args.base_dir)
-    skip_jwst = should_skip_miri_only_jwst(
-        n_nrc > 0,
-        n_miri > 0,
-        jwst_inst or instruments,
-        force_miri=force_miri,
+    root = Path(args.base_dir).expanduser().resolve()
+    n_nrc, n_miri = JWSTDataModel.coverage_under(
+        root / 'download' / 'JWST',
+        root / 'reduction' / 'raw',
+        root / 'raw',
     )
-    if skip_jwst:
+    if (
+        not force_miri
+        and want_nircam
+        and want_miri
+        and n_miri > 0
+        and n_nrc == 0
+    ):
         logger.warning(
             'MIRI-only JWST field (NIRCam frames=%d, MIRI frames=%d); '
             'skipping JWST align stages. Pass --force-miri (or '
@@ -869,7 +895,7 @@ def run_orchestrated_alignment(
 
     logger.info(
         'Orchestrated align: instruments=%s '
-        '(NIRCam visit → HST visit → intermediate mosaic → MIRI reference)',
+        '(NIRCam visit -> HST visit -> intermediate mosaic -> MIRI reference)',
         ', '.join(instruments),
     )
 
@@ -892,7 +918,7 @@ def run_orchestrated_alignment(
     else:
         logger.info('=== Stage 1/4: skip NIRCam (not requested) ===')
 
-    # 2) HST visit (ACS/WFC3/…)
+    # 2) HST visit (ACS/WFC3/...)
     if hst_inst:
         logger.info(
             '=== Stage 2/4: HST visit alignment (%s) ===',
@@ -916,9 +942,36 @@ def run_orchestrated_alignment(
 
     # 3) Intermediate NIRCam mosaic (needed for MIRI reference coadds)
     if want_miri:
+        existing_box = getattr(args, 'existing_box', None)
         existing = _existing_reference_coadds(args.base_dir)
         skip_mosaic = bool(getattr(args, 'skip_intermediate_mosaic', False))
-        if not want_nircam and not existing:
+        box_skip_rc: int | None = None
+        if existing_box:
+            try:
+                box_coadds = _coadds_in_existing_box(args.base_dir, existing_box)
+            except FileNotFoundError as exc:
+                logger.error('%s', exc)
+                box_skip_rc = 1
+            else:
+                if box_coadds:
+                    logger.info(
+                        '=== Stage 3/4: skip intermediate mosaic '
+                        '(--existing-box %s has %d coadd(s)) ===',
+                        existing_box,
+                        len(box_coadds),
+                    )
+                    box_skip_rc = 0
+                else:
+                    logger.error(
+                        '--existing-box %s has no coadd*i2d.fits; run '
+                        'mosaic --instruments NIRCAM --existing-box %s first',
+                        existing_box,
+                        existing_box,
+                    )
+                    box_skip_rc = 1
+        if box_skip_rc is not None:
+            stage_rcs.append(('intermediate_mosaic', box_skip_rc))
+        elif not want_nircam and not existing:
             logger.error(
                 'MIRI reference alignment requires NIRCam in --instruments '
                 '(to build coadds) or existing reference/ coadd*i2d.fits'
@@ -947,8 +1000,14 @@ def run_orchestrated_alignment(
         logger.info('=== Stage 3/4: skip intermediate mosaic (MIRI not requested) ===')
 
     # 4) MIRI reference
+    mosaic_failed = any(
+        name == 'intermediate_mosaic' and rc != 0 for name, rc in stage_rcs
+    )
     if want_miri:
-        if not _existing_reference_coadds(args.base_dir):
+        if mosaic_failed:
+            logger.error('Skipping MIRI reference (intermediate mosaic stage failed)')
+            stage_rcs.append(('miri_reference', 1))
+        elif not _existing_reference_coadds(args.base_dir):
             logger.error(
                 'Cannot run MIRI reference: no reference coadds under %s',
                 args.base_dir,
@@ -984,7 +1043,7 @@ def run_orchestrated_alignment(
 
 def run_pair_alignment(args: argparse.Namespace) -> int:
     """Align one ``--image`` to a catalog built from ``--ref``."""
-    from st123.alignment.align import run_alignment
+    from st123.stages.alignment.align import run_alignment
 
     ref = str(Path(args.ref).expanduser())
     align_image = str(Path(args.image).expanduser())
@@ -1037,6 +1096,11 @@ def run_visit_alignment(
 ) -> int:
     """Self-align instrument frames under ``reduction/`` (Gaia / visit mosaics).
 
+    Seeds the cascade from the best absolute hub visit (deep F200W/F150W
+    preferred over largest footprint), gates that Gaia mosaic, re-aligns
+    soft-fail / wrong-island JHAT products to the hub catalog, then applies a
+    capped JWST-only CRVAL retie for small residuals.
+
     Returns
     -------
     int
@@ -1046,14 +1110,24 @@ def run_visit_alignment(
     # Deferred: pulls JWST Image3 / JHAT / CRDS (~tens of seconds).
     import shapely
 
-    from st123.alignment.align import (
+    from st123.stages.alignment.align import (
+        HUB_ABS_RETIE_MAX_APPLY_ARCSEC,
+        HUB_ABS_RETIE_MIN_PEAK,
+        HUB_ABS_RETIE_TOL_ARCSEC,
+        HUB_ABS_SEARCH_ARCSEC,
+        HUB_GAIA_MAX_MAS,
         align_to_mosaic,
         create_alignment_mosaic,
         create_dirs,
         fix_phot,
         get_input_images,
         get_visit_geoms,
+        mosaic_abs_quality,
         pick_visit,
+        rank_visits_as_abs_hubs,
+        realign_jwst_jhats_to_catalog,
+        retie_jwst_jhat_to_abs_ref,
+        select_jwst_jhats_for_abs_redo,
         update_refcat,
         visit_filter_dict,
     )
@@ -1102,58 +1176,62 @@ def run_visit_alignment(
         group_visits = np.unique(group_table['visit'])
         visit_geoms = get_visit_geoms(group_table)
         align_polygon = None
+        hub_order = rank_visits_as_abs_hubs(group_table, visit_filter, visit_geoms)
+        hub_mosaic = None
+        hub_locked = False
         logger.info(
-            'Group %s: %d image(s), %d visit(s)',
+            'Group %s: %d image(s), %d visit(s); abs-hub order=%s',
             group_id,
             len(group_table),
             len(group_visits),
+            ', '.join(str(v) for v in hub_order),
         )
 
-        for visit_index in range(len(group_visits)):
-            visit_id, overlap_frac = pick_visit(
-                align_polygon, copy.copy(visit_geoms), visit_filter
-            )
+        def _process_visit(
+            visit_id,
+            *,
+            align_to: str,
+            overlap_frac: float,
+            is_hub_seed: bool,
+        ):
+            nonlocal n_failures
             visit_table = group_table[group_table['visit'] == visit_id]
-
             filters = np.unique(visit_table['filter']).value
             filter_table = create_filter_table(visit_table, filters)
             align_filter = visit_filter[visit_id]
             visit_outdir = os.path.join(
                 work_dir, 'align', f'group_{group_id}', f'visit_{visit_id}'
             )
-            ref_label = 'Gaia' if visit_index == 0 else 'prior-visit catalog'
+            ref_label = (
+                'Gaia' if align_to == 'gaia' else 'prior-visit / hub catalog'
+            )
             logger.info(
-                'Group %s visit %s (%d/%d): %d frame(s), align_filter=%s → %s '
-                '(overlap=%.2f); building visit mosaic under %s',
+                'Group %s visit %s: %d frame(s), align_filter=%s -> %s '
+                '(overlap=%.2f%s); building visit mosaic under %s',
                 group_id,
                 visit_id,
-                visit_index + 1,
-                len(group_visits),
                 len(visit_table),
                 align_filter,
                 ref_label,
                 float(overlap_frac) if overlap_frac is not None else -1.0,
+                '; HUB SEED' if is_hub_seed else '',
                 visit_outdir,
             )
-
-            if visit_index == 0:
-                mosaic_name, guess_offset, mosaic_fail = create_alignment_mosaic(
-                    filter_table,
-                    visit_outdir,
-                    align_filter=align_filter,
-                    align_to='gaia',
-                    ncores=ncores,
-                )
-            else:
-                nbright = 50000 if overlap_frac < 0.3 else 800
-                mosaic_name, guess_offset, mosaic_fail = create_alignment_mosaic(
-                    filter_table,
-                    visit_outdir,
-                    align_filter=align_filter,
-                    align_to=combined_photfile,
-                    ncores=ncores,
-                    Nbright=nbright,
-                )
+            nbright = 800
+            if (
+                align_to != 'gaia'
+                and overlap_frac is not None
+                and float(overlap_frac) < 0.3
+            ):
+                nbright = 50000
+            mosaic_name, guess_offset, mosaic_fail = create_alignment_mosaic(
+                filter_table,
+                visit_outdir,
+                align_filter=align_filter,
+                align_to=align_to,
+                ncores=ncores,
+                Nbright=nbright,
+            )
             n_failures += int(mosaic_fail)
             logger.info(
                 'Group %s visit %s mosaic done: %s (failures=%d, offset=%s)',
@@ -1163,7 +1241,10 @@ def run_visit_alignment(
                 int(mosaic_fail),
                 guess_offset,
             )
+            return mosaic_name, guess_offset
 
+        def _finalize_visit(visit_id, mosaic_name, guess_offset) -> None:
+            nonlocal n_failures, align_polygon
             mosaic_photfile = fix_phot(mosaic_name)
             _ = update_refcat(
                 mosaic_name,
@@ -1171,40 +1252,286 @@ def run_visit_alignment(
                 out_refcat=combined_photfile,
                 align_pgon=align_polygon,
             )
-
+            visit_table = group_table[group_table['visit'] == visit_id]
+            filters = np.unique(visit_table['filter']).value
+            filter_table = create_filter_table(visit_table, filters)
             logger.info('Mosaic photfile: %s', mosaic_photfile)
+            # Batch every filter into one align_to_mosaic pool so L2 JHAT
+            # workers stay saturated across filters (not filter-serial).
+            all_images: list[str] = []
             for _filt, filt_table in filter_table.items():
                 logger.info(
-                    'Aligning %d %s frame(s) in visit %s to mosaic catalog...',
+                    'Queueing %d %s frame(s) in visit %s for mosaic JHAT...',
                     len(filt_table),
                     _filt,
                     visit_id,
                 )
+                all_images.extend(str(row['image']) for row in filt_table)
+            if all_images:
+                logger.info(
+                    'Aligning %d frame(s) across %d filter(s) in visit %s '
+                    'to mosaic catalog (ncores=%d)...',
+                    len(all_images),
+                    len(filter_table),
+                    visit_id,
+                    ncores,
+                )
                 n_failures += int(
                     align_to_mosaic(
                         mosaic_photfile,
-                        [row['image'] for row in filt_table],
+                        all_images,
                         jhat_dir,
                         guess_offset=guess_offset,
                         verbose=verbose,
                         ncores=ncores,
                     )
                 )
-
             if align_polygon is None:
                 align_polygon = visit_geoms[visit_id]
             else:
                 align_polygon = shapely.unary_union(
                     [align_polygon, visit_geoms[visit_id]]
                 )
+            visit_geoms.pop(visit_id, None)
 
-            visit_geoms.pop(visit_id)
+        # Absolute hub seed (Gaia): try candidates best-first.
+        for hub_id in hub_order:
+            if hub_id not in visit_geoms:
+                continue
+            mosaic_name, guess_offset = _process_visit(
+                hub_id,
+                align_to='gaia',
+                overlap_frac=float(visit_geoms[hub_id].area),
+                is_hub_seed=True,
+            )
+            quality = mosaic_abs_quality(mosaic_name, max_mas=HUB_GAIA_MAX_MAS)
+            if quality['ok']:
+                logger.info(
+                    'Abs hub accepted: visit=%s mosaic=%s disp=%.1f mas ncal=%d '
+                    '(limit=%.1f mas)',
+                    hub_id,
+                    Path(mosaic_name).name,
+                    float(quality['dispersion_mas'] or -1.0),
+                    int(quality['n_calibrators']),
+                    HUB_GAIA_MAX_MAS,
+                )
+                hub_mosaic = mosaic_name
+                hub_locked = True
+                _finalize_visit(hub_id, mosaic_name, guess_offset)
+                break
+            logger.warning(
+                'Abs hub candidate rejected: visit=%s disp=%s mas ncal=%d '
+                '(need ncal>0 and disp<=%.1f mas); trying next hub',
+                hub_id,
+                quality.get('dispersion_mas'),
+                int(quality.get('n_calibrators') or 0),
+                HUB_GAIA_MAX_MAS,
+            )
+            # Leave visit in visit_geoms so it can align to a later hub catalog.
+
+        if not hub_locked:
+            if not visit_geoms:
+                logger.error(
+                    'Group %s: no visits left after hub failures', group_id
+                )
+                n_failures += 1
+                continue
+            fallback_id, overlap_frac = pick_visit(
+                None, visit_geoms, visit_filter, hub_order=hub_order
+            )
+            logger.warning(
+                'No hub passed Gaia gate; proceeding with best-effort seed '
+                'visit=%s',
+                fallback_id,
+            )
+            mosaic_name, guess_offset = _process_visit(
+                fallback_id,
+                align_to='gaia',
+                overlap_frac=float(overlap_frac),
+                is_hub_seed=True,
+            )
+            hub_mosaic = mosaic_name
+            hub_locked = True
+            _finalize_visit(fallback_id, mosaic_name, guess_offset)
+
+        # Remaining visits relative to hub catalog.
+        while visit_geoms:
+            visit_id, overlap_frac = pick_visit(
+                align_polygon, visit_geoms, visit_filter
+            )
+            mosaic_name, guess_offset = _process_visit(
+                visit_id,
+                align_to=combined_photfile,
+                overlap_frac=float(overlap_frac),
+                is_hub_seed=False,
+            )
+            _finalize_visit(visit_id, mosaic_name, guess_offset)
+
+        # Post-pass: re-JHAT soft-fails / wrong-island JWST frames to hub, then
+        # apply a capped CRVAL retie for small residuals only.
+        if hub_mosaic and Path(hub_mosaic).is_file():
+            jhat_frames = sorted(Path(jhat_dir).glob('*_jhat.fits'))
+            hub_phot = None
+            try:
+                hub_phot = fix_phot(hub_mosaic)
+            except Exception as exc:
+                logger.warning(
+                    'Could not build hub phot for abs QA redo: %s', exc
+                )
+            catalog_for_redo = (
+                hub_phot
+                if hub_phot and Path(hub_phot).is_file()
+                else (
+                    combined_photfile
+                    if Path(combined_photfile).is_file()
+                    else None
+                )
+            )
+            if catalog_for_redo and jhat_frames:
+                # Header soft-fails only -- do not 2dhist the full catalog here;
+                # capped abs retie catches wrong-island WCSs via skip_large.
+                redo = select_jwst_jhats_for_abs_redo(
+                    jhat_frames,
+                    hub_mosaic,
+                    catalog_path=catalog_for_redo,
+                    check_stale=False,
+                    measure_abs=False,
+                    ncores=ncores,
+                )
+                if redo:
+                    logger.info(
+                        'Abs QA redo: %d JWST JHAT soft-fail / stale frame(s) '
+                        '-> hub catalog',
+                        len(redo),
+                    )
+                    redo_report = realign_jwst_jhats_to_catalog(
+                        redo,
+                        catalog_path=catalog_for_redo,
+                        raw_dir=work_dir_path / 'raw',
+                        jhat_outdir=jhat_dir,
+                        ncores=ncores,
+                        verbose=verbose,
+                    )
+                    n_failures += int(redo_report.get('n_failures') or 0)
+                    logger.info(
+                        'Abs QA redo done: queued=%d failures=%d',
+                        int(redo_report.get('n_queued') or 0),
+                        int(redo_report.get('n_failures') or 0),
+                    )
+                    jhat_frames = sorted(Path(jhat_dir).glob('*_jhat.fits'))
+            if jhat_frames:
+                logger.info(
+                    'Abs retie: %d JHAT frame(s) -> hub %s '
+                    '(search=%.1f", tol=%.0f mas, max_apply=%.0f mas, '
+                    'min_peak=%d, jwst_only=True, ncores=%d)',
+                    len(jhat_frames),
+                    Path(hub_mosaic).name,
+                    HUB_ABS_SEARCH_ARCSEC,
+                    HUB_ABS_RETIE_TOL_ARCSEC * 1000.0,
+                    HUB_ABS_RETIE_MAX_APPLY_ARCSEC * 1000.0,
+                    HUB_ABS_RETIE_MIN_PEAK,
+                    ncores,
+                )
+                retie = retie_jwst_jhat_to_abs_ref(
+                    jhat_frames,
+                    hub_mosaic,
+                    max_residual_arcsec=HUB_ABS_RETIE_TOL_ARCSEC,
+                    max_search_arcsec=HUB_ABS_SEARCH_ARCSEC,
+                    max_apply_arcsec=HUB_ABS_RETIE_MAX_APPLY_ARCSEC,
+                    min_peak=HUB_ABS_RETIE_MIN_PEAK,
+                    jwst_only=True,
+                    ncores=ncores,
+                )
+                logger.info(
+                    'Abs retie done: shifted=%d ok=%d measure-fail=%d '
+                    'skip-large=%d weak-peak=%d skip-non-jwst=%d '
+                    'max|Delta|=%.1f mas ok_flag=%s',
+                    int(retie.get('n_shifted') or 0),
+                    int(retie.get('n_ok') or 0),
+                    int(retie.get('n_fail_measure') or 0),
+                    int(retie.get('n_skip_large') or 0),
+                    int(retie.get('n_weak_peak') or 0),
+                    int(retie.get('n_skipped_non_jwst') or 0),
+                    1000.0 * float(retie.get('max_abs_arcsec') or 0.0),
+                    bool(retie.get('ok')),
+                )
+                if int(retie.get('n_fail_measure') or 0) > 0:
+                    logger.info(
+                        'Abs retie could not verify abs offset for %d '
+                        'frame(s) vs hub (weak cross-match / overlap); '
+                        'relative JHAT QA may still be fine',
+                        int(retie['n_fail_measure']),
+                    )
+                skip_large = [
+                    (Path(row['frame']), 'abs_retie_max_apply')
+                    for row in (retie.get('frames') or [])
+                    if row.get('skipped') == 'max_apply'
+                    and Path(row.get('frame') or '').is_file()
+                ]
+                if skip_large and catalog_for_redo:
+                    logger.warning(
+                        'Abs retie skipped %d large shift(s) above %.0f mas; '
+                        're-JHAT to hub catalog instead of CRVAL nudge',
+                        len(skip_large),
+                        HUB_ABS_RETIE_MAX_APPLY_ARCSEC * 1000.0,
+                    )
+                    skip_report = realign_jwst_jhats_to_catalog(
+                        skip_large,
+                        catalog_path=catalog_for_redo,
+                        raw_dir=work_dir_path / 'raw',
+                        jhat_outdir=jhat_dir,
+                        ncores=ncores,
+                        verbose=verbose,
+                    )
+                    n_failures += int(skip_report.get('n_failures') or 0)
+                    logger.info(
+                        'Abs retie skip-large redo done: queued=%d '
+                        'failures=%d',
+                        int(skip_report.get('n_queued') or 0),
+                        int(skip_report.get('n_failures') or 0),
+                    )
+                    # Re-measure only the redone frames (capped again).
+                    redone_paths = [fp for fp, _ in skip_large]
+                    if redone_paths:
+                        retie2 = retie_jwst_jhat_to_abs_ref(
+                            redone_paths,
+                            hub_mosaic,
+                            max_residual_arcsec=HUB_ABS_RETIE_TOL_ARCSEC,
+                            max_search_arcsec=HUB_ABS_SEARCH_ARCSEC,
+                            max_apply_arcsec=HUB_ABS_RETIE_MAX_APPLY_ARCSEC,
+                            min_peak=HUB_ABS_RETIE_MIN_PEAK,
+                            jwst_only=True,
+                            ncores=ncores,
+                        )
+                        logger.info(
+                            'Abs retie (post skip-large redo): shifted=%d '
+                            'ok=%d measure-fail=%d skip-large=%d '
+                            'max|Delta|=%.1f mas',
+                            int(retie2.get('n_shifted') or 0),
+                            int(retie2.get('n_ok') or 0),
+                            int(retie2.get('n_fail_measure') or 0),
+                            int(retie2.get('n_skip_large') or 0),
+                            1000.0
+                            * float(retie2.get('max_abs_arcsec') or 0.0),
+                        )
+                elif int(retie.get('n_skip_large') or 0) > 0:
+                    logger.warning(
+                        'Abs retie skipped %d large shift(s) above %.0f mas; '
+                        'no hub catalog available for JHAT redo',
+                        int(retie['n_skip_large']),
+                        HUB_ABS_RETIE_MAX_APPLY_ARCSEC * 1000.0,
+                    )
+        else:
+            logger.warning(
+                'Group %s: no hub mosaic available for abs retie', group_id
+            )
+
     return 1 if n_failures else 0
 
 
 def run_reference_alignment(args: argparse.Namespace) -> int:
     """Overlap + align science frames to ``reference/`` coadds."""
-    from st123.alignment.align import (
+    from st123.stages.alignment.align import (
         AlignmentSummaryRow,
         _bootstrap_imports,
         _resolve_repo_root,
@@ -1231,8 +1558,8 @@ def run_reference_alignment(args: argparse.Namespace) -> int:
     if socket.getdefaulttimeout() is None:
         socket.setdefaulttimeout(15)
 
-    from st123.alignment.align import run_alignment
-    from st123.mosaic.image_overlap import BestOverlap, MirIFootprint, compute_overlap
+    from st123.stages.alignment.align import run_alignment
+    from st123.stages.mosaic.image_overlap import BestOverlap, MirIFootprint, compute_overlap
 
     args.repo = repo
     sync_legacy_ncores(args)
@@ -1375,7 +1702,7 @@ def main(argv=None) -> int:
             logger.error('%s', exc)
             return 2
 
-        # --telescope hst|jwst ≡ default --instruments for that mission.
+        # --telescope hst|jwst == default --instruments for that mission.
         # Explicit --instruments wins; omitted telescope keeps legacy
         # single-instrument visit defaults (NIRCam).
         multi = resolve_instruments_with_telescope(
@@ -1398,7 +1725,7 @@ def main(argv=None) -> int:
                     args.telescope = 'jwst'
             return run_orchestrated_alignment(args, multi)
 
-        # Singular path: --instruments NIRCAM → visit NIRCam.
+        # Singular path: --instruments NIRCAM -> visit NIRCam.
         if multi is not None and len(multi) == 1:
             args.instrument = multi[0]
         else:

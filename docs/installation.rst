@@ -5,7 +5,7 @@ Installation
 Requirements
 ============
 
-* **Python 3.11–3.12** (CI targets 3.12; ``requires-python`` is ``>=3.11,<3.13``)
+* **Python 3.11-3.12** (CI targets 3.12; ``requires-python`` is ``>=3.11,<3.13``)
 * Conda is recommended for a clean environment
 * Optional: a compiled **DOLPHOT** binary on ``PATH`` for PSF photometry
 * Optional: **JWST** / **STPSF** stacks when running JWST-specific pipelines
@@ -35,7 +35,7 @@ Optional extras
    # Test dependencies
    pip install -e ".[test]"
 
-   # Dev tooling (ruff / mypy / pre-commit, if defined)
+   # Dev tooling (pytest + ruff Unicode / ASCII-adjacent checks)
    pip install -e ".[dev]"
 
 Verify

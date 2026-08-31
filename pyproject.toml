@@ -49,6 +49,7 @@ dev = [
     "ipython",
     "jupyter",
     "pytest>=8.0",
+    "ruff>=0.8",
 ]
 docs = [
     "sphinx>=5.0",
@@ -64,7 +65,7 @@ Documentation = "https://charliekilpatrick.github.io/st123/"
 "Provenance (hst123)" = "https://github.com/charliekilpatrick/hst123"
 "Provenance (jwst123)" = "https://github.com/aswinsuresh24/jwst123"
 
-# Console entry points live under st123.scripts (library code stays in st123.*).
+# Stage entry points live under st123.scripts (library code stays in st123.*).
 [project.scripts]
 download = "st123.scripts.download:main"
 align = "st123.scripts.align:main"
@@ -83,7 +84,7 @@ coadd-phot = "st123.scripts.coadd_phot:main"
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
-# Dynamic version from git tags (e.g. v0.1.0 → 0.1.0).
+# Dynamic version from git tags (e.g. v0.1.0 -> 0.1.0).
 # Between tags: 0.1.1.devN+gHASH (guess-next-dev). See README "Versioning".
 [tool.setuptools_scm]
 version_file = "st123/_version.py"
@@ -96,6 +97,23 @@ exclude = ["st123.notebooks*"]
 [tool.setuptools.package-data]
 st123 = [
     "notebooks/*.ipynb",
+]
+
+# Ruff has no global ASCII-only-source rule. These catch non-ASCII names
+# (PLC2401/PLC2403) and ambiguous Unicode homoglyphs (RUF001-003). Full
+# source-file ASCII is enforced by tests/test_ascii_source.py.
+[tool.ruff]
+target-version = "py311"
+src = ["st123", "tests"]
+extend-exclude = ["extdeps", "examples", "docs", "st123/notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "PLC2401",
+    "PLC2403",
+    "RUF001",
+    "RUF002",
+    "RUF003",
 ]
 
 [tool.pytest.ini_options]

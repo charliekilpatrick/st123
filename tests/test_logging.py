@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ from st123.utils.logging import (
     STREAM_FORMAT,
     _quiet_third_party_loggers,
     _reset_premature_astropy_logger,
+    configure_runtime_warnings,
     get_logger,
     setup_script_logging,
     shutdown_logging,
@@ -129,9 +131,9 @@ def test_align_main_creates_log(tmp_path: Path):
         {'group': np.array([], dtype=int), 'visit': np.array([], dtype='U8')}
     )
     with (
-        patch('st123.alignment.align.get_input_images', return_value=[]),
+        patch('st123.stages.alignment.align.get_input_images', return_value=[]),
         patch('st123.scripts.align.input_list', return_value=empty),
-        patch('st123.alignment.align.visit_filter_dict', return_value={}),
+        patch('st123.stages.alignment.align.visit_filter_dict', return_value={}),
     ):
         rc = align_script.main(
             ['--base-dir', str(tmp_path), '--mode', 'visit', '--ncores', '1']
@@ -209,3 +211,52 @@ assert hasattr(logging.getLogger('astropy'), '_set_defaults')
         text=True,
     )
     assert proc.returncode == 0, proc.stderr + proc.stdout
+
+
+def test_configure_runtime_warnings_suppresses_known_noise(tmp_path: Path):
+    setup_script_logging(tmp_path, 'mosaic')
+    with warnings.catch_warnings(record=True) as caught:
+        # Do not call simplefilter('always') -- that overrides ignore filters.
+        warnings.warn(
+            "'datfix' made the change 'Set DATE-BEG'",
+            UserWarning,
+        )
+        warnings.warn(
+            'Degrees of freedom <= 0 for slice.',
+            RuntimeWarning,
+        )
+        warnings.warn(
+            'Input data contains invalid values (NaNs or infs), '
+            'which were automatically clipped.',
+            UserWarning,
+        )
+        warnings.warn(
+            "'WCS.all_world2pix' failed to converge to the requested accuracy.\n"
+            'After 20 iterations, the solution is diverging at least for one '
+            'input point.',
+            UserWarning,
+        )
+    msgs = [str(w.message) for w in caught]
+    assert not any('datfix' in m for m in msgs)
+    assert not any('Degrees of freedom' in m for m in msgs)
+    assert not any('invalid values' in m for m in msgs)
+    assert not any('all_world2pix' in m for m in msgs)
+
+
+def test_psf_matching_imports_prefer_photutils3():
+    import warnings
+
+    from astropy.utils.exceptions import AstropyDeprecationWarning
+
+    from st123.utils.compatibility import psf_matching_imports
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always', AstropyDeprecationWarning)
+        window, kernel_fn = psf_matching_imports()
+    assert window is not None and kernel_fn is not None
+    msgs = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, AstropyDeprecationWarning)
+    ]
+    assert not any('psf.matching is deprecated' in m for m in msgs)
