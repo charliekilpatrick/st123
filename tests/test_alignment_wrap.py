@@ -10,9 +10,9 @@ import pytest
 from astropy.io import fits
 
 from helpers import write_illuminated_fits, write_ref_with_s_region
+from st123.datamodels import MIRIDataModel
 from st123.stages.alignment import align as align_lib
 from st123.stages.alignment.align import (
-    FILTER_MAX_REFERENCE_DISPERSION_MAS,
     F770W_CALIBRATOR_SETTINGS,
     AlignWorkerResult,
     SuccessfulAlignment,
@@ -71,14 +71,14 @@ def test_calibrator_settings_and_quality_hold_thresholds():
     assert f770.min_calibrators == 40
     assert f770.nbright == 200
     assert max_reference_dispersion_mas('F560W') is None
-    assert max_reference_dispersion_mas('F770W') == FILTER_MAX_REFERENCE_DISPERSION_MAS['F770W']
+    assert max_reference_dispersion_mas('F770W') == MIRIDataModel.MAX_REFERENCE_DISPERSION_MAS['F770W']
     assert max_reference_dispersion_mas('F9999W') == 70.0
 
 
 def test_assess_field_brightness_flags_bright_sci(tmp_path: Path):
     import numpy as np
     from st123.stages.alignment.align import assess_field_brightness
-    from st123.utils.settings import CROWDED_JHAT_NBRIGHT, crowded_jwst_params
+    from st123.datamodels import JWSTDataModel
 
     quiet = tmp_path / 'quiet_cal.fits'
     bright = tmp_path / 'bright_cal.fits'
@@ -93,15 +93,15 @@ def test_assess_field_brightness_flags_bright_sci(tmp_path: Path):
     assert quiet_stats['bright'] is False
     assert bright_stats['bright'] is True
     assert bright_stats['median'] == pytest.approx(80.0)
-    assert crowded_jwst_params['SNR_min'] >= 8
-    assert crowded_jwst_params['objmag_lim'][1] <= 20
-    assert CROWDED_JHAT_NBRIGHT == 100
+    assert JWSTDataModel.JHAT_CROWDED['SNR_min'] >= 8
+    assert JWSTDataModel.JHAT_CROWDED['objmag_lim'][1] <= 20
+    assert JWSTDataModel.CROWDED_JHAT_NBRIGHT == 100
 
 
 def test_align_jwst_image_retries_crowded_before_relaxed(tmp_path: Path):
     """Poor strict residual must try crowded/bright cuts before relaxing."""
     import numpy as np
-    from st123.utils.settings import CROWDED_JHAT_NBRIGHT, crowded_jwst_params
+    from st123.datamodels import JWSTDataModel
 
     cal = tmp_path / 'frame_cal.fits'
     data = np.full((64, 64), 2.0, dtype=np.float32)
@@ -118,7 +118,7 @@ def test_align_jwst_image_retries_crowded_before_relaxed(tmp_path: Path):
     nbrights: list[int] = []
 
     def fake_run_jhat(*, params, Nbright, **_kwargs):
-        if params.get('SNR_min') == crowded_jwst_params['SNR_min']:
+        if params.get('SNR_min') == JWSTDataModel.JHAT_CROWDED['SNR_min']:
             kinds.append('crowded')
         elif params.get('d2d_max', 0) >= 2.0:
             kinds.append('relaxed')
@@ -154,13 +154,13 @@ def test_align_jwst_image_retries_crowded_before_relaxed(tmp_path: Path):
         )
 
     assert kinds[:3] == ['strict', 'crowded', 'relaxed']
-    assert nbrights[1] == CROWDED_JHAT_NBRIGHT
+    assert nbrights[1] == JWSTDataModel.CROWDED_JHAT_NBRIGHT
 
 
 def test_align_jwst_image_uses_crowded_retry_when_bright_and_strict_fails(tmp_path: Path):
     """Bright SCI still starts strict; crowded is only a retry after failure."""
     import numpy as np
-    from st123.utils.settings import crowded_jwst_params
+    from st123.datamodels import JWSTDataModel
 
     cal = tmp_path / 'bright_cal.fits'
     data = np.full((64, 64), 100.0, dtype=np.float32)
@@ -176,7 +176,7 @@ def test_align_jwst_image_uses_crowded_retry_when_bright_and_strict_fails(tmp_pa
     kinds: list[str] = []
 
     def fake_run_jhat(*, params, **_kwargs):
-        if params.get('SNR_min') == crowded_jwst_params['SNR_min']:
+        if params.get('SNR_min') == JWSTDataModel.JHAT_CROWDED['SNR_min']:
             kinds.append('crowded')
         elif params.get('d2d_max', 0) >= 2.0:
             kinds.append('relaxed')

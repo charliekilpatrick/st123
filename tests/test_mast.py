@@ -136,7 +136,8 @@ def test_download_skips_unavailable_calib_level_silently(caplog):
             'productType': ['SCIENCE'],
             'productSubGroupDescription': ['CAL'],
             'calib_level': [2],
-            'productFilename': ['jw_ok_cal.fits'],
+            'productFilename': ['jw_ok_mirimage_cal.fits'],
+            # MIRI stage-2 filter keeps imager (*mirimage*) CAL products only.
         }
     )
     with (

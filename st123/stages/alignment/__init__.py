@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    'FILTER_MAX_REFERENCE_DISPERSION_MAS',
     'AlignmentSummaryRow',
     'CalibratorSettings',
     'FrameOverlaps',

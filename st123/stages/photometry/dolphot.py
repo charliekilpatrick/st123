@@ -18,29 +18,22 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence, TypeVar, Union
 
 from astropy.io import fits
-from st123.datamodels import as_datamodel
+from st123.datamodels import (
+    ACSDataModel,
+    HSTDataModel,
+    JWSTDataModel,
+    MIRIDataModel,
+    NIRCamDataModel,
+    WFC3IRDataModel,
+    WFC3UVISDataModel,
+    WFPC2DataModel,
+    as_datamodel,
+)
 
 from st123.utils.logging import run_logged_subprocess
 
 _T = TypeVar('_T')
 _R = TypeVar('_R')
-from st123.utils.settings import (
-    acs_calcsky_params,
-    acs_params,
-    base_params,
-    hst_base_params,
-    long_params,
-    miri_base_params,
-    miri_calcsky_params,
-    miri_params,
-    nircam_calcsky_params,
-    short_params,
-    wfc3_calcsky_params,
-    wfc3_ir_params,
-    wfc3_params,
-    wfpc2_calcsky_params,
-    wfpc2_params,
-)
 
 PathLike = Union[str, os.PathLike]
 
@@ -1130,7 +1123,7 @@ def prepare_mosaic_phot_job(
     instrument : str, optional
         ``'nircam'`` or ``'miri'``; selects mask and calcsky defaults.
         MIRI uses recommended ``dolphotMIRI.pdf`` globals via
-        :data:`st123.utils.settings.miri_base_params`.
+        :attr:`MIRIDataModel.DOLPHOT_BASE_PARAMS`.
     dolphot_bin : str or os.PathLike or None, optional
         Override path to the DOLPHOT ``bin`` directory.
     skip_mask : bool, optional
@@ -1149,7 +1142,7 @@ def prepare_mosaic_phot_job(
         Path to the written ``dolphot.param`` file.
     """
     inst = instrument.lower()
-    global_params = miri_base_params if inst == 'miri' else None
+    global_params = MIRIDataModel.DOLPHOT_BASE_PARAMS if inst == 'miri' else None
     phot_out = f'{job.phot_outdir.name}.phot'
     param = setup_paramfile(
         job.phot_outdir,
@@ -1227,19 +1220,19 @@ def per_image_params(kind: str) -> Mapping[str, str]:
         If *kind* is not recognized.
     """
     if kind == 'short':
-        return short_params
+        return NIRCamDataModel.DOLPHOT_SHORT_PARAMS
     if kind == 'long':
-        return long_params
+        return NIRCamDataModel.DOLPHOT_LONG_PARAMS
     if kind == 'miri':
-        return miri_params
+        return MIRIDataModel.DOLPHOT_IMAGE_PARAMS
     if kind == 'acs':
-        return acs_params
+        return ACSDataModel.DOLPHOT_IMAGE_PARAMS
     if kind == 'wfc3':
-        return wfc3_params
+        return WFC3UVISDataModel.DOLPHOT_IMAGE_PARAMS
     if kind == 'wfc3_ir':
-        return wfc3_ir_params
+        return WFC3IRDataModel.DOLPHOT_IMAGE_PARAMS
     if kind == 'wfpc2':
-        return wfpc2_params
+        return WFPC2DataModel.DOLPHOT_IMAGE_PARAMS
     raise ValueError(f'Unknown image kind: {kind}')
 
 
@@ -1456,15 +1449,15 @@ def calc_sky(
     """
     inst = instrument.lower()
     if inst == 'miri':
-        defaults = miri_calcsky_params
+        defaults = MIRIDataModel.CALCSKY_PARAMS
     elif inst == 'acs':
-        defaults = acs_calcsky_params
+        defaults = ACSDataModel.CALCSKY_PARAMS
     elif inst == 'wfc3':
-        defaults = wfc3_calcsky_params
+        defaults = WFC3UVISDataModel.CALCSKY_PARAMS
     elif inst == 'wfpc2':
-        defaults = wfpc2_calcsky_params
+        defaults = WFPC2DataModel.CALCSKY_PARAMS
     else:
-        defaults = nircam_calcsky_params
+        defaults = NIRCamDataModel.CALCSKY_PARAMS
     rin = defaults['rin'] if rin is None else rin
     rout = defaults['rout'] if rout is None else rout
     step = defaults['step'] if step is None else step
@@ -2148,7 +2141,7 @@ def prepare_hst_frames(
         staged_ref,
         sci_for_param,
         copy_files=False,
-        global_params=hst_base_params,
+        global_params=HSTDataModel.DOLPHOT_BASE_PARAMS,
         phot_out=f'{out.name}.phot',
         xytfile=xytfile,
     )
@@ -2180,7 +2173,7 @@ def write_paramfile(
         Science image paths (basenames written as ``img1_file``, ...).
     global_params : dict or None, optional
         Global DOLPHOT keywords merged into the parameter file. Defaults to
-        :data:`st123.utils.settings.base_params`, with MIRI keys added when
+        :attr:`JWSTDataModel.DOLPHOT_BASE_PARAMS`, with MIRI keys added when
         any MIRI frame is present.
     xytfile : str or os.PathLike or None, optional
         Warm-start star list; basename written as ``xytfile``.
@@ -2210,18 +2203,22 @@ def write_paramfile(
         raise ValueError('image_kinds length must match images')
 
     # Include MIRI / HST global knobs when those frames are present.
-    gparams = dict(global_params) if global_params is not None else dict(base_params)
+    gparams = (
+        dict(global_params)
+        if global_params is not None
+        else dict(JWSTDataModel.DOLPHOT_BASE_PARAMS)
+    )
     if any(k == 'miri' for k in kinds):
-        merged = dict(miri_base_params)
+        merged = dict(MIRIDataModel.DOLPHOT_BASE_PARAMS)
         merged.update(gparams)
         # Keep caller overrides, but ensure MIRI-required keys exist.
         if 'MIRIvega' not in merged:
-            merged['MIRIvega'] = miri_base_params['MIRIvega']
+            merged['MIRIvega'] = MIRIDataModel.DOLPHOT_BASE_PARAMS['MIRIvega']
         if 'UseWCS' not in merged:
             merged['UseWCS'] = '2'
         gparams = merged
     if any(k in _HST_IMAGE_KINDS for k in kinds):
-        merged = dict(hst_base_params)
+        merged = dict(HSTDataModel.DOLPHOT_BASE_PARAMS)
         merged.update(gparams)
         if 'UseWCS' not in merged:
             merged['UseWCS'] = '1'

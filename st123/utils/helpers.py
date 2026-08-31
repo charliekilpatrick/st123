@@ -13,11 +13,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.table import Column, Table
 
-from st123.utils.settings import (
-    BEST_FILTER_TYPES,
-    BEST_REFERENCE_FILTERS,
-    acceptable_filters,
-)
+from st123.datamodels import HSTDataModel, InstrumentDataModel
 
 logger = logging.getLogger(__name__)
 
@@ -361,7 +357,7 @@ def pick_deepest_images(
         Science products to consider.
     reffilter : str or None, optional
         Force a specific filter (must appear in
-        :data:`st123.utils.settings.acceptable_filters`).
+        :meth:`InstrumentDataModel.all_filters`).
     avoid_wfpc2 : bool, optional
         Exclude WFPC2 instrument/filter pairs when alternatives exist.
     refinst : str or None, optional
@@ -374,10 +370,11 @@ def pick_deepest_images(
     """
     from st123.datamodels.instrument import as_datamodel, path_of
 
-    best_filters = list(BEST_REFERENCE_FILTERS)
-    if reffilter and reffilter.upper() in acceptable_filters:
+    known = InstrumentDataModel.all_filters()
+    best_filters = list(HSTDataModel.BEST_REFERENCE_FILTERS)
+    if reffilter and reffilter.upper() in known:
         best_filters = [reffilter.lower()]
-    best_types = list(BEST_FILTER_TYPES)
+    best_types = list(InstrumentDataModel.BEST_FILTER_TYPES)
 
     models = [as_datamodel(im) for im in images]
     filts = [m.filter_name for m in models]

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from st123.datamodels.hst.hst import HSTDataModel
+from st123.datamodels.hst.acs import ACSDataModel
 
 __all__ = ['ACSWFCDataModel']
 
 
-class ACSWFCDataModel(HSTDataModel):
+class ACSWFCDataModel(ACSDataModel):
     """ACS/WFC ``flc`` / JHAT science product."""
 
     instrument = 'ACS'

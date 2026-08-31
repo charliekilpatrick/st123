@@ -62,10 +62,9 @@ Run ``<stage> --help`` for the full option set.
 Supported instruments
 =====================
 
-Filter / instrument tables live in :mod:`st123.utils.settings`
-(``acceptable_filters``, ``FILTERS_BY_INSTRUMENT``), covering HST
-(WFPC2, ACS, WFC3), JWST (NIRCam, MIRI), Roman, and Euclid groups used
-for validation and MAST filtering.
+Filter / instrument tables live on the datamodel classes
+(:class:`~st123.datamodels.instrument.InstrumentDataModel` subclasses:
+WFPC2, ACS, WFC3/UVIS, WFC3/IR, NIRCam, MIRI, Euclid VIS / NIR, Roman WFI).
 
 Tips
 ====

@@ -31,7 +31,7 @@ from st123.scripts.utils.options import (
     resolve_project_root,
     resolve_reduction_dir,
 )
-from st123.utils.settings import BEST_REFERENCE_FILTERS, hst_base_params, miri_base_params
+from st123.datamodels import HSTDataModel, MIRIDataModel
 from st123.utils.logging import shutdown_logging
 
 logger = logging.getLogger(__name__)
@@ -215,7 +215,7 @@ def _pick_hst_reference(
     single camera (``wfc3`` / ``acs`` / ``wfpc2``), coadds whose filename
     contains that instrument are preferred. For mixed ``hst`` (or ``None``),
     prefer WFC3 -> ACS -> WFPC2, then
-    :data:`~st123.utils.settings.BEST_REFERENCE_FILTERS`.
+    :attr:`HSTDataModel.BEST_REFERENCE_FILTERS`.
     """
     ref_dir = reduction / 'reference'
     coadds: list[Path] = []
@@ -248,8 +248,8 @@ def _pick_hst_reference(
                     inst_rank = 3
             else:
                 inst_rank = 0 if (inst and inst in name) else 1
-            filt_rank = len(BEST_REFERENCE_FILTERS)
-            for i, filt in enumerate(BEST_REFERENCE_FILTERS):
+            filt_rank = len(HSTDataModel.BEST_REFERENCE_FILTERS)
+            for i, filt in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
                 if f'_{filt}_' in name:
                     filt_rank = i
                     break
@@ -258,7 +258,7 @@ def _pick_hst_reference(
                     from st123.utils.helpers import get_filter
 
                     filt = get_filter(path)
-                    for i, pref in enumerate(BEST_REFERENCE_FILTERS):
+                    for i, pref in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
                         if filt == pref:
                             filt_rank = i
                             break
@@ -559,9 +559,9 @@ def _run_explicit(args) -> int:
             if not ref_dst.exists():
                 shutil.copy2(ref_src, ref_dst)
             if args.instrument == 'miri':
-                global_params = miri_base_params
+                global_params = MIRIDataModel.DOLPHOT_BASE_PARAMS
             elif args.instrument in _HST_INSTRUMENTS:
-                global_params = hst_base_params
+                global_params = HSTDataModel.DOLPHOT_BASE_PARAMS
             else:
                 global_params = None
             plan = setup_paramfile(

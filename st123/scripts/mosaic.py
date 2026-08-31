@@ -25,11 +25,7 @@ from st123.scripts.utils.options import (
     resolve_reduction_dir,
 )
 from st123.utils.logging import shutdown_logging
-from st123.datamodels import as_datamodel
-from st123.utils.settings import (
-    DEFAULT_MIRI_MOSAIC_FILTERS,
-    DEFAULT_NIRCAM_MOSAIC_FILTERS,
-)
+from st123.datamodels import MIRIDataModel, NIRCamDataModel, as_datamodel
 
 logger = logging.getLogger(__name__)
 
@@ -423,9 +419,9 @@ def default_jwst_filters_for_instruments(jwst_instruments: list[str]) -> list[st
     filters: list[str] = []
     upper = {str(i).upper() for i in jwst_instruments}
     if 'NIRCAM' in upper or 'NRC' in upper:
-        filters.extend(DEFAULT_NIRCAM_MOSAIC_FILTERS)
+        filters.extend(NIRCamDataModel.MOSAIC_FILTERS)
     if 'MIRI' in upper:
-        filters.extend(DEFAULT_MIRI_MOSAIC_FILTERS)
+        filters.extend(MIRIDataModel.MOSAIC_FILTERS)
     # Preserve order, drop dupes
     out: list[str] = []
     for f in filters:
@@ -969,11 +965,8 @@ def run_orchestrated_mosaic(
     Plans boxes once from the combined JWST+HST JHAT set, then runs JWST and
     HST legs sequentially into those directories (avoids nested-process deadlock).
     """
+    from st123.datamodels import JWSTDataModel, MIRIDataModel, NIRCamDataModel
     from st123.stages.mosaic.mosaic import plan_mosaic_boxes
-    from st123.utils.jwst_coverage import (
-        count_jwst_frames_on_disk,
-        should_skip_miri_only_jwst,
-    )
 
     try:
         jwst_inst, hst_inst = partition_mosaic_instruments(instruments)
@@ -983,12 +976,21 @@ def run_orchestrated_mosaic(
 
     base_dir = Path(resolve_reduction_dir(args.base_dir))
     force_miri = bool(getattr(args, 'force_miri', False))
-    n_nrc, n_miri = count_jwst_frames_on_disk(args.base_dir)
-    if jwst_inst and should_skip_miri_only_jwst(
-        n_nrc > 0,
-        n_miri > 0,
-        jwst_inst,
-        force_miri=force_miri,
+    want_nircam = any(NIRCamDataModel.matches(i) for i in jwst_inst)
+    want_miri = any(MIRIDataModel.matches(i) for i in jwst_inst)
+    data_root = Path(args.base_dir).expanduser().resolve()
+    n_nrc, n_miri = JWSTDataModel.coverage_under(
+        data_root / 'download' / 'JWST',
+        data_root / 'reduction' / 'raw',
+        data_root / 'raw',
+    )
+    if (
+        jwst_inst
+        and not force_miri
+        and want_nircam
+        and want_miri
+        and n_miri > 0
+        and n_nrc == 0
     ):
         logger.warning(
             'MIRI-only JWST field (NIRCam frames=%d, MIRI frames=%d); '

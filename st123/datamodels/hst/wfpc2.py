@@ -23,6 +23,50 @@ class WFPC2DataModel(HSTDataModel):
 
     instrument = 'WFPC2'
     science_suffixes = ('_c0m.fits', '_jhat.fits')
+    FILTERS: tuple[str, ...] = (
+        'F122M', 'F160BW', 'F185W', 'F218W', 'F255W', 'F300W', 'F336W', 'F375N',
+        'F380W', 'F390N', 'F437N', 'F439W', 'F450W', 'F467M', 'F469N', 'F487N',
+        'F502N', 'F547M', 'F555W', 'F569W', 'F588N', 'F606W', 'F622W', 'F631N',
+        'F656N', 'F658N', 'F673N', 'F675W', 'F702W', 'F785LP', 'F791W', 'F814W',
+        'F850LP', 'F953N', 'F1042M',
+    )
+    FILTER_HEADER_KEYS: tuple[str, ...] = ('FILTER', 'FILTNAM1', 'FILTNAM2')
+    DOLPHOT_IMAGE_PARAMS: dict[str, str] = {
+        'shift': '0 0',
+        'xform': '1 0 0',
+        'raper': '3',
+        'rchi': '2.0',
+        'rsky0': '15',
+        'rsky1': '35',
+        'rsky2': '4 10',
+        'rpsf': '13',
+        'apsky': '15 25',
+    }
+    CALCSKY_PARAMS: dict = {
+        'rin': 10,
+        'rout': 25,
+        'step': 2,
+        'sigma_low': 2.25,
+        'sigma_high': 2.00,
+    }
+    DRIZ_BITS: int = 1032
+    CRPARS: dict[str, float] = {
+        'rdnoise': 10.0,
+        'gain': 7.0,
+        'saturate': 27000.0,
+        'sig_clip': 4.0,
+        'sig_frac': 0.3,
+        'obj_lim': 6.0,
+    }
+    OVERSCAN_EDGE_PIX: int = 32
+    OVERSCAN_LEFT_EXTRA: int = 20
+    OVERSCAN_DQ_BIT: int = 256
+    SCI_FLOOR: float = -20.0
+    BAD_GROW_PIX: int = 2
+    BAD_COL_FRAC: float = 0.50
+    VAR_EDGE_PIX: int = 48
+    VAR_SIGMA: float = 5.0
+    DROP_SINGLE_CTX_EDGE_PIX: int = 16
 
     def __init__(
         self,

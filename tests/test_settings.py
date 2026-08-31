@@ -1,77 +1,106 @@
-"""Unit tests for ``st123.utils.settings`` defaults and filter catalogs."""
+"""Unit tests for datamodel filter catalogs and leftover layout settings."""
 
 from __future__ import annotations
 
+from st123.datamodels import (
+    ACSDataModel,
+    EuclidDataModel,
+    EuclidNIRDataModel,
+    EuclidVISDataModel,
+    HSTDataModel,
+    InstrumentDataModel,
+    JWSTDataModel,
+    MIRIDataModel,
+    NIRCamDataModel,
+    RomanDataModel,
+    RomanWFIDataModel,
+    WFC3IRDataModel,
+    WFC3UVISDataModel,
+    WFPC2DataModel,
+)
 from st123.utils import settings
 
 
-def test_acceptable_filters_covers_all_missions():
-    """Header-style uppercase names for each supported facility."""
+def test_datamodel_filters_cover_supported_bandpasses():
+    import st123.datamodels  # noqa: F401  # register subclasses
+
+    names = InstrumentDataModel.all_filters()
     for name in (
-        'F606W',  # HST shared
-        'F275W',  # WFC3/UVIS
-        'F160W',  # WFC3/IR
-        'F200W',  # NIRCam
-        'F770W',  # MIRI
-        'F062',  # Roman/WFI
-        'VIS',  # Euclid
+        'F606W',
+        'F275W',
+        'F160W',
+        'F200W',
+        'F770W',
+        'F062',
+        'VIS',
         'YE',
         'NIR_J',
     ):
-        assert name in settings.acceptable_filters
+        assert name in names
 
 
-def test_filters_by_instrument_telescope_tags():
-    expected = {
-        'WFPC2': 'HST',
-        'ACS': 'HST',
-        'WFC3': 'HST',
-        'NIRCAM': 'JWST',
-        'MIRI': 'JWST',
-        'WFI': 'Roman',
-        'VIS': 'Euclid',
-        'NISP': 'Euclid',
-    }
-    for instrument, telescope in expected.items():
-        meta = settings.FILTERS_BY_INSTRUMENT[instrument]
-        assert meta['telescope'] == telescope
-        assert len(meta['filters']) > 0
+def test_instrument_filter_lists_and_telescopes():
+    assert HSTDataModel.telescope == 'HST'
+    assert JWSTDataModel.telescope == 'JWST'
+    assert EuclidDataModel.telescope == 'EUCLID'
+    assert RomanDataModel.telescope == 'ROMAN'
+    assert WFPC2DataModel.FILTERS[0] == 'F122M'
+    assert 'F435W' in ACSDataModel.FILTERS
+    assert 'F275W' in WFC3UVISDataModel.FILTERS
+    assert 'F160W' in WFC3IRDataModel.FILTERS
+    assert 'F200W' in NIRCamDataModel.FILTERS
+    assert 'F770W' in MIRIDataModel.FILTERS
+    assert 'VIS' in EuclidVISDataModel.FILTERS
+    assert 'YE' in EuclidNIRDataModel.FILTERS
+    assert 'F158' in RomanWFIDataModel.FILTERS
 
 
-def test_acceptable_filters_is_union_of_instrument_lists():
-    from_groups = set()
-    for key in ('WFPC2', 'ACS', 'WFC3', 'NIRCAM', 'MIRI', 'WFI'):
-        from_groups.update(settings.FILTERS_BY_INSTRUMENT[key]['filters'])
-    from_groups.update(settings.EUCLID_FILTERS)
-    assert set(settings.acceptable_filters) == from_groups
+def test_hst_jwst_mission_instrument_lists():
+    assert HSTDataModel.DEFAULT_MAST_FILTERS is None
+    assert 'WFC3' in HSTDataModel.INSTRUMENTS
+    assert JWSTDataModel.INSTRUMENTS == ('NIRCAM', 'MIRI')
+    assert EuclidDataModel.INSTRUMENTS == ('VIS', 'NISP')
+    assert RomanDataModel.INSTRUMENTS == ('WFI',)
+    assert MIRIDataModel.MAX_REFERENCE_DISPERSION_MAS['F560W'] is None
+    assert MIRIDataModel.MAX_REFERENCE_DISPERSION_MAS['F1000W'] == 35.0
+    assert MIRIDataModel.DEFAULT_MAX_REFERENCE_DISPERSION_MAS == 70.0
 
 
-def test_acceptable_filters_unique_and_uppercase():
-    assert len(settings.acceptable_filters) == len(set(settings.acceptable_filters))
-    assert all(name == name.upper() for name in settings.acceptable_filters)
+def test_euclid_roman_instrument_geometry():
+    assert EuclidVISDataModel.PIXEL_SCALE_ARCSEC == 0.101
+    assert EuclidVISDataModel.DETECTOR_COUNT == 36
+    assert len(EuclidVISDataModel.detector_ids()) == 36
+    assert EuclidNIRDataModel.PIXEL_SCALE_ARCSEC == 0.30
+    assert EuclidNIRDataModel.canonical_filter('NIR_J') == 'JE'
+    assert EuclidNIRDataModel.canonical_filter('Y') == 'YE'
+    assert RomanWFIDataModel.PIXEL_SCALE_ARCSEC == 0.11
+    assert RomanWFIDataModel.DETECTOR_COUNT == 18
+    assert RomanWFIDataModel.detector_ids()[-1] == 'WFI18'
+    assert RomanWFIDataModel.filter_from_filename(
+        'r0012301008002013005_0005_wfi06_f184_cal.asdf'
+    ) == 'F184'
+    assert not RomanWFIDataModel.matches('WFPC2')
+    assert RomanWFIDataModel.matches('WFI')
+    assert not EuclidVISDataModel.matches('NISP')
 
 
-def test_best_reference_filters_are_lowercase_subset():
-    assert settings.BEST_REFERENCE_FILTERS[0] == 'f625w'
-    for filt in settings.BEST_REFERENCE_FILTERS:
-        assert filt == filt.lower()
-        assert filt.upper() in settings.acceptable_filters
+def test_dolphot_and_jhat_params_on_classes():
+    assert JWSTDataModel.DOLPHOT_BASE_PARAMS['FitSky'] == '2'
+    assert MIRIDataModel.DOLPHOT_IMAGE_PARAMS['raper'] == '3'
+    assert NIRCamDataModel.CALCSKY_PARAMS['rin'] == 15
+    assert MIRIDataModel.CALCSKY_PARAMS['rin'] == 10
+    assert JWSTDataModel.JHAT_STRICT['refcat_racol'] == 'ra'
 
 
-def test_mast_and_alignment_defaults():
-    assert settings.DEFAULT_HST_FILTERS is None
-    assert 'WFC3' in settings.DEFAULT_HST_INSTRUMENTS
-    assert 'NIRCAM' in settings.DEFAULT_JWST_INSTRUMENTS
+def test_layout_settings_remain():
     assert settings.DEFAULT_DOWNLOAD_LAYOUT == 'telescope/instrument/filter/obsid'
-    assert settings.DEFAULT_MAX_REFERENCE_DISPERSION_MAS == 70.0
-    assert settings.FILTER_MAX_REFERENCE_DISPERSION_MAS['F560W'] is None
-    assert settings.FILTER_MAX_REFERENCE_DISPERSION_MAS['F1000W'] == 35.0
     assert settings.DEFAULT_PAIR_OUTDIR == 'alignment_output'
+    assert settings.DOWNLOAD_DIR_NAME == 'download'
 
 
-def test_jhat_and_dolphot_param_dicts():
-    assert settings.strict_jwst_params['refcat_racol'] == 'ra'
-    assert settings.base_params['FitSky'] == '2'
-    assert settings.miri_params['raper'] == '3'
-    assert settings.nircam_calcsky_params['rin'] == 15
-    assert settings.miri_calcsky_params['rin'] == 10
+def test_best_reference_filters_are_lowercase_hst_bands():
+    assert HSTDataModel.BEST_REFERENCE_FILTERS[0] == 'f625w'
+    known = InstrumentDataModel.all_filters()
+    for filt in HSTDataModel.BEST_REFERENCE_FILTERS:
+        assert filt == filt.lower()
+        assert filt.upper() in known

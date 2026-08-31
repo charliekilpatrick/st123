@@ -27,10 +27,6 @@ _DOWNLOAD_EXPORTS = frozenset(
 _MAST_EXPORTS = frozenset(
     {
         'DEFAULT_DOWNLOAD_LAYOUT',
-        'DEFAULT_HST_FILTERS',
-        'DEFAULT_HST_INSTRUMENTS',
-        'DEFAULT_JWST_INSTRUMENTS',
-        'HST_PRODUCT_RULES',
         'collect_hst_products',
         'coverage_fraction',
         'download_hst_observations',

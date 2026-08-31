@@ -35,6 +35,8 @@ def test_old_top_level_stage_packages_are_gone():
         'st123.datamodels',
         'st123.datamodels.hst',
         'st123.datamodels.jwst',
+        'st123.datamodels.euclid',
+        'st123.datamodels.roman',
         'st123.pipelines',
         'st123.pipelines.pipeline',
     ],

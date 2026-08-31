@@ -234,16 +234,13 @@ def test_telescope_equals_default_instruments():
         default_instruments_for_telescope,
         resolve_instruments_with_telescope,
     )
-    from st123.utils.settings import (
-        DEFAULT_HST_INSTRUMENTS,
-        DEFAULT_JWST_INSTRUMENTS,
-    )
+    from st123.datamodels import HSTDataModel, JWSTDataModel
 
     assert default_instruments_for_telescope('hst') == list(
-        DEFAULT_HST_INSTRUMENTS
+        HSTDataModel.INSTRUMENTS
     )
     assert default_instruments_for_telescope('jwst') == list(
-        DEFAULT_JWST_INSTRUMENTS
+        JWSTDataModel.INSTRUMENTS
     )
     assert default_instruments_for_telescope(None) is None
 
@@ -378,7 +375,7 @@ def test_orchestrated_alignment_stage_order(tmp_path: Path):
             side_effect=[[], [str(tmp_path / 'coadd.fits')], [str(tmp_path / 'coadd.fits')]],
         ),
         patch(
-            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            'st123.datamodels.JWSTDataModel.coverage_under',
             return_value=(1, 1),
         ),
     ):
@@ -451,7 +448,7 @@ def test_orchestrated_align_skips_miri_only_jwst(tmp_path: Path):
         ),
         patch.object(align_script, 'run_reference_alignment', side_effect=_miri),
         patch(
-            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            'st123.datamodels.JWSTDataModel.coverage_under',
             return_value=(0, 4),
         ),
     ):
@@ -476,7 +473,7 @@ def test_orchestrated_align_skips_miri_only_jwst(tmp_path: Path):
             return_value=[str(tmp_path / 'coadd.fits')],
         ),
         patch(
-            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            'st123.datamodels.JWSTDataModel.coverage_under',
             return_value=(0, 4),
         ),
     ):
@@ -547,7 +544,7 @@ def test_orchestrated_miri_skips_mosaic_when_existing_box_has_coadds(tmp_path: P
         patch.object(align_script, 'run_intermediate_nircam_mosaic', side_effect=_mosaic),
         patch.object(align_script, 'run_reference_alignment', side_effect=_miri),
         patch(
-            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            'st123.datamodels.JWSTDataModel.coverage_under',
             return_value=(4, 2),
         ),
     ):
@@ -575,7 +572,7 @@ def test_orchestrated_miri_existing_box_without_coadds_fails(tmp_path: Path):
         patch.object(align_script, 'run_intermediate_nircam_mosaic', side_effect=_mosaic),
         patch.object(align_script, 'run_reference_alignment', side_effect=_miri),
         patch(
-            'st123.utils.jwst_coverage.count_jwst_frames_on_disk',
+            'st123.datamodels.JWSTDataModel.coverage_under',
             return_value=(4, 2),
         ),
     ):

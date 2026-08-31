@@ -11,9 +11,9 @@ from typing import Optional, Sequence
 from astropy.coordinates import SkyCoord
 from astropy.units import Quantity
 
+from st123.datamodels import HSTDataModel, JWSTDataModel, MIRIDataModel, NIRCamDataModel
 from st123.stages.download.mast import (
     DEFAULT_DOWNLOAD_LAYOUT,
-    DEFAULT_HST_INSTRUMENTS,
     download_hst_observations,
     download_jwst_observations,
     filter_jwst_observations_by_stage,
@@ -21,10 +21,6 @@ from st123.stages.download.mast import (
     query_hst,
     query_jwst,
     resolve_mast_token,
-)
-from st123.utils.jwst_coverage import (
-    mast_table_jwst_coverage,
-    should_skip_miri_only_jwst,
 )
 from st123.utils.logging import capture_output
 
@@ -213,12 +209,25 @@ def query_mast_jwst(
     if len(obs_table) == 0:
         return MastDownloadResult(0)
 
-    has_nircam, has_miri = mast_table_jwst_coverage(obs_table)
-    if should_skip_miri_only_jwst(
-        has_nircam,
-        has_miri,
-        instruments,
-        force_miri=force_miri,
+    requested = instruments if instruments is not None else JWSTDataModel.INSTRUMENTS
+    want_nircam = any(NIRCamDataModel.matches(name) for name in requested)
+    want_miri = any(MIRIDataModel.matches(name) for name in requested)
+    has_nircam = False
+    has_miri = False
+    if 'instrument_name' in getattr(obs_table, 'colnames', []):
+        for name in obs_table['instrument_name']:
+            if NIRCamDataModel.matches(name):
+                has_nircam = True
+            if MIRIDataModel.matches(name):
+                has_miri = True
+            if has_nircam and has_miri:
+                break
+    if (
+        not force_miri
+        and want_nircam
+        and want_miri
+        and has_miri
+        and not has_nircam
     ):
         logger.warning(
             'MIRI-only JWST field (no NIRCam); skipping JWST download. '
@@ -290,7 +299,7 @@ def query_mast_hst(
     outdir_s = str(outdir)
     os.makedirs(outdir_s, exist_ok=True)
     token = resolve_mast_token(token)
-    inst = list(instruments) if instruments is not None else list(DEFAULT_HST_INSTRUMENTS)
+    inst = list(instruments) if instruments is not None else list(HSTDataModel.INSTRUMENTS)
     filters = None
     if allowed_filters:
         filters = [normalize_filter_name(f) for f in allowed_filters]

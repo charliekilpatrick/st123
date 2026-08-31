@@ -82,7 +82,9 @@ Datamodels
 ==========
 
 On-disk FITS product types. Not a CLI stage. :func:`~st123.datamodels.open_datamodel`
-returns the most specific class (JWST-NIRCam, HST-WFC3-IR, ...).
+returns the most specific class (JWST-NIRCam, HST-WFC3-IR, ...). Filter catalogs,
+DOLPHOT / JHAT / drizzle knobs, and MAST instrument lists are class attributes
+on those datamodels.
 
 .. automodule:: st123.datamodels
    :members:
@@ -101,6 +103,23 @@ returns the most specific class (JWST-NIRCam, HST-WFC3-IR, ...).
    :show-inheritance:
 
 .. automodule:: st123.datamodels.hst
+   :members:
+   :undoc-members:
+   :imported-members:
+   :show-inheritance:
+
+.. automodule:: st123.datamodels.hst.acs
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: st123.datamodels.euclid
+   :members:
+   :undoc-members:
+   :imported-members:
+   :show-inheritance:
+
+.. automodule:: st123.datamodels.roman
    :members:
    :undoc-members:
    :imported-members:

@@ -851,10 +851,7 @@ def run_orchestrated_alignment(
     disk, JWST stages are skipped (rc=0) unless ``--force-miri`` / explicit
     ``--instruments MIRI``.
     """
-    from st123.utils.jwst_coverage import (
-        count_jwst_frames_on_disk,
-        should_skip_miri_only_jwst,
-    )
+    from st123.datamodels import JWSTDataModel, MIRIDataModel, NIRCamDataModel
 
     try:
         jwst_inst, hst_inst = partition_align_instruments(instruments)
@@ -866,21 +863,26 @@ def run_orchestrated_alignment(
         logger.error('--base-dir is required for orchestrated multi-instrument align')
         return 2
 
-    want_nircam = any(i.upper() in ('NIRCAM', 'NRC') for i in jwst_inst)
-    want_miri = any(i.upper() == 'MIRI' for i in jwst_inst)
+    want_nircam = any(NIRCamDataModel.matches(i) for i in jwst_inst)
+    want_miri = any(MIRIDataModel.matches(i) for i in jwst_inst)
     ncores = int(getattr(args, 'ncores', 1) or 1)
     verbose = bool(getattr(args, 'verbose', False))
     stage_rcs: list[tuple[str, int]] = []
     force_miri = bool(getattr(args, 'force_miri', False))
 
-    n_nrc, n_miri = count_jwst_frames_on_disk(args.base_dir)
-    skip_jwst = should_skip_miri_only_jwst(
-        n_nrc > 0,
-        n_miri > 0,
-        jwst_inst or instruments,
-        force_miri=force_miri,
+    root = Path(args.base_dir).expanduser().resolve()
+    n_nrc, n_miri = JWSTDataModel.coverage_under(
+        root / 'download' / 'JWST',
+        root / 'reduction' / 'raw',
+        root / 'raw',
     )
-    if skip_jwst:
+    if (
+        not force_miri
+        and want_nircam
+        and want_miri
+        and n_miri > 0
+        and n_nrc == 0
+    ):
         logger.warning(
             'MIRI-only JWST field (NIRCam frames=%d, MIRI frames=%d); '
             'skipping JWST align stages. Pass --force-miri (or '

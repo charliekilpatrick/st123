@@ -11,8 +11,15 @@ from astropy.io import fits
 from astropy.table import Table
 
 from helpers import make_wcs_header
+from st123.datamodels import (
+    HSTDataModel,
+    InstrumentDataModel,
+    JWSTDataModel,
+    MIRIDataModel,
+    NIRCamDataModel,
+)
 from st123 import utils as utils_pkg
-from st123.utils import helpers, link, settings
+from st123.utils import helpers, link
 
 
 def _write_jwst_cal(
@@ -84,21 +91,20 @@ def test_is_full_frame_miri(tmp_path: Path):
 # --- settings -----------------------------------------------------------------
 
 
-def test_settings_jhat_param_dicts():
-    for name in (
-        'strict_gaia_params',
-        'relaxed_gaia_params',
-        'strict_jwst_params',
-        'relaxed_jwst_params',
+def test_jhat_and_dolphot_params_on_datamodels():
+    for params in (
+        JWSTDataModel.JHAT_GAIA_STRICT,
+        JWSTDataModel.JHAT_GAIA_RELAXED,
+        JWSTDataModel.JHAT_STRICT,
+        JWSTDataModel.JHAT_RELAXED,
     ):
-        params = getattr(settings, name)
         assert isinstance(params, dict)
         assert params['telescope'] == 'jwst'
         assert 'd2d_max' in params
-    assert settings.strict_jwst_params['refcat_racol'] == 'ra'
-    assert 'FitSky' in settings.base_params
-    assert 'raper' in settings.short_params
-    assert 'raper' in settings.long_params
+    assert JWSTDataModel.JHAT_STRICT['refcat_racol'] == 'ra'
+    assert 'FitSky' in JWSTDataModel.DOLPHOT_BASE_PARAMS
+    assert 'raper' in NIRCamDataModel.DOLPHOT_SHORT_PARAMS
+    assert 'raper' in NIRCamDataModel.DOLPHOT_LONG_PARAMS
 
 
 # --- link ---------------------------------------------------------------------
@@ -282,20 +288,19 @@ def test_package_reexports():
     assert callable(utils_pkg.parse_coord)
     assert callable(utils_pkg.input_list)
     assert callable(utils_pkg.create_symlink)
-    assert isinstance(utils_pkg.strict_jwst_params, dict)
-    assert 'F606W' in utils_pkg.acceptable_filters
-    # Expanded multi-mission filter catalog lives in settings
-    assert 'F200W' in utils_pkg.acceptable_filters  # JWST/NIRCam
-    assert 'F770W' in utils_pkg.acceptable_filters  # JWST/MIRI
-    assert 'F062' in utils_pkg.acceptable_filters  # Roman/WFI
-    assert 'VIS' in utils_pkg.acceptable_filters  # Euclid
-    assert utils_pkg.FILTERS_BY_INSTRUMENT['NIRCAM']['telescope'] == 'JWST'
-    assert utils_pkg.FILTERS_BY_INSTRUMENT['WFI']['telescope'] == 'Roman'
-    assert 'f606w' in utils_pkg.BEST_REFERENCE_FILTERS
+    known = InstrumentDataModel.all_filters()
+    assert 'F606W' in known
+    assert 'F200W' in known  # JWST/NIRCam
+    assert 'F770W' in known  # JWST/MIRI
+    assert 'F062' in known  # Roman/WFI
+    assert 'VIS' in known  # Euclid
+    assert NIRCamDataModel.telescope == 'JWST'
+    assert MIRIDataModel.FILTERS[0] == 'F560W'
+    assert 'f606w' in HSTDataModel.BEST_REFERENCE_FILTERS
 
 
 def test_pick_deepest_images_prefers_best_filter(tmp_path: Path):
-    """Prefer a ``BEST_REFERENCE_FILTERS`` band over a non-preferred band."""
+    """Prefer an :attr:`HSTDataModel.BEST_REFERENCE_FILTERS` band over a non-preferred band."""
     preferred = _write_jwst_cal(
         tmp_path / 'a_nrca1_cal.fits',
         filt='F606W',

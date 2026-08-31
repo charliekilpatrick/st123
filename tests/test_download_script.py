@@ -111,6 +111,43 @@ def test_query_mast_jwst_skips_miri_only_by_default(tmp_path):
             'st123.stages.download.download.filter_jwst_observations_by_stage',
             side_effect=lambda table, stage: table,
         ),
+        patch('st123.stages.download.download.download_jwst_observations') as mock_dl,
+    ):
+        defaulted = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+        )
+    assert defaulted.skipped_miri_only is True
+    mock_dl.assert_not_called()
+
+    with (
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
+        patch(
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
+        patch(
+            'st123.stages.download.download.download_jwst_observations',
+            return_value=2,
+        ) as mock_dl,
+    ):
+        miri_only = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+            instruments=['MIRI'],
+        )
+    assert miri_only.n_observations == 2
+    assert miri_only.skipped_miri_only is False
+    mock_dl.assert_called_once()
+
+    with (
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
+        patch(
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
         patch(
             'st123.stages.download.download.download_jwst_observations', return_value=2
         ) as mock_dl,

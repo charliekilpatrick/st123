@@ -99,16 +99,7 @@ from st123.utils.helpers import (  # noqa: E402
     xmatch_common,
 )
 from st123.utils.compatibility import patch_jwst_for_photutils3  # noqa: E402
-from st123.utils.settings import (  # noqa: E402
-    CROWDED_JHAT_NBRIGHT,
-    DEFAULT_MAX_REFERENCE_DISPERSION_MAS,
-    FILTER_MAX_REFERENCE_DISPERSION_MAS,
-    crowded_jwst_params,
-    relaxed_gaia_params,
-    relaxed_jwst_params,
-    strict_gaia_params,
-    strict_jwst_params,
-)
+from st123.datamodels import JWSTDataModel, MIRIDataModel
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +133,7 @@ class CalibratorSettings:
     miri_sharp_max: float | None = None
     min_calibrators: int = 20
     # JHAT native source cuts (applied before Nbright). None = keep the
-    # ``strict_jwst_params`` defaults.
+    # ``JWSTDataModel.JHAT_STRICT`` defaults.
     sharpness_lim: tuple[float, float] | None = None
     roundness1_lim: tuple[float, float] | None = None
     objmag_lim: tuple[float, float] | None = None
@@ -193,7 +184,7 @@ class CalibratorSettings:
         }
 
 
-# Default (non-F770W) pipeline settings - use CLI / strict_jwst_params defaults.
+# Default (non-F770W) pipeline settings - use CLI / JWSTDataModel.JHAT_STRICT defaults.
 DEFAULT_CALIBRATOR_SETTINGS = CalibratorSettings()
 
 # F770W: prefer bright calibrators but do *not* over-clip to a tiny residual
@@ -202,9 +193,9 @@ DEFAULT_CALIBRATOR_SETTINGS = CalibratorSettings()
 # while destroying dither-to-dither consistency (~300-600 mas peer offsets).
 # Pre-align pipeline WCSs already agree at ~20 mas; peer QA below recovers
 # that when REFERENCE overfits. Crowded/bright nuclei (e.g. M82) additionally
-# use the ``crowded_jwst_params`` retry in :func:`align_jwst_image`.
+# use the crowded JHAT retry in :func:`align_jwst_image`.
 # Keep global F770W cuts close to the proven baseline. Bright/crowded nuclei
-# are handled by the ``crowded_jwst_params`` retry in :func:`align_jwst_image`
+# are handled by the crowded JHAT retry in :func:`align_jwst_image`
 # rather than starving all F770W frames of calibrators.
 F770W_CALIBRATOR_SETTINGS = CalibratorSettings(
     nbright=200,
@@ -257,10 +248,7 @@ def max_reference_dispersion_mas(filter_name: str | None) -> float | None:
     float or None
         Threshold in mas, or ``None`` to never quality-hold (F560W).
     """
-    key = str(filter_name or '').upper().split('_', 1)[0]
-    if key in FILTER_MAX_REFERENCE_DISPERSION_MAS:
-        return FILTER_MAX_REFERENCE_DISPERSION_MAS[key]
-    return DEFAULT_MAX_REFERENCE_DISPERSION_MAS
+    return MIRIDataModel.max_reference_dispersion_mas(filter_name)
 
 
 def describe_calibrator_settings(settings: CalibratorSettings) -> str:
@@ -2698,11 +2686,11 @@ def align_jwst_image(
 
     def _base_params(kind: str) -> dict:
         if kind == 'crowded' and not gaia:
-            p = dict(crowded_jwst_params)
+            p = dict(JWSTDataModel.JHAT_CROWDED)
         elif kind == 'relaxed':
-            p = dict(relaxed_gaia_params if gaia else relaxed_jwst_params)
+            p = dict(JWSTDataModel.JHAT_GAIA_RELAXED if gaia else JWSTDataModel.JHAT_RELAXED)
         else:
-            p = dict(strict_gaia_params if gaia else strict_jwst_params)
+            p = dict(JWSTDataModel.JHAT_GAIA_STRICT if gaia else JWSTDataModel.JHAT_STRICT)
         if jhat_params:
             # Crowded retry keeps its brighter objmag / SNR floor unless the
             # caller override is itself stricter on those keys.
@@ -2792,7 +2780,7 @@ def align_jwst_image(
         try:
             _attempt(
                 'crowded',
-                nbright=min(int(Nbright), int(CROWDED_JHAT_NBRIGHT)),
+                nbright=min(int(Nbright), int(JWSTDataModel.CROWDED_JHAT_NBRIGHT)),
                 sig_clip=1,
             )
         except Exception:
@@ -7449,7 +7437,7 @@ def align_from_frames(
         )
     else:
         parts = []
-        for name, thr in FILTER_MAX_REFERENCE_DISPERSION_MAS.items():
+        for name, thr in MIRIDataModel.MAX_REFERENCE_DISPERSION_MAS.items():
             parts.append(f'{name}:{"off" if thr is None else f"{thr:.0f}"}')
         logger.info(
             'REFERENCE quality hold (per filter, mas -> try MIRI_REL; '

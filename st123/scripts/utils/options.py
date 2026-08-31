@@ -50,12 +50,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from st123 import __version__ as ST123_VERSION
-from st123.utils.settings import (
-    ALL_PIPELINE_INSTRUMENTS,
-    DEFAULT_HST_INSTRUMENTS,
-    DEFAULT_JWST_INSTRUMENTS,
-    DOWNLOAD_DIR_NAME,
-)
+from st123.utils.settings import DOWNLOAD_DIR_NAME
 
 # ---------------------------------------------------------------------------
 # Path layout helpers (project root vs reduction workdir)
@@ -867,6 +862,8 @@ def expand_mission_instruments(
 
     Other tokens are upper-cased and de-duplicated (order preserved).
     """
+    from st123.datamodels import HSTDataModel, JWSTDataModel
+
     if tokens is None:
         return None
     out: list[str] = []
@@ -876,20 +873,21 @@ def expand_mission_instruments(
         if key and key not in out:
             out.append(key)
 
+    all_instruments = JWSTDataModel.INSTRUMENTS + HSTDataModel.INSTRUMENTS
     for token in tokens:
         key = str(token).strip().upper()
         if not key:
             continue
         if key == 'HST':
-            for name in DEFAULT_HST_INSTRUMENTS:
+            for name in HSTDataModel.INSTRUMENTS:
                 _add(name)
             continue
         if key == 'JWST':
-            for name in DEFAULT_JWST_INSTRUMENTS:
+            for name in JWSTDataModel.INSTRUMENTS:
                 _add(name)
             continue
         if key == 'ALL':
-            for name in ALL_PIPELINE_INSTRUMENTS:
+            for name in all_instruments:
                 _add(name)
             continue
         if key == 'NRC':
@@ -1020,8 +1018,8 @@ def default_instruments_for_telescope(
 
     These are treated as identical to the matching ``--instruments`` lists:
 
-    * ``hst`` -> ACS, WFC3, WFPC2 (:data:`DEFAULT_HST_INSTRUMENTS`)
-    * ``jwst`` -> NIRCAM, MIRI (:data:`DEFAULT_JWST_INSTRUMENTS`)
+    * ``hst`` -> ACS, WFC3, WFPC2 (:attr:`HSTDataModel.INSTRUMENTS`)
+    * ``jwst`` -> NIRCAM, MIRI (:attr:`JWSTDataModel.INSTRUMENTS`)
 
     Parameters
     ----------
@@ -1044,9 +1042,13 @@ def default_instruments_for_telescope(
     if not key:
         return None
     if key == 'hst':
-        return list(DEFAULT_HST_INSTRUMENTS)
+        from st123.datamodels import HSTDataModel
+
+        return list(HSTDataModel.INSTRUMENTS)
     if key == 'jwst':
-        return list(DEFAULT_JWST_INSTRUMENTS)
+        from st123.datamodels import JWSTDataModel
+
+        return list(JWSTDataModel.INSTRUMENTS)
     raise ValueError(
         f'Unsupported telescope {telescope!r}; choose from hst, jwst'
     )

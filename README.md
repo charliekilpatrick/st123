@@ -191,13 +191,13 @@ mosaic (drizzle) -> dolphot-prep -> dolphot -> HDF5 catalog (``.h5``)**.
 
 After mosaic, `dolphot-prep --instruments hst` stages **all** ACS/WFC3/WFPC2
 JHAT frames against the best coadd reference (prefer **WFC3 -> ACS -> WFPC2**,
-then `BEST_REFERENCE_FILTERS` with **F625W** first). That ranking matches the
+then `HSTDataModel.BEST_REFERENCE_FILTERS` with **F625W** first). That ranking matches the
 bands that usually give the cleanest HST PSF photometry (e.g. WFC3/F625W and
 WFPC2/F606W). Shallower or awkward coverage (e.g. WFPC2 F450W / F814W on sparse
 PC or short stacks) often yields only ~1-1.5sigma **forced** photometry at an
 F625W/F606W position - treat those as limits, not independent detections.
 
-Globals written into `dolphot.param` (`hst_base_params`) are intentional
+Globals written into `dolphot.param` (`HSTDataModel.DOLPHOT_BASE_PARAMS`) are intentional
 departures from NIRCam defaults for JHAT-aligned multi-instrument HST:
 
 | Knob | Value | Why |
@@ -263,7 +263,7 @@ both `coadd_*_i2d.fits` (JWST) and `coadd_*_{acs|wfc3}_*_{drc|drz}.fits` (HST).
 
 When the same field has a finished NIRCam DOLPHOT run, seed HST photometry from
 that catalog (`xytfile`) with the **NIRCam coadd as `img0`** and the same
-`hst_base_params` as the free HST path. Align HST with JHAT to Gaia (or the
+`HSTDataModel.DOLPHOT_BASE_PARAMS` as the free HST path. Align HST with JHAT to Gaia (or the
 NIRCam WCS) first so chip WCS matches the NIRCam reference pixel grid.
 
 ```bash
@@ -317,13 +317,13 @@ Without `--merge`, `dolphot-hdf5` still writes one `.h5` sidecar per finished ru
 | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | HST      | WFPC2 (`c0m`/`c1m`), ACS/WFC (`flc`), WFC3/UVIS (`flc`), WFC3/IR (`flt`) - MAST helpers download `project=HST` pipeline products once |
 | JWST     | NIRCam, MIRI (download, JHAT align, mosaic, DOLPHOT prep / warm-start)                                                           |
-| Roman    | WFI filter catalog and path helpers (pipeline growth)                                                                            |
-| Euclid   | VIS / NISP filter catalog helpers (pipeline growth)                                                                              |
+| Roman    | WFI (`_cal.asdf` L2; imaging filters F062-F213) -- datamodel identity / catalogs; stages not wired yet |
+| Euclid   | VIS (IE band) and NISP/NIR photometer (YE/JE/HE) -- datamodel identity / catalogs; stages not wired yet |
 
 
-Filter names accepted for reference selection and downloads are listed in
-`st123/utils/settings.py` (`acceptable_filters`, `FILTERS_BY_INSTRUMENT`),
-in the style of FITS `FILTER` / `FILTER1` / `FILTER2` header values.
+Filter names accepted for reference selection and downloads live on the
+instrument datamodel classes (`NIRCamDataModel.FILTERS`, `ACSDataModel.FILTERS`,
+`EuclidVISDataModel.FILTERS`, `RomanWFIDataModel.FILTERS`, ...).
 
 Alignment uses the **custom JHAT** tree under `extdeps/jhat` (not unmodified
 PyPI `jhat`). CRDS reference files are required for `jwst` pipeline steps;

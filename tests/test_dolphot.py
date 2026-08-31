@@ -90,12 +90,23 @@ def test_parse_param_image_list(tmp_path: Path):
 
 
 def test_per_image_params_kinds():
+    from st123.datamodels import (
+        MIRIDataModel,
+        NIRCamDataModel,
+        WFC3IRDataModel,
+        WFC3UVISDataModel,
+        ACSDataModel,
+        WFPC2DataModel,
+    )
     from st123.stages.photometry.dolphot import per_image_params
-    from st123.utils import settings
 
-    assert per_image_params('short') is settings.short_params
-    assert per_image_params('long') is settings.long_params
-    assert per_image_params('miri') is settings.miri_params
+    assert per_image_params('short') is NIRCamDataModel.DOLPHOT_SHORT_PARAMS
+    assert per_image_params('long') is NIRCamDataModel.DOLPHOT_LONG_PARAMS
+    assert per_image_params('miri') is MIRIDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('acs') is ACSDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfc3') is WFC3UVISDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfc3_ir') is WFC3IRDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfpc2') is WFPC2DataModel.DOLPHOT_IMAGE_PARAMS
     with pytest.raises(ValueError):
         per_image_params('unknown')
 
@@ -630,7 +641,7 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
 ):
     """MIRI mosaic prep must stage frames and write dolphotMIRI defaults."""
     from st123.stages.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
-    from st123.utils import settings
+    from st123.datamodels import MIRIDataModel
 
     outdir = tmp_path / 'dolphot' / 'miri_0_0'
     ref = tmp_path / 'coadd_0_0_f560w_i2d.fits'
@@ -653,7 +664,7 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
     text = param.read_text()
     assert 'img0_file = coadd_0_0_f560w_i2d' in text
     assert 'img1_file = x_mirimage_jhat' in text
-    assert f"img1_raper = {settings.miri_params['raper']}" in text
+    assert f"img1_raper = {MIRIDataModel.DOLPHOT_IMAGE_PARAMS['raper']}" in text
     assert 'UseWCS = 2' in text
     assert 'MIRIvega = 0' in text
     assert 'RCentroid = 1' in text
@@ -1197,7 +1208,7 @@ def test_setup_hst_warmstart_writes_xyt_and_hst_globals(tmp_path: Path):
     from astropy.io import fits
 
     from st123.stages.photometry.warmstart import setup_hst_warmstart
-    from st123.utils.settings import hst_base_params
+    from st123.datamodels import HSTDataModel
 
     nircam = tmp_path / 'phot_0_0'
     nircam.mkdir()
@@ -1244,10 +1255,10 @@ def test_setup_hst_warmstart_writes_xyt_and_hst_globals(tmp_path: Path):
                 'Nimg = 1\n'
                 'img0_file = coadd_0_0_f200w_i2d\n'
                 'img1_file = u_test_jhat.chip1\n'
-                f'UseWCS = {hst_base_params["UseWCS"]}\n'
-                f'Align = {hst_base_params["Align"]}\n'
-                f'Force1 = {hst_base_params["Force1"]}\n'
-                f'PSFres = {hst_base_params["PSFres"]}\n'
+                f'UseWCS = {HSTDataModel.DOLPHOT_BASE_PARAMS["UseWCS"]}\n'
+                f'Align = {HSTDataModel.DOLPHOT_BASE_PARAMS["Align"]}\n'
+                f'Force1 = {HSTDataModel.DOLPHOT_BASE_PARAMS["Force1"]}\n'
+                f'PSFres = {HSTDataModel.DOLPHOT_BASE_PARAMS["PSFres"]}\n'
                 'xytfile = warmstart.xyt\n'
             )
             param.write_text(text)

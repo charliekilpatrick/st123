@@ -5,7 +5,7 @@ Submodules
 ----------
 - :mod:`st123.utils.helpers` - coordinates, FITS bookkeeping, visits, xmatch
 - :mod:`st123.utils.link` - symlink helpers for reduction ``raw/`` trees
-- :mod:`st123.utils.settings` - filters, MAST/alignment defaults, JHAT/DOLPHOT params
+- :mod:`st123.utils.settings` - download layout and pair-align output names
 - :mod:`st123.utils.compatibility` - cross-package compatibility adapters
 - :mod:`st123.utils.logging` - console/file logging; captures external stdout
 
@@ -40,27 +40,9 @@ _HELPER_EXPORTS = frozenset(
 _LINK_EXPORTS = frozenset({'create_symlink', 'remove_proc_files'})
 _SETTINGS_EXPORTS = frozenset(
     {
-        'BEST_FILTER_TYPES',
-        'BEST_REFERENCE_FILTERS',
         'DEFAULT_DOWNLOAD_LAYOUT',
-        'DEFAULT_HST_FILTERS',
-        'DEFAULT_HST_INSTRUMENTS',
-        'DEFAULT_JWST_INSTRUMENTS',
-        'DEFAULT_MAX_REFERENCE_DISPERSION_MAS',
         'DEFAULT_PAIR_OUTDIR',
-        'FILTER_MAX_REFERENCE_DISPERSION_MAS',
-        'FILTERS_BY_INSTRUMENT',
-        'HST_PRODUCT_RULES',
-        'acceptable_filters',
-        'base_params',
-        'long_params',
-        'CROWDED_JHAT_NBRIGHT',
-        'crowded_jwst_params',
-        'relaxed_gaia_params',
-        'relaxed_jwst_params',
-        'short_params',
-        'strict_gaia_params',
-        'strict_jwst_params',
+        'DOWNLOAD_DIR_NAME',
     }
 )
 

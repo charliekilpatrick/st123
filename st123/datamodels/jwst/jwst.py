@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -34,6 +35,164 @@ class JWSTDataModel(InstrumentDataModel):
 
     telescope = 'JWST'
     dq_do_not_use = _JWST_DO_NOT_USE
+    INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI')
+    DOLPHOT_BASE_PARAMS: dict[str, str] = {
+        'FitSky': '2',
+        'SigPSF': '5.0',
+        'FlagMask': '4',
+        'SecondPass': '5',
+        'PSFPhotIt': '2',
+        'ApCor': '1',
+        'FSat': '0.999',
+        'NoiseMult': '0.1',
+        'RCombine': '1.5',
+        'CombineChi': '0',
+        'MaxIT': '25',
+        'InterpPSFlib': '1',
+        'SigFindMult': '0.85',
+        'PSFPhot': '1',
+        'Force1': '0',
+        'SkySig': '2.25',
+        'SkipSky': '1',
+        'UseWCS': '2',
+        'PSFres': '1',
+        'PosStep': '0.25',
+        'NIRCAMvega': '0',
+        'Align': '4',
+        'aligntol': '0',
+        'Rotate': '1',
+    }
+    JHAT_STRICT: dict = {
+        'telescope': 'jwst',
+        'refcat_racol': 'ra',
+        'refcat_deccol': 'dec',
+        'refcat_magcol': 'mag',
+        'refcat_magerrcol': 'dmag',
+        'overwrite': True,
+        'd2d_max': 0.5,
+        'showplots': 0,
+        'find_stars_threshold': 5,
+        'iterate_with_xyshifts': True,
+        'histocut_order': 'dxdy',
+        'sharpness_lim': (0.3, 0.95),
+        'roundness1_lim': (-0.7, 0.7),
+        'SNR_min': 5,
+        'dmag_max': 0.1,
+        'objmag_lim': (15, 25),
+        'slope_min': -20 / 2048,
+        'binsize_px': 1.0,
+        'savephottable': 0,
+    }
+    JHAT_RELAXED: dict = {
+        'telescope': 'jwst',
+        'refcat_racol': 'ra',
+        'refcat_deccol': 'dec',
+        'refcat_magcol': 'mag',
+        'refcat_magerrcol': 'dmag',
+        'overwrite': True,
+        'd2d_max': 2.0,
+        'showplots': 0,
+        'find_stars_threshold': 3,
+        'iterate_with_xyshifts': False,
+        'histocut_order': 'dxdy',
+        'sharpness_lim': (0.3, 0.95),
+        'roundness1_lim': (-0.7, 0.7),
+        'SNR_min': 3,
+        'dmag_max': 0.1,
+        'slope_min': -20 / 2048,
+        'binsize_px': 1.0,
+        'savephottable': 0,
+    }
+    JHAT_GAIA_STRICT: dict = {
+        'telescope': 'jwst',
+        'overwrite': True,
+        'd2d_max': 0.5,
+        'showplots': 0,
+        'find_stars_threshold': 5,
+        'iterate_with_xyshifts': True,
+        'histocut_order': 'dxdy',
+        'sharpness_lim': (0.3, 0.95),
+        'roundness1_lim': (-0.7, 0.7),
+        'SNR_min': 5,
+        'dmag_max': 0.1,
+        'objmag_lim': (15, 25),
+        'slope_min': -20 / 2048,
+        'binsize_px': 1.0,
+        'savephottable': 0,
+    }
+    JHAT_GAIA_RELAXED: dict = {
+        'telescope': 'jwst',
+        'overwrite': True,
+        'd2d_max': 2.0,
+        'showplots': 0,
+        'find_stars_threshold': 3,
+        'iterate_with_xyshifts': False,
+        'histocut_order': 'dxdy',
+        'sharpness_lim': (0.3, 0.95),
+        'roundness1_lim': (-0.7, 0.7),
+        'SNR_min': 3,
+        'dmag_max': 0.1,
+        'slope_min': -20 / 2048,
+        'binsize_px': 1.0,
+        'savephottable': 0,
+    }
+    JHAT_CROWDED: dict = {
+        'telescope': 'jwst',
+        'refcat_racol': 'ra',
+        'refcat_deccol': 'dec',
+        'refcat_magcol': 'mag',
+        'refcat_magerrcol': 'dmag',
+        'overwrite': True,
+        'd2d_max': 0.35,
+        'showplots': 0,
+        'find_stars_threshold': 8,
+        'iterate_with_xyshifts': True,
+        'histocut_order': 'dxdy',
+        'sharpness_lim': (0.35, 0.90),
+        'roundness1_lim': (-0.55, 0.55),
+        'SNR_min': 8,
+        'dmag_max': 0.08,
+        'objmag_lim': (12, 20),
+        'slope_min': -20 / 2048,
+        'binsize_px': 1.0,
+        'savephottable': 0,
+    }
+    CROWDED_JHAT_NBRIGHT: int = 100
+
+    @classmethod
+    def matches(cls, value: object | None) -> bool:
+        """True when a MAST name, ``INSTRUME`` card, or path is this instrument."""
+        inst = (cls.instrument or '').upper()
+        if not inst or value is None:
+            return False
+        text = str(value).strip().upper()
+        return bool(text) and inst in text
+
+    @classmethod
+    def coverage_under(cls, *roots: PathLike) -> tuple[int, int]:
+        """Return ``(n_nircam, n_miri)`` science FITS counts under *roots*."""
+        from st123.datamodels.jwst.miri import MIRIDataModel
+        from st123.datamodels.jwst.nircam import NIRCamDataModel
+
+        n_nrc = 0
+        n_miri = 0
+        seen: set[Path] = set()
+        for root in roots:
+            base = Path(root)
+            if not base.is_dir():
+                continue
+            for path in base.rglob('*.fits'):
+                if not path.is_file():
+                    continue
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                if NIRCamDataModel.matches(resolved):
+                    n_nrc += 1
+                elif MIRIDataModel.matches(resolved):
+                    n_miri += 1
+        return n_nrc, n_miri
 
     def sanitize(
         self,

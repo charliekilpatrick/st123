@@ -82,6 +82,109 @@ class HSTDataModel(InstrumentDataModel):
 
     telescope = 'HST'
     science_suffixes = HST_SCIENCE_SUFFIXES
+    INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC3', 'WFPC2')
+    DEFAULT_MAST_FILTERS: tuple[str, ...] | None = None
+    BEST_REFERENCE_FILTERS: tuple[str, ...] = (
+        'f625w',
+        'f606w',
+        'f555w',
+        'f814w',
+        'f350lp',
+        'f110w',
+        'f105w',
+        'f336w',
+    )
+    MAST_PRODUCT_RULES: tuple[tuple[str, str], ...] = (
+        ('c0m.fits', 'WFPC2'),
+        ('c1m.fits', 'WFPC2'),
+        ('c0m.fits', 'PC/WFC'),
+        ('c1m.fits', 'PC/WFC'),
+        ('flc.fits', 'ACS/WFC'),
+        ('flt.fits', 'ACS/HRC'),
+        ('flt.fits', 'ACS/SBC'),
+        ('flc.fits', 'WFC3/UVIS'),
+        ('flt.fits', 'WFC3/IR'),
+    )
+    CR_DQ_BIT: int = 4096
+    DRIZZLE_DEFAULTS: dict = {
+        'final_pixfrac': 0.8,
+        'driz_sep_pixfrac': 0.8,
+        'combine_maskpt': 0.2,
+        'combine_nsigma': '4 3',
+        'driz_cr_snr': '3.5 3.0',
+        'driz_cr_grow': 1,
+        'driz_cr_scale': '1.2 0.7',
+        'num_cores': 4,
+    }
+    DOLPHOT_BASE_PARAMS: dict[str, str] = {
+        'FitSky': '2',
+        'SigPSF': '5.0',
+        'FlagMask': '7',
+        'SecondPass': '5',
+        'PSFPhotIt': '2',
+        'ApCor': '1',
+        'FSat': '0.999',
+        'NoiseMult': '0.1',
+        'RCombine': '1.5',
+        'CombineChi': '0',
+        'MaxIT': '25',
+        'InterpPSFlib': '1',
+        'SigFindMult': '0.85',
+        'PSFPhot': '1',
+        'Force1': '1',
+        'SkySig': '2.25',
+        'SkipSky': '1',
+        'UseWCS': '2',
+        'PSFres': '0',
+        'PosStep': '0.25',
+        'NIRCAMvega': '0',
+        'Align': '0',
+        'aligntol': '0',
+        'Rotate': '0',
+        'AlignStep': '1',
+        'AlignIter': '2',
+        'ACSuseCTE': '0',
+        'WFC3useCTE': '0',
+        'WFPC2useCTE': '1',
+        'RCentroid': '2',
+    }
+
+    @classmethod
+    def drizzle_bits(cls, kind: str) -> int:
+        """AstroDrizzle ``final_bits`` / ``driz_sep_bits`` for an image kind."""
+        from st123.datamodels.hst.acs import ACSDataModel
+        from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
+        from st123.datamodels.hst.wfc3_uvis import WFC3UVISDataModel
+        from st123.datamodels.hst.wfpc2 import WFPC2DataModel
+
+        table = {
+            'acs': ACSDataModel.DRIZ_BITS,
+            'wfc3': WFC3UVISDataModel.DRIZ_BITS,
+            'wfc3_uvis': WFC3UVISDataModel.DRIZ_BITS,
+            'wfc3_ir': WFC3IRDataModel.DRIZ_BITS,
+            'wfpc2': WFPC2DataModel.DRIZ_BITS,
+        }
+        return int(table.get(str(kind or '').lower(), 0))
+
+    @classmethod
+    def crpars_for(cls, instrument: str) -> dict[str, float]:
+        """astroscrappy CR parameters for ``acs`` / ``wfc3`` / ``wfpc2``."""
+        from st123.datamodels.hst.acs import ACSDataModel
+        from st123.datamodels.hst.wfc3_uvis import WFC3UVISDataModel
+        from st123.datamodels.hst.wfpc2 import WFPC2DataModel
+
+        key = instrument.split('_')[0].lower()
+        table = {
+            'acs': ACSDataModel.CRPARS,
+            'wfc3': WFC3UVISDataModel.CRPARS,
+            'wfpc2': WFPC2DataModel.CRPARS,
+        }
+        if key not in table:
+            raise ValueError(
+                f'No CRPARS for instrument={instrument!r}; '
+                f'expected one of {sorted(table)}'
+            )
+        return dict(table[key])
 
     @classmethod
     def matches_science_filename(cls, path: PathLike) -> bool:

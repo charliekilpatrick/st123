@@ -115,21 +115,13 @@ def configure_runtime_warnings() -> None:
         'ignore',
         message=r".*solution is diverging at least for one input point.*",
     )
-    try:
-        from astropy.io.fits.verify import VerifyWarning
-
-        warnings.filterwarnings(
-            'ignore',
-            message=r'Card is too long.*',
-            category=VerifyWarning,
-        )
-        # Broad catch: spawn drizzle workers hit truncated comments often.
-        warnings.filterwarnings('ignore', category=VerifyWarning)
-    except Exception:
-        warnings.filterwarnings(
-            'ignore',
-            message=r'Card is too long.*',
-        )
+    # Message-only: do not import astropy here (that registers AstropyLogger
+    # and breaks later ``import astropy``). Truncated FITS comments match
+    # this text whether or not VerifyWarning is loaded yet.
+    warnings.filterwarnings(
+        'ignore',
+        message=r'Card is too long.*',
+    )
     _RUNTIME_WARNINGS_CONFIGURED = True
 
 _ST_FMT = '[$BOLD%(filename)s::%(lineno)d$RESET] [%(levelname)s]  %(message)s'

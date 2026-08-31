@@ -21,12 +21,8 @@ from st123.stages.mosaic.hst_drizzle import (
 from st123.scripts import dolphot as dolphot_script
 from st123.scripts import mosaic as mosaic_script
 from st123.utils import helpers
-from st123.utils.settings import (
-    WFPC2_OVERSCAN_DQ_BIT,
-    WFC3_IR_BAD_DQ_BIT,
-    WFC3_IR_DRIZ_CR,
-    hst_driz_bits,
-)
+from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
+from st123.datamodels.hst.wfpc2 import WFPC2DataModel
 
 
 def _write_hst_frame(
@@ -170,15 +166,15 @@ def test_mask_wfpc2_overscan_flags_edges_and_floor(tmp_path: Path):
         assert hdul[0].header.get('ST123OVS') is True
     with fits.open(c1m) as hdul:
         dq = hdul[1].data
-        assert int(dq[10, 2]) & WFPC2_OVERSCAN_DQ_BIT
-        assert int(dq[30, 30]) & WFPC2_OVERSCAN_DQ_BIT
+        assert int(dq[10, 2]) & WFPC2DataModel.OVERSCAN_DQ_BIT
+        assert int(dq[30, 30]) & WFPC2DataModel.OVERSCAN_DQ_BIT
         # Interior good pixel stays unflagged.
         assert int(dq[40, 40]) == 0
 
 
 def test_wfc3_ir_driz_cr_disabled_and_floor_bit_excluded():
-    assert WFC3_IR_DRIZ_CR is False
-    assert (WFC3_IR_BAD_DQ_BIT & hst_driz_bits['wfc3_ir']) == 0
+    assert WFC3IRDataModel.DRIZ_CR is False
+    assert (WFC3IRDataModel.BAD_DQ_BIT & WFC3IRDataModel.DRIZ_BITS) == 0
 
 
 def test_mask_wfc3_ir_bad_pixels_floor_and_grow(tmp_path: Path):
@@ -200,16 +196,16 @@ def test_mask_wfc3_ir_bad_pixels_floor_and_grow(tmp_path: Path):
     ).writeto(path)
 
     summary = mask_wfc3_ir_bad_pixels(
-        path, sci_floor=-50.0, bad_grow=1, dq_bit=WFC3_IR_BAD_DQ_BIT
+        path, sci_floor=-50.0, bad_grow=1, dq_bit=WFC3IRDataModel.BAD_DQ_BIT
     )
     assert summary['n_floor'] == 1
     assert summary['n_grown'] >= 1
 
     with fits.open(path) as hdul:
         assert float(hdul['SCI'].data[15, 15]) == 0.0
-        assert int(hdul['DQ'].data[15, 15]) & WFC3_IR_BAD_DQ_BIT
+        assert int(hdul['DQ'].data[15, 15]) & WFC3IRDataModel.BAD_DQ_BIT
         # Grown neighbor also flagged / zeroed.
-        assert int(hdul['DQ'].data[15, 16]) & WFC3_IR_BAD_DQ_BIT
+        assert int(hdul['DQ'].data[15, 16]) & WFC3IRDataModel.BAD_DQ_BIT
         assert float(hdul['SCI'].data[20, 20]) == 10.0
         assert int(hdul['DQ'].data[20, 20]) == 0
 
@@ -244,9 +240,9 @@ def test_mask_wfpc2_overscan_left_extra_and_grow(tmp_path: Path):
     with fits.open(c1m) as hdul:
         dq = hdul[1].data
         # Left-extra region flagged.
-        assert int(dq[32, 10]) & WFPC2_OVERSCAN_DQ_BIT
+        assert int(dq[32, 10]) & WFPC2DataModel.OVERSCAN_DQ_BIT
         # Grow reaches a few pixels past the left strip.
-        assert int(dq[32, 13]) & WFPC2_OVERSCAN_DQ_BIT
+        assert int(dq[32, 13]) & WFPC2DataModel.OVERSCAN_DQ_BIT
         assert int(dq[32, 40]) == 0
 
 
@@ -285,7 +281,7 @@ def test_mask_wfpc2_high_variance_edge_columns(tmp_path: Path):
     assert summary['n_var_cols'] > 0
     with fits.open(c1m) as hdul:
         dq = hdul[1].data
-        assert int(dq[64, 12]) & WFPC2_OVERSCAN_DQ_BIT
+        assert int(dq[64, 12]) & WFPC2DataModel.OVERSCAN_DQ_BIT
         # Deep interior (incl. bright column) stays clean - scene != noise.
         assert int(dq[64, 64]) == 0
         assert int(dq[44, 50]) == 0

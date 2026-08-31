@@ -19,12 +19,9 @@ from st123.scripts.utils.options import (
     parse_filter_list,
     resolve_instruments,
 )
+from st123.datamodels import HSTDataModel, JWSTDataModel
 from st123.utils.logging import shutdown_logging
-from st123.utils.settings import (
-    DEFAULT_HST_INSTRUMENTS,
-    DEFAULT_JWST_INSTRUMENTS,
-    DOWNLOAD_DIR_NAME,
-)
+from st123.utils.settings import DOWNLOAD_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +116,8 @@ def partition_instruments_by_telescope(
     tels = [str(t).lower() for t in telescopes]
     if instruments is None:
         mapping = {
-            'hst': list(DEFAULT_HST_INSTRUMENTS),
-            'jwst': list(DEFAULT_JWST_INSTRUMENTS),
+            'hst': list(HSTDataModel.INSTRUMENTS),
+            'jwst': list(JWSTDataModel.INSTRUMENTS),
         }
         return {tel: list(mapping[tel]) for tel in tels}
 

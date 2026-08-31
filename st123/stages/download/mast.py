@@ -17,14 +17,9 @@ from astropy.table import Column, Table
 from astroquery.mast import Observations
 from astroquery.vizier import Vizier
 
+from st123.datamodels import HSTDataModel, JWSTDataModel
 from st123.utils.logging import capture_output
-from st123.utils.settings import (
-    DEFAULT_DOWNLOAD_LAYOUT,
-    DEFAULT_HST_FILTERS,
-    DEFAULT_HST_INSTRUMENTS,
-    DEFAULT_JWST_INSTRUMENTS,
-    HST_PRODUCT_RULES,
-)
+from st123.utils.settings import DEFAULT_DOWNLOAD_LAYOUT
 
 logger = logging.getLogger(__name__)
 
@@ -231,10 +226,10 @@ def has_supported_hst_science_products(instrument_name: object) -> bool:
     Return True when *instrument_name* has a native product rule.
 
     Used to drop MAST detectors with no downloadable science files under
-    :data:`HST_PRODUCT_RULES` (e.g. unsupported instruments).
+    :data:`HSTDataModel.MAST_PRODUCT_RULES` (e.g. unsupported instruments).
     """
     text = str(instrument_name)
-    return any(tag in text for _suffix, tag in HST_PRODUCT_RULES)
+    return any(tag in text for _suffix, tag in HSTDataModel.MAST_PRODUCT_RULES)
 
 
 def galaxy_query_radius(
@@ -293,7 +288,7 @@ def query_region(coord: SkyCoord, radius: u.Quantity) -> Table:
 def filter_hst_observations(
     obs_table: Table,
     filters: Optional[Sequence[str]] = None,
-    instruments: Sequence[str] = DEFAULT_HST_INSTRUMENTS,
+    instruments: Sequence[str] = HSTDataModel.INSTRUMENTS,
     public_only: bool = True,
     *,
     pipeline_only: bool = True,
@@ -309,7 +304,7 @@ def filter_hst_observations(
         restriction is applied.
     instruments : sequence of str, optional
         Instrument substrings matched against ``instrument_name``
-        (default :data:`DEFAULT_HST_INSTRUMENTS`). Bare ``ACS`` matches
+        (default :data:`HSTDataModel.INSTRUMENTS`). Bare ``ACS`` matches
         ``ACS/WFC``, ``ACS/HRC``, and ``ACS/SBC``.
     public_only : bool, optional
         When ``True``, keep only rows with ``dataRights == 'PUBLIC'``.
@@ -352,7 +347,7 @@ def filter_hst_observations(
 
 def filter_jwst_observations(
     obs_table: Table,
-    instruments: Sequence[str] = DEFAULT_JWST_INSTRUMENTS,
+    instruments: Sequence[str] = JWSTDataModel.INSTRUMENTS,
     public_only: bool = True,
 ) -> Table:
     """Apply standard JWST imaging masks to a MAST observation table.
@@ -363,7 +358,7 @@ def filter_jwst_observations(
         Raw MAST observation table from :func:`query_region`.
     instruments : sequence of str, optional
         Instrument substrings matched against ``instrument_name``
-        (default :data:`DEFAULT_JWST_INSTRUMENTS`).
+        (default :data:`JWSTDataModel.INSTRUMENTS`).
     public_only : bool, optional
         When ``True``, keep only rows with ``dataRights == 'PUBLIC'``.
 
@@ -457,8 +452,8 @@ def filter_jwst_observations_by_stage(obs_table: Table, stage: int) -> Table:
 def query_hst(
     coord: SkyCoord,
     radius: Optional[u.Quantity] = None,
-    filters: Optional[Sequence[str]] = DEFAULT_HST_FILTERS,
-    instruments: Sequence[str] = DEFAULT_HST_INSTRUMENTS,
+    filters: Optional[Sequence[str]] = HSTDataModel.DEFAULT_MAST_FILTERS,
+    instruments: Sequence[str] = HSTDataModel.INSTRUMENTS,
     use_galaxy_size: bool = False,
     public_only: bool = True,
     token: Optional[str] = None,
@@ -479,9 +474,9 @@ def query_hst(
         Search radius. When ``None``, uses :func:`galaxy_query_radius` if
         ``use_galaxy_size`` is ``True``, otherwise 5 arcmin.
     filters : sequence of str or None, optional
-        Allowed HST filters (default :data:`DEFAULT_HST_FILTERS`).
+        Allowed HST filters (default :data:`HSTDataModel.DEFAULT_MAST_FILTERS`).
     instruments : sequence of str, optional
-        Instrument substrings (default :data:`DEFAULT_HST_INSTRUMENTS`).
+        Instrument substrings (default :data:`HSTDataModel.INSTRUMENTS`).
     use_galaxy_size : bool, optional
         When ``True`` and ``radius`` is ``None``, derive radius from PGC size.
     public_only : bool, optional
@@ -515,7 +510,7 @@ def query_hst(
 def query_jwst(
     coord: SkyCoord,
     radius: Optional[u.Quantity] = None,
-    instruments: Sequence[str] = DEFAULT_JWST_INSTRUMENTS,
+    instruments: Sequence[str] = JWSTDataModel.INSTRUMENTS,
     use_galaxy_size: bool = False,
     public_only: bool = True,
     token: Optional[str] = None,
@@ -535,7 +530,7 @@ def query_jwst(
         Search radius. When ``None``, uses :func:`galaxy_query_radius` with a
         5 arcmin floor if ``use_galaxy_size`` is ``True``, otherwise 5 arcmin.
     instruments : sequence of str, optional
-        Instrument substrings (default :data:`DEFAULT_JWST_INSTRUMENTS`).
+        Instrument substrings (default :data:`JWSTDataModel.INSTRUMENTS`).
     use_galaxy_size : bool, optional
         When ``True`` and ``radius`` is ``None``, derive radius from PGC size.
     public_only : bool, optional
@@ -579,12 +574,12 @@ def is_hst_science_product(filename: str, instrument: str) -> bool:
     Returns
     -------
     bool
-        ``True`` when ``filename`` matches :data:`HST_PRODUCT_RULES` for the
+        ``True`` when ``filename`` matches :data:`HSTDataModel.MAST_PRODUCT_RULES` for the
         instrument.
     """
     return any(
         suffix in filename and tag in instrument
-        for suffix, tag in HST_PRODUCT_RULES
+        for suffix, tag in HSTDataModel.MAST_PRODUCT_RULES
     )
 
 
@@ -1325,7 +1320,7 @@ def download_hst_observations(
             # detectors; keep as debug noise, not a failure.
             logger.debug(
                 '[%d/%d] %s: no supported native HST products '
-                '(instrument=%s; expect flc/flt/c0m per HST_PRODUCT_RULES)',
+                '(instrument=%s; expect flc/flt/c0m per HSTDataModel.MAST_PRODUCT_RULES)',
                 i,
                 n_obs,
                 subdir,

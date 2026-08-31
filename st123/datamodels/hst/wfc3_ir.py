@@ -16,6 +16,34 @@ class WFC3IRDataModel(HSTDataModel):
     instrument = 'WFC3'
     detector = 'IR'
     science_suffixes = ('_flt.fits', '_jhat.fits')
+    FILTERS: tuple[str, ...] = (
+        'F098M', 'F105W', 'F110W', 'F125W', 'F126N', 'F127M', 'F128N', 'F130N',
+        'F132N', 'F139M', 'F140W', 'F153M', 'F160W', 'F164N', 'F167N',
+    )
+    FILTER_HEADER_KEYS: tuple[str, ...] = ('FILTER', 'FILTER1', 'FILTER2')
+    DOLPHOT_IMAGE_PARAMS: dict[str, str] = {
+        'shift': '0 0',
+        'xform': '1 0 0',
+        'raper': '2',
+        'rchi': '1.5',
+        'rsky0': '8',
+        'rsky1': '20',
+        'rsky2': '3 10',
+        'rpsf': '15',
+        'apsky': '8 20',
+    }
+    CALCSKY_PARAMS: dict = {
+        'rin': 15,
+        'rout': 35,
+        'step': 4,
+        'sigma_low': 2.25,
+        'sigma_high': 2.00,
+    }
+    DRIZ_BITS: int = 576
+    DRIZ_CR: bool = False
+    SCI_FLOOR: float = -50.0
+    BAD_GROW_PIX: int = 2
+    BAD_DQ_BIT: int = 4096
 
     @property
     def image_kind(self) -> str:

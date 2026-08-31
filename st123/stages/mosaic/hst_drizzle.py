@@ -19,15 +19,12 @@ from typing import Any, Iterator, Iterable, MutableMapping, Optional, Sequence, 
 
 from astropy.io import fits
 from st123.datamodels import as_datamodel
+from st123.datamodels.hst.hst import HSTDataModel
+from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
+from st123.datamodels.hst.wfpc2 import WFPC2DataModel
 
 from st123.utils.helpers import get_filter, get_instrument
 from st123.utils.logging import capture_output
-from st123.utils.settings import (
-    WFC3_IR_DRIZ_CR,
-    WFC3_IR_SCI_FLOOR,
-    hst_driz_bits,
-    hst_drizzle_defaults,
-)
 
 PathLike = Union[str, os.PathLike]
 
@@ -55,14 +52,12 @@ def mask_wfc3_ir_bad_pixels(
     import numpy as np
     from scipy.ndimage import binary_dilation
 
-    from st123.utils import settings as _settings
-
     if sci_floor is None:
-        sci_floor = float(_settings.WFC3_IR_SCI_FLOOR)
+        sci_floor = float(WFC3IRDataModel.SCI_FLOOR)
     if bad_grow is None:
-        bad_grow = int(_settings.WFC3_IR_BAD_GROW_PIX)
+        bad_grow = int(WFC3IRDataModel.BAD_GROW_PIX)
     if dq_bit is None:
-        dq_bit = int(_settings.WFC3_IR_BAD_DQ_BIT)
+        dq_bit = int(WFC3IRDataModel.BAD_DQ_BIT)
     if bad_grow < 0:
         raise ValueError('bad_grow must be >= 0')
 
@@ -340,30 +335,28 @@ def mask_wfpc2_overscan(
     columns, high-variance outer rows/columns within *var_edge*, then a small
     morphological grow.
 
-    Defaults are read from :mod:`st123.utils.settings` at call time so pipeline
-    tuning of ``WFPC2_*`` constants takes effect without reimporting this module.
+    Defaults are read from :class:`~st123.datamodels.hst.wfpc2.WFPC2DataModel`
+    class attributes.
     """
     import numpy as np
     from scipy.ndimage import binary_dilation
 
-    from st123.utils import settings as _settings
-
     if edge is None:
-        edge = int(_settings.WFPC2_OVERSCAN_EDGE_PIX)
+        edge = int(WFPC2DataModel.OVERSCAN_EDGE_PIX)
     if left_extra is None:
-        left_extra = int(_settings.WFPC2_OVERSCAN_LEFT_EXTRA)
+        left_extra = int(WFPC2DataModel.OVERSCAN_LEFT_EXTRA)
     if dq_bit is None:
-        dq_bit = int(_settings.WFPC2_OVERSCAN_DQ_BIT)
+        dq_bit = int(WFPC2DataModel.OVERSCAN_DQ_BIT)
     if sci_floor is None:
-        sci_floor = float(_settings.WFPC2_SCI_FLOOR)
+        sci_floor = float(WFPC2DataModel.SCI_FLOOR)
     if bad_grow is None:
-        bad_grow = int(_settings.WFPC2_BAD_GROW_PIX)
+        bad_grow = int(WFPC2DataModel.BAD_GROW_PIX)
     if bad_col_frac is None:
-        bad_col_frac = float(_settings.WFPC2_BAD_COL_FRAC)
+        bad_col_frac = float(WFPC2DataModel.BAD_COL_FRAC)
     if var_edge is None:
-        var_edge = int(_settings.WFPC2_VAR_EDGE_PIX)
+        var_edge = int(WFPC2DataModel.VAR_EDGE_PIX)
     if var_sigma is None:
-        var_sigma = float(_settings.WFPC2_VAR_SIGMA)
+        var_sigma = float(WFPC2DataModel.VAR_SIGMA)
 
     if edge < 0 or left_extra < 0 or bad_grow < 0:
         raise ValueError('edge, left_extra, and bad_grow must be >= 0')
@@ -530,7 +523,7 @@ def fill_drizzle_uncovered_with_sky(
     For WFPC2, single-bit CTX pixels (exactly one contributing input) that lie
     within ``drop_single_ctx_edge_pix`` of the uncovered footprint are also
     treated as uncovered (default from
-    :data:`st123.utils.settings.WFPC2_DROP_SINGLE_CTX_EDGE_PIX`). Interior
+    :attr:`WFPC2DataModel.DROP_SINGLE_CTX_EDGE_PIX`). Interior
     single-coverage pixels are kept. Set the edge width to 0 to disable.
 
     Returns a summary dict (``n_filled``, ``n_single_ctx``, ``sky``, ...).
@@ -539,8 +532,6 @@ def fill_drizzle_uncovered_with_sky(
     import numpy as np
     from astropy.stats import sigma_clipped_stats
     from scipy import ndimage
-
-    from st123.utils import settings as _settings
 
     p = Path(path)
     summary: dict = {
@@ -560,9 +551,7 @@ def fill_drizzle_uncovered_with_sky(
             return summary
         if drop_single_ctx_edge_pix is None:
             if _product_is_wfpc2(p, hdul):
-                edge_pix = int(
-                    getattr(_settings, 'WFPC2_DROP_SINGLE_CTX_EDGE_PIX', 0) or 0
-                )
+                edge_pix = int(WFPC2DataModel.DROP_SINGLE_CTX_EDGE_PIX)
             else:
                 edge_pix = 0
         else:
@@ -1479,7 +1468,7 @@ def drizzle_filter_group(
         for p in src_imgs
     ]
 
-    dd = dict(hst_drizzle_defaults)
+    dd = dict(HSTDataModel.DRIZZLE_DEFAULTS)
     # Instrument-specific good-DQ bits (hst123 detector_defaults).
     bits_key = inst
     is_uvis = False
@@ -1498,7 +1487,7 @@ def drizzle_filter_group(
                 pass
     elif inst == 'acs':
         is_uvis = True  # two-chip WFC; same pedestal/gap issue
-    driz_bits = int(hst_driz_bits.get(bits_key, hst_driz_bits.get(inst, 0)))
+    driz_bits = int(HSTDataModel.drizzle_bits(bits_key) or HSTDataModel.drizzle_bits(inst))
 
     do_per_chip = bool(is_uvis) if per_chip_sky is None else bool(per_chip_sky)
     if do_per_chip:
@@ -1530,7 +1519,7 @@ def drizzle_filter_group(
     is_ir = bits_key == 'wfc3_ir'
     # calwf3 already CR-flags IR (bit 512 in final_bits). AstroDrizzle driz_cr
     # false-rejects undersampled stars when one frame has a negative spike.
-    do_driz_cr = bool(WFC3_IR_DRIZ_CR) if is_ir else True
+    do_driz_cr = bool(WFC3IRDataModel.DRIZ_CR) if is_ir else True
 
     kwargs: MutableMapping[str, object] = {
         'output': str(output_stem),
@@ -1566,7 +1555,7 @@ def drizzle_filter_group(
             'WFC3/IR drizzle: bits=%d driz_cr=%s (sci_floor=%.1f)',
             driz_bits,
             do_driz_cr,
-            float(WFC3_IR_SCI_FLOOR),
+            float(WFC3IRDataModel.SCI_FLOOR),
         )
     if forced_wcs_kwargs is not None:
         kwargs.update(forced_wcs_kwargs)

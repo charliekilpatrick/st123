@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from st123.datamodels.hst.acs import ACSDataModel
 from st123.datamodels.hst.acs_hrc import ACSHRCDataModel
 from st123.datamodels.hst.acs_wfc import ACSWFCDataModel
 from st123.datamodels.hst.hst import (
@@ -24,6 +25,7 @@ from st123.datamodels.hst.wfpc2 import WFPC2DataModel
 from st123.datamodels.instrument import filter_paths_for_stage
 
 __all__ = [
+    'ACSDataModel',
     'ACSHRCDataModel',
     'ACSWFCDataModel',
     'DEFAULT_MAX_ABS_ARCSEC',

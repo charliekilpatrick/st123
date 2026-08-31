@@ -3,7 +3,7 @@ LAcosmic-style cosmic-ray cleaning for HST frames (astroscrappy).
 
 Mirrors ``hst123.run_cosmic``: replace SCI with the cleaned array and optionally
 flag CR pixels in the DQ extension (FLC/FLT) or WFPC2 ``*_c1m.fits`` sidecar
-with :data:`st123.utils.settings.HST_CR_DQ_BIT`.
+with :attr:`st123.datamodels.hst.hst.HSTDataModel.CR_DQ_BIT`.
 
 Writes are done with ``as_datamodel(...).open(mode='update')`` so trailing
 ``HeaderletHDU`` blocks on WFC3/ACS FLCs are preserved (a full ``writeto``
@@ -22,9 +22,7 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
 import numpy as np
-from st123.datamodels import as_datamodel
-
-from st123.utils.settings import HST_CR_DQ_BIT, hst_crpars
+from st123.datamodels import HSTDataModel, as_datamodel
 
 PathLike = Union[str, Path]
 
@@ -60,13 +58,7 @@ def resolve_crpars(
     overrides: Optional[Mapping[str, float]] = None,
 ) -> dict[str, float]:
     """Return astroscrappy parameters for *instrument* (acs/wfc3/wfpc2)."""
-    key = instrument.split('_')[0].lower()
-    if key not in hst_crpars:
-        raise ValueError(
-            f'No hst_crpars for instrument={instrument!r}; '
-            f'expected one of {sorted(hst_crpars)}'
-        )
-    params = dict(hst_crpars[key])
+    params = HSTDataModel.crpars_for(instrument)
     if overrides:
         params.update(overrides)
     return params
@@ -90,7 +82,7 @@ def clear_st123_cr_flags(
     clear_sci_keyword: bool = True,
 ) -> dict:
     """
-    Remove st123 lacosmic DQ flags (bit :data:`HST_CR_DQ_BIT`) and ``ST123CR``.
+    Remove st123 lacosmic DQ flags (bit :attr:`HSTDataModel.CR_DQ_BIT`) and ``ST123CR``.
 
     Does **not** restore pre-lacosmic SCI values (those were overwritten in
     place). Clearing DQ is enough for AstroDrizzle to include those pixels
@@ -120,7 +112,7 @@ def clear_st123_cr_flags(
     st123cr_cleared = False
     c1m_path: Optional[Path] = None
     name_l = src.name.lower()
-    bit = int(HST_CR_DQ_BIT)
+    bit = int(HSTDataModel.CR_DQ_BIT)
 
     with as_datamodel(src).open(mode='update') as hdul:
         if clear_sci_keyword and 'ST123CR' in hdul[0].header:
@@ -230,11 +222,11 @@ def run_cosmic(
     instrument : str or None, optional
         ``acs`` / ``wfc3`` / ``wfpc2``. Inferred from the header when omitted.
     add_crmask : bool, optional
-        When True, set CR pixels to :data:`HST_CR_DQ_BIT` in DQ / ``c1m``.
+        When True, set CR pixels to :attr:`HSTDataModel.CR_DQ_BIT` in DQ / ``c1m``.
     output : path-like or None, optional
         Output science path (default: overwrite *image* when *inplace*).
     crpars : mapping or None, optional
-        Override keys from :data:`hst_crpars`.
+        Override keys from :meth:`HSTDataModel.crpars_for`.
     inplace : bool, optional
         If True and *output* is None, overwrite *image*.
 
@@ -317,7 +309,7 @@ def run_cosmic(
                 dq_idx = i + 2
                 if dq_idx < len(hdul) and getattr(hdul[dq_idx], 'name', '') == 'DQ':
                     dq = hdul[dq_idx].data
-                    dq[np.asarray(crmask, dtype=bool)] = HST_CR_DQ_BIT
+                    dq[np.asarray(crmask, dtype=bool)] = HSTDataModel.CR_DQ_BIT
             elif 'c0m' in name_l:
                 c1m_cand = wfpc2_c1m_path(out)
                 if out != src:
@@ -333,7 +325,7 @@ def run_cosmic(
                     with as_datamodel(out).open_dq(mode='update') as maskhdu:
                         if i < len(maskhdu) and maskhdu[i].data is not None:
                             maskhdu[i].data[np.asarray(crmask, dtype=bool)] = (
-                                HST_CR_DQ_BIT
+                                HSTDataModel.CR_DQ_BIT
                             )
                             maskhdu.flush()
                             c1m_updated = c1m_cand

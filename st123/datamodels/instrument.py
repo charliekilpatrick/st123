@@ -107,10 +107,14 @@ def materialize_fits_wcs_keywords(header: fits.Header) -> dict[str, Any]:
 
 
 def _filename_chip(path: PathLike) -> str | None:
-    """Detector token from a JWST-style filename (``nrcb1``, ``mirimage``)."""
+    """Detector token from a JWST / Roman-style filename (``nrcb1``, ``wfi06``)."""
     tokens = Path(path).name.split('_')
     for token in tokens:
         if 'nrc' in token.lower():
+            return token
+    for token in tokens:
+        low = token.lower()
+        if low.startswith('wfi') and len(low) >= 5 and low[3:5].isdigit():
             return token
     for token in tokens:
         if 'mirimage' in token.lower():
@@ -171,6 +175,17 @@ def read_file_identity(path: PathLike) -> FileIdentity:
                         instrument = 'ACS'
         except Exception:
             pass
+    if not telescope or not instrument:
+        name = p.name.lower()
+        if name.endswith('.asdf') or '_wfi' in name or name.startswith('r00'):
+            telescope = telescope or 'ROMAN'
+            instrument = instrument or 'WFI'
+        elif 'euclid' in name or '_vis_' in name or 'nisp' in name or 'nir_' in name:
+            telescope = telescope or 'EUCLID'
+            if 'nisp' in name or 'nir_' in name:
+                instrument = instrument or 'NISP'
+            elif '_vis' in name or 'vis_' in name:
+                instrument = instrument or 'VIS'
     return FileIdentity(
         telescope=telescope,
         instrument=instrument,
@@ -182,6 +197,8 @@ def read_file_identity(path: PathLike) -> FileIdentity:
 
 def _select_class(path: PathLike, ident: FileIdentity) -> type[InstrumentDataModel]:
     """Return the most specific datamodel class for *ident* / filename."""
+    from st123.datamodels.euclid.nir import EuclidNIRDataModel
+    from st123.datamodels.euclid.vis import EuclidVISDataModel
     from st123.datamodels.hst.acs_hrc import ACSHRCDataModel
     from st123.datamodels.hst.acs_wfc import ACSWFCDataModel
     from st123.datamodels.hst.hst import HSTDataModel
@@ -191,6 +208,7 @@ def _select_class(path: PathLike, ident: FileIdentity) -> type[InstrumentDataMod
     from st123.datamodels.jwst.jwst import JWSTDataModel
     from st123.datamodels.jwst.miri import MIRIDataModel
     from st123.datamodels.jwst.nircam import NIRCamDataModel
+    from st123.datamodels.roman.wfi import RomanWFIDataModel
 
     name = Path(path).name.lower()
     inst = ident.instrument
@@ -201,6 +219,22 @@ def _select_class(path: PathLike, ident: FileIdentity) -> type[InstrumentDataMod
 
     chip = _filename_chip(path)
     chip_l = chip.lower() if chip else ''
+
+    if RomanWFIDataModel.matches(inst) or RomanWFIDataModel.matches(tele) or RomanWFIDataModel.matches(path):
+        return RomanWFIDataModel
+    if tele in ('ROMAN', 'RST') or '_wfi' in name:
+        return RomanWFIDataModel
+    if name.endswith('.asdf') and (name.startswith('r') or 'wfi' in name):
+        return RomanWFIDataModel
+
+    if EuclidVISDataModel.matches(inst) or EuclidVISDataModel.matches(path):
+        return EuclidVISDataModel
+    if EuclidNIRDataModel.matches(inst) or EuclidNIRDataModel.matches(path):
+        return EuclidNIRDataModel
+    if tele == 'EUCLID':
+        if 'NISP' in inst or 'NIR' in inst:
+            return EuclidNIRDataModel
+        return EuclidVISDataModel
 
     if inst == 'NIRCAM' or 'nrc' in chip_l:
         return NIRCamDataModel
@@ -286,7 +320,8 @@ def classify_image_kind(image: InstrumentDataModel | PathLike) -> str:
     -------
     str
         One of ``'short'`` / ``'long'`` (NIRCam), ``'miri'``, ``'acs'``,
-        ``'wfc3'``, ``'wfc3_ir'``, or ``'wfpc2'``.
+        ``'wfc3'``, ``'wfc3_ir'``, ``'wfpc2'``, ``'vis'``, ``'nisp'``, or
+        ``'wfi'``.
 
     Raises
     ------
@@ -300,12 +335,22 @@ def classify_image_kind(image: InstrumentDataModel | PathLike) -> str:
         chip_l = chip.lower()
         if 'mir' in chip_l:
             return 'miri'
+        if chip_l.startswith('wfi'):
+            return 'wfi'
         if 'long' in chip_l:
             return 'long'
         if 'nrc' in chip_l:
             return 'short'
     if 'mirimage' in name or '/miri/' in str(path).lower():
         return 'miri'
+    if '_wfi' in name or (
+        name.endswith('.asdf') and (name.startswith('r') or 'wfi' in name)
+    ):
+        return 'wfi'
+    if 'nisp' in name:
+        return 'nisp'
+    if '_vis_' in name or '/vis/' in str(path).lower():
+        return 'vis'
     model = image if isinstance(image, InstrumentDataModel) else open_datamodel(path)
     kind = model.image_kind
     if kind:
@@ -325,6 +370,16 @@ class InstrumentDataModel:
     telescope: str = ''
     instrument: str = ''
     detector: str = ''
+    # Header-style filter names (uppercase). Subclasses list their bandpasses.
+    FILTERS: tuple[str, ...] = ()
+    FILTER_HEADER_KEYS: tuple[str, ...] = ('FILTER',)
+    # Preferred filter-name suffixes when picking a reference image.
+    BEST_FILTER_TYPES: tuple[str, ...] = ('lp', 'w', 'x', 'm', 'n')
+    DOLPHOT_BASE_PARAMS: dict[str, str] = {}
+    DOLPHOT_IMAGE_PARAMS: dict[str, str] = {}
+    CALCSKY_PARAMS: dict[str, float] = {}
+    # Pivot / center wavelength (microns) keyed by uppercase FILTER name.
+    FILTER_WAVELENGTH_UM: dict[str, float] = {}
 
     def __init__(
         self,
@@ -343,6 +398,14 @@ class InstrumentDataModel:
         self.aperture = (aperture or '').upper()
         self.photmode = (photmode or '').upper()
         self._sanitized = False
+
+    @classmethod
+    def all_filters(cls) -> frozenset[str]:
+        """Uppercase filter names on this class and every loaded subclass."""
+        names = set(cls.FILTERS)
+        for sub in cls.__subclasses__():
+            names |= sub.all_filters()
+        return frozenset(names)
 
     @classmethod
     def from_path(
@@ -374,6 +437,14 @@ class InstrumentDataModel:
     @property
     def is_hst(self) -> bool:
         return self.telescope == 'HST' or type(self).telescope == 'HST'
+
+    @property
+    def is_euclid(self) -> bool:
+        return self.telescope == 'EUCLID' or type(self).telescope == 'EUCLID'
+
+    @property
+    def is_roman(self) -> bool:
+        return self.telescope == 'ROMAN' or type(self).telescope == 'ROMAN'
 
     @property
     def image_kind(self) -> str:
@@ -678,9 +749,9 @@ class InstrumentDataModel:
         Pivot / effective wavelength in microns from photometric headers.
 
         Prefers ``PHOTPLAM`` on the science extension (Angstroms on HST and
-        JWST imaging). Falls back to ``WAVELEN`` / ``RESTWAV`` / ``WAVECENT``
-        when those cards are present. Missing or unusable values return
-        ``inf`` so callers can rank unknown frames last.
+        JWST imaging). Falls back to ``WAVELEN`` / ``RESTWAV`` / ``WAVECENT``,
+        then :attr:`FILTER_WAVELENGTH_UM` on the instrument class. Missing or
+        unusable values return ``inf`` so callers can rank unknown frames last.
         """
         try:
             with self.open() as hdul:
@@ -701,7 +772,29 @@ class InstrumentDataModel:
                         return float(wave)
         except Exception:
             pass
+        table_wave = self._wavelength_um_from_filter_table()
+        if table_wave is not None:
+            return table_wave
         return float('inf')
+
+    def _wavelength_um_from_filter_table(self) -> float | None:
+        """Fallback pivot wavelength from :attr:`FILTER_WAVELENGTH_UM`."""
+        table = type(self).FILTER_WAVELENGTH_UM
+        if not table:
+            return None
+        name = ''
+        try:
+            name = str(self.filter_name or '').upper()
+        except Exception:
+            name = ''
+        if not name:
+            return None
+        if name in table:
+            return float(table[name])
+        token = name.split('_', 1)[-1] if name.startswith('NIR_') else name
+        if token in table:
+            return float(table[token])
+        return None
 
     def is_full_frame(self) -> bool:
         """Instrument-specific full-frame check; base is False."""

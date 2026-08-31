@@ -5,7 +5,7 @@ Supports:
 
 * NIRCam -> MIRI (``setup_miri_warmstart``; ``dolphotMIRI.pdf``)
 * NIRCam reference/catalog -> HST science (``setup_hst_warmstart``;
-  ``hst_base_params`` / JHAT-aligned ACS/WFC3/WFPC2)
+  ``HSTDataModel.DOLPHOT_BASE_PARAMS`` / JHAT-aligned ACS/WFC3/WFPC2)
 
 Uses ``xytfile`` from a prior ``.phot`` catalog (DOLPHOT manual warm-start).
 """
@@ -51,7 +51,7 @@ from st123.stages.photometry.dolphot_split import (
     DolphotRunPlan,
     write_split_paramfiles,
 )
-from st123.utils.settings import hst_base_params, miri_base_params
+from st123.datamodels import HSTDataModel, MIRIDataModel
 
 PathLike = Union[str, os.PathLike]
 
@@ -533,7 +533,7 @@ def setup_miri_warmstart(
         refimage=ref_dst,
         images=all_images,
         phot_out=phot_out,
-        global_params=miri_base_params,
+        global_params=MIRIDataModel.DOLPHOT_BASE_PARAMS,
         xytfile=xyt_path,
         image_kinds=kinds,
         max_nimg=max_nimg,
@@ -711,7 +711,7 @@ def setup_hst_warmstart(
 
     Stages the NIRCam ``img0`` (and optional NIRCam science), builds
     ``warmstart.xyt`` from the NIRCam ``.phot``, then runs
-    :func:`prepare_hst_frames` on HST JHAT frames with ``hst_base_params``
+    :func:`prepare_hst_frames` on HST JHAT frames with ``HSTDataModel.DOLPHOT_BASE_PARAMS``
     and ``xytfile``. Does **not** HST-mask the NIRCam reference.
 
     Does **not** run ``dolphot``; use :attr:`WarmStartResult.command`.
@@ -913,7 +913,7 @@ def setup_hst_warmstart(
         # prepare_hst_frames always sets phot_out to out.name.phot; rewrite
         # when a custom name / NIRCam science inclusion is requested.
         text = param_path.read_text()
-        # Ensure hst_base_params and xytfile survived.
+        # Ensure HST DOLPHOT globals and xytfile survived.
         if 'xytfile' not in text:
             text = text.rstrip() + f'\nxytfile = {xyt_path.name}\n'
             param_path.write_text(text)
@@ -931,7 +931,7 @@ def setup_hst_warmstart(
                 param_path,
                 refimage=ref_dst,
                 images=all_images,
-                global_params=hst_base_params,
+                global_params=HSTDataModel.DOLPHOT_BASE_PARAMS,
                 xytfile=xyt_path,
             )
         # Prefer user phot_out name in the launch command even if param
@@ -943,7 +943,7 @@ def setup_hst_warmstart(
             out / 'dolphot.param',
             refimage=ref_dst,
             images=list(nircam_staged) + list(hst_staged_src),
-            global_params=hst_base_params,
+            global_params=HSTDataModel.DOLPHOT_BASE_PARAMS,
             xytfile=xyt_path,
         )
         param_path = out / 'dolphot.param'
@@ -979,7 +979,7 @@ def setup_hst_warmstart(
         f'HST JHAT inputs: {len(hst_sources)}\n'
         f'Parameter file: {param_path.name}\n'
         f'Phot output: {phot_out}\n'
-        f'Globals: UseWCS=2 Align=0 Force1=1 PSFres=0 (hst_base_params)\n'
+        f'Globals: UseWCS=2 Align=0 Force1=1 PSFres=0 (HSTDataModel.DOLPHOT_BASE_PARAMS)\n'
         '\n'
         'Launch (not run by setup):\n'
         f'  {cmd}\n'

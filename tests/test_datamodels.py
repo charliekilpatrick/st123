@@ -112,6 +112,63 @@ def test_classify_image_kind_filename_tokens():
     assert classify_image_kind('x_nrcb1_jhat.fits') == 'short'
     assert classify_image_kind('x_nrcblong_jhat.fits') == 'long'
     assert classify_image_kind('x_mirimage_jhat.fits') == 'miri'
+    assert classify_image_kind('r0001_0001_wfi06_f184_cal.asdf') == 'wfi'
+    assert classify_image_kind('euclid_nisp_nir_j.fits') == 'nisp'
+    assert classify_image_kind('euclid_vis_ie.fits') == 'vis'
+
+
+def test_open_datamodel_euclid_and_roman(tmp_path: Path):
+    from st123.datamodels import (
+        EuclidNIRDataModel,
+        EuclidVISDataModel,
+        RomanWFIDataModel,
+    )
+
+    vis = open_datamodel(
+        _write(
+            tmp_path / 'euclid_vis_cal.fits',
+            TELESCOP='Euclid',
+            INSTRUME='VIS',
+            FILTER='VIS',
+        )
+    )
+    nisp = open_datamodel(
+        _write(
+            tmp_path / 'euclid_nisp_cal.fits',
+            TELESCOP='Euclid',
+            INSTRUME='NISP',
+            FILTER='NIR_J',
+            FWA_POS='J',
+            GWA_POS='OPEN',
+        )
+    )
+    wfi = open_datamodel(
+        _write(
+            tmp_path / 'r0001_0001_wfi06_f158_cal.fits',
+            TELESCOP='Roman',
+            INSTRUME='WFI',
+            FILTER='F158',
+            DETECTOR='WFI06',
+        )
+    )
+    assert isinstance(vis, EuclidVISDataModel)
+    assert vis.is_euclid
+    assert vis.image_kind == 'vis'
+    assert vis.wavelength_um == pytest.approx(0.725)
+    assert isinstance(nisp, EuclidNIRDataModel)
+    assert nisp.filter_name == 'je'
+    assert nisp.is_imaging()
+    assert nisp.wavelength_um == pytest.approx(1.367)
+    assert isinstance(wfi, RomanWFIDataModel)
+    assert wfi.is_roman
+    assert wfi.filter_name == 'f158'
+    assert wfi.wavelength_um == pytest.approx(1.577)
+    asdf_name = tmp_path / 'r0012301008002013005_0005_wfi06_f184_cal.asdf'
+    asdf_model = open_datamodel(asdf_name)
+    assert isinstance(asdf_model, RomanWFIDataModel)
+    assert asdf_model.filter_name == 'f184'
+    assert asdf_model.is_imaging()
+    assert classify_image_kind(asdf_name) == 'wfi'
 
 
 def test_instrument_from_path_dispatches(tmp_path: Path):

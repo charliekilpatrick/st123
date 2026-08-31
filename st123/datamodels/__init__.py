@@ -2,10 +2,11 @@
 On-disk science-product datamodels for st123.
 
 :class:`InstrumentDataModel` is the common FITS-path handle. Telescope
-subclasses (:class:`JWSTDataModel`, :class:`HSTDataModel`) own shared sanitize
+subclasses (:class:`JWSTDataModel`, :class:`HSTDataModel`,
+:class:`EuclidDataModel`, :class:`RomanDataModel`) own shared sanitize
 and quality behavior. Instrument classes (NIRCam, MIRI, WFPC2, ACS/WFC,
-ACS/HRC, WFC3/UVIS, WFC3/IR) only override identity and instrument-specific
-cues.
+ACS/HRC, WFC3/UVIS, WFC3/IR, Euclid VIS / NIR, Roman WFI) only override
+identity and instrument-specific cues.
 
 Use :func:`open_datamodel` / :func:`as_datamodel` to construct the most
 specific class for a file. Instrument, filter, header keywords, WCS /
@@ -27,7 +28,13 @@ WFPC2 ``c0m`` science and ``c1m`` DQ are one :class:`WFPC2DataModel`
 
 from __future__ import annotations
 
+from st123.datamodels.euclid import (
+    EuclidDataModel,
+    EuclidNIRDataModel,
+    EuclidVISDataModel,
+)
 from st123.datamodels.hst import (
+    ACSDataModel,
     ACSHRCDataModel,
     ACSWFCDataModel,
     HSTDataModel,
@@ -59,15 +66,22 @@ from st123.datamodels.jwst import (
     NIRCamDataModel,
     sanitize_jwst_l2,
 )
+from st123.datamodels.roman import RomanDataModel, RomanWFIDataModel
 
 __all__ = [
+    'ACSDataModel',
     'ACSHRCDataModel',
     'ACSWFCDataModel',
+    'EuclidDataModel',
+    'EuclidNIRDataModel',
+    'EuclidVISDataModel',
     'HSTDataModel',
     'InstrumentDataModel',
     'JWSTDataModel',
     'MIRIDataModel',
     'NIRCamDataModel',
+    'RomanDataModel',
+    'RomanWFIDataModel',
     'WFC3IRDataModel',
     'WFC3UVISDataModel',
     'WFPC2DataModel',
