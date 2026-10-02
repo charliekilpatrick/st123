@@ -27,6 +27,16 @@ HST_SCIENCE_SUFFIXES = (
     '_jhat.fits',
 )
 
+# AstroDrizzle / calwf3 sidecars that must never enter a science frame list.
+HST_CALIBRATION_NAME_MARKERS = (
+    'staticmask',
+    '_sci_blt.fits',
+    '_median.fits',
+    '_crmask.fits',
+    '_single_sci.fits',
+    '_single_wht.fits',
+)
+
 # Catastrophic absolute residual ceiling (arcsec). ``ST123INT`` is a *group*
 # pairwise stamp and must not be used to reject individual frames -- a single
 # bad visit can pollute every frame's ST123INT (e.g. F160W after iejn02).
@@ -40,6 +50,7 @@ __all__ = [
     'GOOD_HST_EXPFLAGS',
     'HSTDataModel',
     'HST_SCIENCE_SUFFIXES',
+    'HST_CALIBRATION_NAME_MARKERS',
     'filter_good_hst_frames',
     'is_good_hst_alignment',
     'is_good_hst_expflag',
@@ -82,6 +93,7 @@ class HSTDataModel(InstrumentDataModel):
 
     telescope = 'HST'
     science_suffixes = HST_SCIENCE_SUFFIXES
+    L3_EXTENSION: str = 'drc'
     INSTRUMENTS: tuple[str, ...] = ('ACS', 'WFC3', 'WFPC2')
     DEFAULT_MAST_FILTERS: tuple[str, ...] | None = None
     BEST_REFERENCE_FILTERS: tuple[str, ...] = (
@@ -106,6 +118,15 @@ class HSTDataModel(InstrumentDataModel):
         ('flt.fits', 'WFC3/IR'),
     )
     CR_DQ_BIT: int = 4096
+    # CALACS / calwf3 hot-pixel flag. Included in ACS/UVIS DRIZ_BITS so 1-2
+    # frame stacks do not punch a hole at every hot pixel.
+    HOT_DQ_BIT: int = 16
+    # Drizzled coadd DQ (not CALACS input bits). SCI may be filled for
+    # cosmetics; photometry should ignore any nonzero L3 DQ.
+    L3_DQ_NO_DATA: int = 1
+    L3_DQ_INPAINT: int = 2
+    L3_DQ_UNRELIABLE: int = 4
+    L3_INPAINT_MAX_PIX: int = 2048
     DRIZZLE_DEFAULTS: dict = {
         'final_pixfrac': 0.8,
         'driz_sep_pixfrac': 0.8,
@@ -188,9 +209,11 @@ class HSTDataModel(InstrumentDataModel):
 
     @classmethod
     def matches_science_filename(cls, path: PathLike) -> bool:
-        """True when *path* looks like an HST science MEF (not DQ-only ``c1m``)."""
+        """True when *path* looks like an HST science MEF (not DQ / drizzle cal)."""
         name = Path(path).name.lower()
         if name.endswith('c1m.fits') or name.endswith('.sky.fits'):
+            return False
+        if any(marker in name for marker in HST_CALIBRATION_NAME_MARKERS):
             return False
         return any(name.endswith(suf) for suf in HST_SCIENCE_SUFFIXES)
 

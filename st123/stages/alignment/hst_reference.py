@@ -442,6 +442,41 @@ def pick_best_level3(
     return best.path, scores_sorted
 
 
+def unanchored_l3_filters(
+    scores: Sequence[Level3GaiaScore],
+    *,
+    min_fov: int = 8,
+    min_peer_detectable: int = 8,
+) -> set[str]:
+    """
+    Return filters whose prelim L3 has Gaia in the FOV but zero detections.
+
+    That pattern means the pipeline WCS is too far off for Gaia to land on
+    stars (SN 2014cx F606W: fov=30, detectable=0 while F555W/F814W had 26).
+    JHAT against a good L3 phot catalog then needs a wider ``d2d_max``.
+    """
+    rows = list(scores or [])
+    if not rows:
+        return set()
+    if not any(int(s.n_detectable) >= int(min_peer_detectable) for s in rows):
+        return set()
+    by_filt: dict[str, list[Level3GaiaScore]] = {}
+    for score in rows:
+        key = str(score.filt or '').strip().lower()
+        if not key:
+            continue
+        by_filt.setdefault(key, []).append(score)
+    out: set[str] = set()
+    for filt, group in by_filt.items():
+        best = max(
+            group,
+            key=lambda s: (int(s.n_detectable), int(s.n_illuminated), int(s.n_gaia_fov)),
+        )
+        if int(best.n_detectable) == 0 and int(best.n_gaia_fov) >= int(min_fov):
+            out.add(filt)
+    return out
+
+
 def ensure_preliminary_level3s(
     raw_dir: PathLike,
     outdir: PathLike,

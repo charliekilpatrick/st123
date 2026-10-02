@@ -72,7 +72,7 @@ def test_plan_existing_box_require_coverage(tmp_path: Path):
     fits.PrimaryHDU(header=w.to_header()).writeto(box / 'stamp_wcs.fits')
     on = _write_jhat(tmp_path / 'on_jhat.fits', 185.73, 15.82, n=64)
     off = _write_jhat(tmp_path / 'off_jhat.fits', 186.5, 16.5, n=64)
-    # Default: stamp FoV + stamp-center coverage (no explicit ra/dec needed).
+    # Default: stamp FoV overlap only (no stamp-center coverage cut).
     plan = plan_existing_box(
         base,
         box,
@@ -82,7 +82,7 @@ def test_plan_existing_box_require_coverage(tmp_path: Path):
     assert len(plan.boxes) == 1
     frames = [Path(p).name for p in plan.boxes[0].frames]
     assert 'on_jhat.fits' in frames
-    assert 'off_jhat.fits' not in frames
+    assert 'off_jhat.fits' in frames
 
 
 def test_plan_existing_box_explicit_coverage_override(tmp_path: Path):
@@ -208,3 +208,50 @@ def test_prepare_filter_drizzle_assume_aligned_skips_harmonize(tmp_path: Path):
     assert rec['harmonize'].get('skipped') is True
     assert rec['harmonize'].get('reason') == 'assume_aligned'
     mock_harm.assert_not_called()
+
+
+def test_visit_coadds_run_when_assume_aligned(tmp_path: Path):
+    """--visit-coadds must write epoch sidecars after align (no re-harmonize)."""
+    from st123.stages.mosaic.hst_drizzle import _drizzle_visit_coadds
+
+    sn = _write_jhat(tmp_path / 'ifl702aa_jhat.fits', 180.0, 0.0)
+    pre = _write_jhat(tmp_path / 'if8c23aa_jhat.fits', 180.0, 0.0)
+    written: list[Path] = []
+
+    def _fake_drizzle(frames, dest, **kwargs):
+        dest = Path(dest)
+        dest.write_bytes(b'')
+        written.append(dest)
+        return dest
+
+    with (
+        patch(
+            'st123.stages.mosaic.hst_drizzle.drizzle_filter_group',
+            side_effect=_fake_drizzle,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.validate_hst_group_internal_alignment',
+        ) as mock_qa,
+    ):
+        products = _drizzle_visit_coadds(
+            [sn, pre],
+            outdir=tmp_path,
+            instrument='wfc3',
+            filt='f555w',
+            suffix='drc',
+            dropped_visits=set(),
+            final_pixfrac=0.8,
+            final_scale=None,
+            num_cores=1,
+            group_id=0,
+            box_id=0,
+            all_visits=True,
+            assume_aligned=True,
+        )
+    mock_qa.assert_not_called()
+    names = sorted(p.name for p in written)
+    assert names == [
+        'coadd_0_0_wfc3_f555w_if8c23_drc.fits',
+        'coadd_0_0_wfc3_f555w_ifl702_drc.fits',
+    ]
+    assert {row['status'] for row in products} == {'ok'}

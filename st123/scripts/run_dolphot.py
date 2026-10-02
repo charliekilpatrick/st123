@@ -395,6 +395,12 @@ def _run_one_wait(
         proc.returncode,
         elapsed,
     )
+    try:
+        err_log = run.outdir / 'dolphot.err'
+        with err_log.open('a', encoding='utf-8') as handle:
+            handle.write(f'ELAPSED_SEC={elapsed:.2f}\n')
+    except OSError:
+        pass
     return run, int(proc.returncode)
 
 

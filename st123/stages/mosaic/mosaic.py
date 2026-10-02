@@ -118,10 +118,13 @@ def mosaic_coadd_basename(
     group_id: int | str,
     box_id: int | str,
     filter_name: str,
+    instrument: str | None = None,
 ) -> str:
-    """Return ``coadd_{group}_{box}_{filter}_i2d.fits``."""
-    filt = str(filter_name).lower().replace(' ', '')
-    return f'coadd_{group_id}_{box_id}_{filt}_i2d.fits'
+    """L3 basename from the JWST instrument datamodel (``nircam`` / ``miri``)."""
+    from st123.datamodels.instrument import InstrumentDataModel
+
+    cls = InstrumentDataModel.class_for_l3(instrument, filter_name=filter_name)
+    return cls.l3_coadd_basename(group_id, box_id, filter_name)
 
 
 def mosaic_hst_coadd_basename(
@@ -130,21 +133,20 @@ def mosaic_hst_coadd_basename(
     instrument: str,
     filter_name: str,
     *,
-    suffix: str = 'drc',
+    suffix: str | None = None,
     visit: str | None = None,
 ) -> str:
-    """
-    Return boxed HST coadd basename.
+    """L3 basename from the HST instrument datamodel (``acs`` / ``wfc3`` / ``wfpc2``)."""
+    from st123.datamodels.instrument import InstrumentDataModel
 
-    Pattern: ``coadd_{group}_{box}_{inst}_{filter}[_{visit}]_{drc|drz}.fits``.
-    """
-    inst = str(instrument).lower().replace(' ', '').split('_')[0]
-    filt = str(filter_name).lower().replace(' ', '')
-    suf = str(suffix).lower().replace('.fits', '').lstrip('_')
-    if visit:
-        vid = str(visit).lower().replace(' ', '')
-        return f'coadd_{group_id}_{box_id}_{inst}_{filt}_{vid}_{suf}.fits'
-    return f'coadd_{group_id}_{box_id}_{inst}_{filt}_{suf}.fits'
+    cls = InstrumentDataModel.class_for_l3(instrument, filter_name=filter_name)
+    return cls.l3_coadd_basename(
+        group_id,
+        box_id,
+        filter_name,
+        extension=suffix,
+        visit=visit,
+    )
 
 
 def is_jwst_mosaic_instrument(instrument: str | None) -> bool:
@@ -441,6 +443,36 @@ def stamp_diagonal_deg(box_wcs: wcs.WCS) -> float:
     return float(coords[0].separation(coords[2]).deg)
 
 
+def strip_header_obsgeo(hdr: fits.Header) -> bool:
+    """Remove OBSGEO-* cards from a header (stamp grids are not observations)."""
+    changed = False
+    for key in list(hdr.keys()):
+        if str(key).upper().startswith('OBSGEO'):
+            del hdr[key]
+            changed = True
+    return changed
+
+
+def wcs_without_observatory(box_wcs: wcs.WCS) -> wcs.WCS:
+    """
+    Return a copy of *box_wcs* with observatory location cleared.
+
+    ``WCS.to_header()`` writes ``OBSGEO-XYZ`` but omits ``OBSGEO-L/B/H``.
+    Pickling that header in a ProcessPool worker reconstructs WCS and
+    emits ``FITSFixedWarning`` obsfix. A shared sky grid does not need
+    observatory geodetic keywords.
+    """
+    out = box_wcs.deepcopy() if hasattr(box_wcs, 'deepcopy') else box_wcs
+    try:
+        out.wcs.obsgeo = np.array([np.nan] * 6, dtype=float)
+    except Exception:
+        pass
+    stored = getattr(out, '_header', None)
+    if stored is not None:
+        strip_header_obsgeo(stored)
+    return out
+
+
 def write_stamp_wcs(outdir: str | Path, box_wcs: wcs.WCS) -> Path:
     """
     Persist the shared stamp WCS for a ``ref_*`` box.
@@ -456,6 +488,7 @@ def write_stamp_wcs(outdir: str | Path, box_wcs: wcs.WCS) -> Path:
         int(box_wcs._naxis[1]),
     )
     hdr = _ensure_pc_cdelt_header(box_wcs.to_header(relax=True), box_wcs)
+    strip_header_obsgeo(hdr)
     hdr['MOSNX'] = (int(nx), 'Stamp NAXIS1 (pixels)')
     hdr['MOSNY'] = (int(ny), 'Stamp NAXIS2 (pixels)')
     hdr['STAMPWCS'] = (True, 'Shared mosaic stamp WCS')
@@ -476,10 +509,14 @@ def load_stamp_wcs(outdir: str | Path) -> wcs.WCS | None:
     out = Path(outdir)
     stamp_path = out / STAMP_WCS_BASENAME
     if stamp_path.is_file():
-        with as_datamodel(stamp_path).open() as hdul:
+        rewrite = False
+        # Header-only stamp, not a science MEF -- skip datamodel sanitize
+        # (that would *add* OBSGEO-L/B/H from XYZ).
+        with fits.open(stamp_path, memmap=False) as hdul:
             hdr = hdul[0].header.copy()
             nx = int(hdr.get('MOSNX') or hdr.get('NAXIS1') or 0)
             ny = int(hdr.get('MOSNY') or hdr.get('NAXIS2') or 0)
+            rewrite = strip_header_obsgeo(hdr)
             # Header-only stamps are stored with NAXIS=0; seed 2-D axis cards
             # before WCS() so Astropy does not warn about axes vs image.
             if nx > 0 and ny > 0:
@@ -489,10 +526,14 @@ def load_stamp_wcs(outdir: str | Path) -> wcs.WCS | None:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', FITSFixedWarning)
                 stamp = wcs.WCS(hdr, naxis=2)
+            stamp = wcs_without_observatory(stamp)
             if nx > 0 and ny > 0:
                 stamp.pixel_shape = (nx, ny)
                 stamp._naxis = [nx, ny]
-            return stamp
+        if rewrite and nx > 0 and ny > 0:
+            # Persist the sanitized stamp so later workers do not obsfix.
+            write_stamp_wcs(out, stamp)
+        return stamp
 
     for pattern in (
         'coadd_*_f150w2_i2d.fits',
@@ -507,6 +548,7 @@ def load_stamp_wcs(outdir: str | Path) -> wcs.WCS | None:
             sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
             stamp = wcs.WCS(sci.header, naxis=2)
             ny, nx = sci.data.shape[-2:]
+        stamp = wcs_without_observatory(stamp)
         stamp.pixel_shape = (int(nx), int(ny))
         stamp._naxis = [int(nx), int(ny)]
         return stamp
@@ -540,6 +582,7 @@ def ensure_box_stamp_wcs(
         stamp = mw
     else:
         stamp = slice_box_wcs(mw, bb)
+    stamp = wcs_without_observatory(stamp)
     write_stamp_wcs(box.outdir, stamp)
     box.wcs = stamp
     box.bbox = local_bbox_for_wcs(stamp)
@@ -1319,7 +1362,9 @@ def jwst_filter_image3_worker(job: dict[str, Any]) -> dict[str, Any]:
         )
         coadd_filename = os.path.join(
             box_outdir,
-            mosaic_coadd_basename(group_id, box_index, filter_name),
+            mosaic_coadd_basename(
+                group_id, box_index, filter_name, instrument=instrument
+            ),
         )
         coadd([driz_image], filter_name, coadd_filename)
         apply_wcs_to_coadd(coadd_filename)
@@ -1681,7 +1726,7 @@ def coadd(
         hdul = as_datamodel(file).open()
         for key in list(hdr_update.keys()):
             hdr_update[key].append(as_datamodel(file).keyword(key, ext = 0))
-        filter_name = as_datamodel(file).keyword('FILTER', ext = 0)
+        filter_name = as_datamodel(file).filter_name
         filters.append(filter_name)
         phots.append(as_datamodel(file).keyword('PHOTMJSR', ext = 1))
         # #inverse variance weighting
@@ -2094,7 +2139,7 @@ def plan_mosaic_boxes(
             # Prefer an on-disk stamp WCS so remosaics keep the same sky grid.
             stamp = load_stamp_wcs(box_outdir)
             if stamp is None:
-                stamp = sliced_wcs[i]
+                stamp = wcs_without_observatory(sliced_wcs[i])
                 write_stamp_wcs(box_outdir, stamp)
             sky_poly = stamp_sky_polygon(stamp)
             # Filter against stamp sky (not just the latest split index) so
@@ -2138,10 +2183,9 @@ def plan_existing_box(
     F150W2/F200W) as the shared sky WCS so remosaics keep the on-disk stamp
     without re-running overlap box-splitting.
 
-    Frames must overlap the stamp FoV. By default they must also cover the
-    stamp center (same rule as :func:`plan_centered_box`). Pass
-    *require_coverage_ra* / *require_coverage_dec* to require a different
-    sky point instead.
+    Frames must overlap the stamp FoV. Pass *require_coverage_ra* /
+    *require_coverage_dec* to also require that each frame cover a sky
+    point (typically the stamp center).
     """
     base = Path(base_dir)
     out = Path(box_outdir)
@@ -2179,18 +2223,16 @@ def plan_existing_box(
     if require_coverage_ra is not None and require_coverage_dec is not None:
         cov_ra = float(require_coverage_ra)
         cov_dec = float(require_coverage_dec)
-    else:
-        cov_ra, cov_dec = stamp_sky_center(stamp_wcs)
-    before = len(kept)
-    kept = filter_frames_covering_point(kept, cov_ra, cov_dec)
-    if verbose:
-        logger.info(
-            'Existing-box coverage filter RA=%.6f Dec=%.6f: %d -> %d frame(s)',
-            cov_ra,
-            cov_dec,
-            before,
-            len(kept),
-        )
+        before = len(kept)
+        kept = filter_frames_covering_point(kept, cov_ra, cov_dec)
+        if verbose:
+            logger.info(
+                'Existing-box coverage filter RA=%.6f Dec=%.6f: %d -> %d frame(s)',
+                cov_ra,
+                cov_dec,
+                before,
+                len(kept),
+            )
     if verbose:
         logger.info(
             'Existing-box plan %s: stamp=%s frames=%d/%d',
@@ -2700,8 +2742,8 @@ def unify_jwst_astrometric_frame(
     only measure residuals and write QA -- no WCS edits or remosaic.
     """
     import json
-    import re
 
+    from st123.datamodels.instrument import InstrumentDataModel
     from st123.stages.alignment.hst_jhat import measure_hst_sky_offset_2dhist
     from st123.stages.mosaic.hst_drizzle import apply_sky_shift_to_fits
 
@@ -2722,15 +2764,11 @@ def unify_jwst_astrometric_frame(
         return report
     report['abs_ref'] = str(abs_ref)
 
-    filt_re = re.compile(
-        r'coadd_\d+_[^_]+_(?P<filt>[a-z0-9]+)_i2d\.fits$', re.IGNORECASE
-    )
-
     max_abs = 0.0
     any_fail = False
     for coadd in coadds:
-        m = filt_re.search(coadd.name)
-        filt = m.group('filt').lower() if m else None
+        parsed = InstrumentDataModel.parse_l3_coadd_name(coadd.name)
+        filt = parsed['filter'] if parsed else None
         row: dict[str, Any] = {
             'coadd': str(coadd),
             'filter': filt,

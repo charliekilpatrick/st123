@@ -15,6 +15,7 @@ class WFC3IRDataModel(HSTDataModel):
 
     instrument = 'WFC3'
     detector = 'IR'
+    L3_EXTENSION: str = 'drz'
     science_suffixes = ('_flt.fits', '_jhat.fits')
     FILTERS: tuple[str, ...] = (
         'F098M', 'F105W', 'F110W', 'F125W', 'F126N', 'F127M', 'F128N', 'F130N',

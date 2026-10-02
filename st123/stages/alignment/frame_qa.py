@@ -25,9 +25,30 @@ FRAME_INTERNAL_TOL_ARCSEC = 0.050
 FRAME_SPARSE_TOL_ARCSEC = 0.080
 # Legacy L3 pairwise soft ceiling (warn, do not hard-fail mosaic).
 FRAME_L3_SOFT_TOL_ARCSEC = 0.120
+# Hard fail: residual this large is a wrong solution, not a 50-80 mas miss.
+# Frames at or above this must not enter a coadd (SN 2014cx F606W was 245-316 mas).
+FRAME_CATASTROPHIC_TOL_ARCSEC = 0.200
+# Wide recovery search / apply cap when a frame is already catastrophic.
+# Shared-stamp galaxy peaks can sit tens of arcsec apart (SN 2014cx F606W is
+# 25" west and 6" north of F555W after a false ~69" FFT lock; pipeline WCS
+# placed the nucleus ~65" off). Catalog 2-D histograms (5") and a 15"
+# cutout cannot see that. 90" covers an ACS/WFC chip-scale translation.
+FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC = 90.0
+# L3 coadds of the same box: smoothed galaxy-peak offset above this is a
+# wrong WCS, not a 50 mas catalog residual (F555W vs F814W nucleus color
+# is ~0.16"; F606W vs F555W was 25").
+FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC = 1.0
+# L3 coadds of the same box that share <= this many sources are treated as
+# a failed WCS, not "unmeasurable".
+FRAME_L3_NO_MATCH_MAX = 1
 FRAME_MIN_MATCH_HEALTHY = 12
+# Peer-sparse: n_cal this far below healthy peers plus a residual above the
+# sparse gate is a false JHAT lock, even when the residual is < 200 mas.
+FRAME_PEER_CAL_FRACTION = 0.25
 
-# Abs retie polish (mirrors JWST hub retie).
+# Abs retie polish (mirrors JWST hub retie). HST visit retie vs a coadd
+# 2-D histogram uses ``HST_ABS_OFFSET_MAX_ARCSEC`` instead -- WFPC2 pipeline
+# WCS is often ~1" off, which this 0.40" cap would discard.
 FRAME_ABS_RETIE_TOL_ARCSEC = FRAME_ABS_TOL_ARCSEC
 FRAME_ABS_RETIE_MAX_APPLY_ARCSEC = 0.40
 FRAME_ABS_RETIE_MIN_PEAK = 8
@@ -70,6 +91,216 @@ def internal_ok(
     return float(max_delta_arcsec) <= coherent_tol_arcsec(n_match)
 
 
+def is_catastrophic_alignment(
+    residual_arcsec: float | None,
+    n_calibrators: int | None = None,
+    *,
+    peer_n_calibrators: int | None = None,
+    gaia_residual_arcsec: float | None = None,
+    n_gaia: int | None = None,
+) -> bool:
+    """
+    True when the solution is a wrong lock that must not be mosaicked.
+
+    Catastrophic if the residual exceeds
+    :data:`FRAME_CATASTROPHIC_TOL_ARCSEC` (200 mas), if the match count
+    is a small fraction of healthy peers **and** the residual still exceeds
+    the sparse 80 mas gate, or if a healthy Gaia 2-D histogram residual
+    exceeds 200 mas (pipeline WCS ~arcseconds off).
+    """
+    res = None if residual_arcsec is None else float(residual_arcsec)
+    if res is not None and res > float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+        return True
+    gaia_res = (
+        None if gaia_residual_arcsec is None else float(gaia_residual_arcsec)
+    )
+    n_g = int(n_gaia or 0)
+    if (
+        gaia_res is not None
+        and gaia_res > float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+        and n_g >= int(FRAME_MIN_MATCH_HEALTHY)
+    ):
+        return True
+    peer = int(peer_n_calibrators or 0)
+    n_cal = int(n_calibrators or 0)
+    if (
+        res is not None
+        and peer >= 4 * int(FRAME_MIN_MATCH_HEALTHY)
+        and n_cal > 0
+        and n_cal < float(FRAME_PEER_CAL_FRACTION) * peer
+        and res > float(FRAME_SPARSE_TOL_ARCSEC)
+    ):
+        return True
+    return False
+
+
+def median_healthy_n_calibrators(n_cals: Iterable[int | None]) -> int | None:
+    """Median n_cal among healthy (>= 12) solutions, else None."""
+    healthy = [
+        int(n)
+        for n in n_cals
+        if n is not None and int(n) >= int(FRAME_MIN_MATCH_HEALTHY)
+    ]
+    if not healthy:
+        return None
+    healthy.sort()
+    return int(healthy[len(healthy) // 2])
+
+
+def read_jhat_quality_headers(path: PathLike) -> dict[str, Any]:
+    """Read ``JWDISPD`` / ``JWDISPM`` / ``JWNCAL`` / ``ST123CAT`` from a JHAT."""
+    report: dict[str, Any] = {
+        'path': str(path),
+        'residual_arcsec': None,
+        'n_calibrators': None,
+        'catastrophic': None,
+    }
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        return report
+    try:
+        with as_datamodel(p).open(memmap=True) as hdul:
+            hdr = hdul[0].header
+            med = hdr.get('JWDISPD')
+            mean = hdr.get('JWDISPM')
+            val = med if med is not None else mean
+            if val is not None:
+                report['residual_arcsec'] = float(val)
+            ncal = hdr.get('JWNCAL')
+            if ncal is not None:
+                report['n_calibrators'] = int(ncal)
+            if 'ST123CAT' in hdr:
+                report['catastrophic'] = bool(hdr['ST123CAT'])
+    except Exception as exc:
+        logger.warning('Could not read quality headers %s: %s', p.name, exc)
+    return report
+
+
+def filter_catastrophic_jhat_frames(
+    paths: Sequence[PathLike],
+    *,
+    peer_n_calibrators: int | None = None,
+) -> tuple[list[Path], list[tuple[Path, dict[str, Any]]]]:
+    """
+    Split JHAT paths into mosaic-safe vs catastrophically misaligned.
+
+    *peer_n_calibrators* defaults to the median healthy ``JWNCAL`` among
+    *paths*. Frames without quality headers are kept (L3 QA is the backup).
+    """
+    resolved = [Path(p).expanduser().resolve() for p in paths]
+    qualities = [read_jhat_quality_headers(p) for p in resolved]
+    peer = peer_n_calibrators
+    if peer is None:
+        peer = median_healthy_n_calibrators(
+            q.get('n_calibrators') for q in qualities
+        )
+    kept: list[Path] = []
+    dropped: list[tuple[Path, dict[str, Any]]] = []
+    for path, qual in zip(resolved, qualities):
+        flagged = qual.get('catastrophic')
+        if flagged is False:
+            kept.append(path)
+            continue
+        if flagged is not True:
+            flagged = is_catastrophic_alignment(
+                qual.get('residual_arcsec'),
+                qual.get('n_calibrators'),
+                peer_n_calibrators=peer,
+            )
+        if flagged:
+            qual['catastrophic'] = True
+            dropped.append((path, qual))
+        else:
+            kept.append(path)
+    return kept, dropped
+
+
+def isolated_unmatched_coadds(
+    report: Mapping[str, Any],
+    *,
+    min_matches: int = FRAME_MIN_MATCH_HEALTHY,
+    abs_ref_name: str | None = None,
+) -> list[str]:
+    """
+    Return coadd basenames that share no sources with any healthy peer.
+
+    A pair with ``n_match <= FRAME_L3_NO_MATCH_MAX`` is a failed WCS, not
+    an unmeasurable pair. When every coadd is unmatched, keep *abs_ref_name*
+    if given so the hub is not discarded.
+    """
+    pairs = list(report.get('pairs') or [])
+    involved: set[str] = set()
+    matched: set[str] = set()
+    unmatched: set[str] = set()
+    for pair in pairs:
+        a = str(pair.get('a') or '')
+        b = str(pair.get('b') or '')
+        if a:
+            involved.add(a)
+        if b:
+            involved.add(b)
+        n_match = int(pair.get('n_match') or 0)
+        if pair.get('ok') and n_match >= int(min_matches):
+            if a:
+                matched.add(a)
+            if b:
+                matched.add(b)
+        elif n_match <= int(FRAME_L3_NO_MATCH_MAX):
+            if a:
+                unmatched.add(a)
+            if b:
+                unmatched.add(b)
+    if not involved:
+        return []
+    isolated = sorted(involved - matched)
+    if not isolated:
+        return []
+    if matched:
+        return isolated
+    # All pairs unmatched: drop everyone except the abs hub.
+    if abs_ref_name and abs_ref_name in involved:
+        return sorted(n for n in involved if n != abs_ref_name)
+    return sorted(unmatched)
+
+
+def frame_qa_is_catastrophic(report: Mapping[str, Any] | None) -> bool:
+    """True when a ``frame_qa`` payload must not proceed to mosaic."""
+    if not report:
+        return False
+    abs_sec = report.get('abs') or {}
+    residual_as = None
+    if abs_sec.get('residual_mas') is not None:
+        try:
+            residual_as = float(abs_sec['residual_mas']) / 1000.0
+        except (TypeError, ValueError):
+            residual_as = None
+    n_cal = abs_sec.get('n_calibrators')
+    try:
+        n_cal_i = int(n_cal) if n_cal is not None else None
+    except (TypeError, ValueError):
+        n_cal_i = None
+    peer = median_healthy_n_calibrators(
+        (
+            int(fr['n_calibrators'])
+            if fr.get('n_calibrators') is not None
+            else None
+        )
+        for fr in (report.get('frames') or [])
+        if isinstance(fr, Mapping)
+    )
+    if is_catastrophic_alignment(
+        residual_as, n_cal_i, peer_n_calibrators=peer
+    ):
+        return True
+    extra = report.get('mosaic_coadd_qa') or {}
+    if isolated_unmatched_coadds(extra):
+        return True
+    for pair in extra.get('failed_pairs') or []:
+        if int(pair.get('n_match') or 0) <= int(FRAME_L3_NO_MATCH_MAX):
+            return True
+    return False
+
+
 def stamp_quality_headers(
     jhat_path: PathLike,
     *,
@@ -82,6 +313,7 @@ def stamp_quality_headers(
     n_calibrators: int | None = None,
     internal_max_arcsec: float | None = None,
     catalog_basename: str | None = None,
+    catastrophic: bool | None = None,
 ) -> None:
     """
     Write unified JWST-style quality keywords onto a JHAT primary header.
@@ -104,6 +336,8 @@ def stamp_quality_headers(
         None.
     catalog_basename : str, optional
         Stored in ``JWCAT`` when provided.
+    catastrophic : bool, optional
+        When set, writes ``ST123CAT`` so mosaic can refuse the frame.
     """
     path = Path(jhat_path).expanduser().resolve()
     if not path.is_file():
@@ -144,6 +378,11 @@ def stamp_quality_headers(
             hdr['ST123INT'] = (
                 float(internal_max_arcsec),
                 '[arcsec] internal max pairwise |Delta|',
+            )
+        if catastrophic is not None:
+            hdr['ST123CAT'] = (
+                bool(catastrophic),
+                'st123: catastrophic alignment; do not mosaic',
             )
         hdul.flush()
 
@@ -202,12 +441,33 @@ def build_frame_qa(
             'abs_arcsec': FRAME_ABS_TOL_ARCSEC,
             'internal_arcsec': FRAME_INTERNAL_TOL_ARCSEC,
             'sparse_arcsec': FRAME_SPARSE_TOL_ARCSEC,
+            'catastrophic_arcsec': FRAME_CATASTROPHIC_TOL_ARCSEC,
             'min_match_healthy': FRAME_MIN_MATCH_HEALTHY,
         },
     }
     if extra:
         report.update(dict(extra))
     report['ok'] = bool(report['abs']['ok']) and bool(report['internal']['ok'])
+    peer = median_healthy_n_calibrators(
+        (
+            int(fr['n_calibrators'])
+            if isinstance(fr, Mapping) and fr.get('n_calibrators') is not None
+            else None
+        )
+        for fr in (frames or [])
+    )
+    cat_ok = not is_catastrophic_alignment(
+        residual_as, n_cal, peer_n_calibrators=peer
+    )
+    extra_qa = extra or {}
+    mosaic_qa = extra_qa.get('mosaic_coadd_qa') if isinstance(extra_qa, Mapping) else None
+    if mosaic_qa and isolated_unmatched_coadds(mosaic_qa):
+        cat_ok = False
+    report['catastrophic'] = {
+        'ok': cat_ok,
+        'tol_arcsec': FRAME_CATASTROPHIC_TOL_ARCSEC,
+    }
+    report['mosaic_ok'] = bool(report['ok']) and bool(cat_ok)
     return report
 
 
@@ -293,23 +553,44 @@ def warn_if_frame_qa_soft(
     context: str = '',
 ) -> bool:
     """
-    Log a warning when abs/internal exceed 50 mas (mosaic assume-aligned path).
+    Log when abs/internal exceed the 50 mas gate.
 
-    Returns True when the report is OK (or missing); False when soft-failing.
+    Catastrophic residuals log an error and must not mosaic. Smaller misses
+    remain a warning (mosaic assume-aligned path).
+
+    Returns True when the report is OK (or missing); False when failing.
     """
     lg = log or logger
     if not report:
         return True
     abs_ok_flag = bool((report.get('abs') or {}).get('ok', True))
     int_ok_flag = bool((report.get('internal') or {}).get('ok', True))
-    if abs_ok_flag and int_ok_flag and report.get('ok', True):
+    if (
+        abs_ok_flag
+        and int_ok_flag
+        and report.get('ok', True)
+        and not frame_qa_is_catastrophic(report)
+    ):
         return True
     abs_mas = (report.get('abs') or {}).get('residual_mas')
     int_mas = (report.get('internal') or {}).get('max_delta_mas')
+    ctx = f' [{context}]' if context else ''
+    if frame_qa_is_catastrophic(report):
+        lg.error(
+            'Alignment QA catastrophic-fail%s: abs=%.1f mas (ok=%s) '
+            'internal=%.1f mas (ok=%s); do not mosaic these frames -- '
+            'see frame_qa.json',
+            ctx,
+            float(abs_mas) if abs_mas is not None else float('nan'),
+            abs_ok_flag,
+            float(int_mas) if int_mas is not None else float('nan'),
+            int_ok_flag,
+        )
+        return False
     lg.warning(
         'Alignment QA soft-fail%s: abs=%.1f mas (ok=%s) internal=%.1f mas '
         '(ok=%s); coadds proceed (align owns frame) -- see frame_qa.json',
-        f' [{context}]' if context else '',
+        ctx,
         float(abs_mas) if abs_mas is not None else float('nan'),
         abs_ok_flag,
         float(int_mas) if int_mas is not None else float('nan'),

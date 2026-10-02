@@ -45,10 +45,11 @@ EXPECTED_NIRCAM_JHAT_COUNT = 80
 EXPECTED_MIRI_JHAT_COUNT = 36
 EXPECTED_JWST_JHAT_COUNT = EXPECTED_NIRCAM_JHAT_COUNT + EXPECTED_MIRI_JHAT_COUNT
 # Legacy shared reduction/jhat/ may also hold HST JHAT products.
-EXPECTED_HST_JHAT_COUNT = 30  # ACS + WFC3 + WFPC2 on this host
+EXPECTED_HST_JHAT_COUNT = 50  # ACS + WFC3 + WFPC2 on this host
 EXPECTED_JHAT_COUNT = EXPECTED_JWST_JHAT_COUNT + EXPECTED_HST_JHAT_COUNT
 EXPECTED_PHOT_NIRCAM = EXPECTED_NIRCAM_JHAT_COUNT + 1  # jhat + coadd
-EXPECTED_SW_COADD_FILTER = 'f150w2'
+# On-disk SW coadd still uses the historical F150W2 filename until remosaic.
+EXPECTED_ONDISK_SW_COADD_FILTER = 'f150w2'
 
 
 def _sample_wcs_header() -> fits.Header:
@@ -273,16 +274,18 @@ def test_ngc3310_jhat_inventory_for_mosaic():
     assert len(table) == EXPECTED_JWST_JHAT_COUNT
     assert set(table['group']) == {0}
     filters = {str(f) for f in table['filter']}
-    assert EXPECTED_SW_COADD_FILTER in filters
-    assert {'f150w', 'f200w', 'f444w'} <= filters
+    # Dual-filter NIRCam frames are named by PUPIL (F164N, F405N), not FILTER.
+    assert {'f150w', 'f164n', 'f200w', 'f405n'} <= filters
+    assert 'f444w' not in filters
     assert {'f560w', 'f770w'} <= filters
 
 
 @requires_ngc3310
-def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
+def test_ngc3310_sw_filter_table_targets_broadband():
     from st123.stages.mosaic.mosaic import is_nircam_sw_broadband, split_observations
 
-    # NIRCam-only: historical SW coadd selection for this field.
+    # NIRCam-only: SW coadd selection uses true broadband (F150W / F200W),
+    # not F150W2+F164N dual-filter frames.
     nircam = sorted(
         str(p) for p in NGC3310_JHAT.glob('*jhat.fits') if 'nrc' in p.name.lower()
     )
@@ -292,8 +295,10 @@ def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
     filter_tables = split.get_sw_filter_tables(tol=0.05)
     assert len(split.split_boxes) == 1
     keys = [str(k) for k in filter_tables[0].keys()]
-    assert keys == [EXPECTED_SW_COADD_FILTER]
-    assert len(filter_tables[0][EXPECTED_SW_COADD_FILTER]) == 16
+    assert keys
+    assert set(keys) <= {'f150w', 'f200w'}
+    assert 'f164n' not in keys
+    assert len(filter_tables[0][keys[0]]) == 16
 
     # Mixed NIRCam+MIRI inventory must never promote MIRI into the SW table.
     all_files = sorted(str(p) for p in NGC3310_JHAT.glob('*jhat.fits'))
@@ -301,7 +306,8 @@ def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
     split_m = split_observations(table=mixed[mixed['group'] == 0], N_max=150)
     split_m.boxsplit()
     mixed_keys = [str(k) for k in split_m.get_sw_filter_tables(tol=0.05)[0].keys()]
-    assert EXPECTED_SW_COADD_FILTER in mixed_keys
+    assert mixed_keys
+    assert set(mixed_keys) <= {'f150w', 'f200w'}
     assert all(is_nircam_sw_broadband(k) for k in mixed_keys)
     assert 'f1130w' not in mixed_keys
     assert 'f560w' not in mixed_keys
@@ -309,13 +315,13 @@ def test_ngc3310_sw_filter_table_targets_f150w2_coadd():
 
 @requires_ngc3310
 def test_ngc3310_mosaic_products_present_and_gwcs_compatible():
-    coadd = NGC3310_REF0 / f'coadd_0_0_{EXPECTED_SW_COADD_FILTER}_i2d.fits'
+    coadd = NGC3310_REF0 / f'coadd_0_0_{EXPECTED_ONDISK_SW_COADD_FILTER}_i2d.fits'
     frame_list = NGC3310_REF0 / 'dolphot_frames.txt'
     # dolphot.param is produced by dolphot-prep, not mosaic
     param = NGC3310_PHOT / 'dolphot.param'
     # Prefer filter-specific GWCS; fall back to legacy mosaic_gwcs.asdf.
     gwcs_candidates = [
-        NGC3310_REF0 / f'mosaic_gwcs_{EXPECTED_SW_COADD_FILTER}.asdf',
+        NGC3310_REF0 / f'mosaic_gwcs_{EXPECTED_ONDISK_SW_COADD_FILTER}.asdf',
         NGC3310_REF0 / 'mosaic_gwcs.asdf',
         *sorted(NGC3310_REF0.glob('mosaic_gwcs_*.asdf')),
     ]

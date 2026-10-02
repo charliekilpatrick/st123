@@ -755,6 +755,61 @@ def add_mast_token(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
+def add_catalog_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach catalog / light-curve options.
+
+    Honored by the ``catalog`` stage. ``--photfile`` plus ``--index`` or
+    ``--ra``/``--dec`` writes a visit-binned AB light curve. ``--outfile``
+    is also used by the legacy combined-CSV path.
+    """
+    group = parser.add_argument_group('catalog')
+    group.add_argument(
+        '--photfile',
+        type=str,
+        default=None,
+        help=(
+            'DOLPHOT ``.phot`` catalog. With --index or --ra/--dec, write a '
+            'visit-binned AB light curve (same filter, images within '
+            '--max-gap-days).'
+        ),
+    )
+    group.add_argument(
+        '--outfile',
+        type=str,
+        default=None,
+        help='Output table path (ECSV / CSV / FITS from the suffix).',
+    )
+    group.add_argument(
+        '--index',
+        dest='source_index',
+        type=int,
+        default=None,
+        help='Zero-based DOLPHOT catalog row to extract (light-curve mode).',
+    )
+    group.add_argument(
+        '--max-gap-days',
+        dest='max_gap_days',
+        type=float,
+        default=1.0,
+        help=(
+            'Maximum MJD span (days) for combining frames of one filter '
+            '(default: 1).'
+        ),
+    )
+    group.add_argument(
+        '--max-flag',
+        dest='max_flag',
+        type=int,
+        default=7,
+        help=(
+            'Reject per-image DOLPHOT quality flags above this value '
+            '(default: 7).'
+        ),
+    )
+    return parser
+
+
 def add_filters(parser: argparse.ArgumentParser, *, help: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         '--filters',

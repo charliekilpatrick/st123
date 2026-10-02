@@ -22,6 +22,7 @@ class WFPC2DataModel(HSTDataModel):
     """
 
     instrument = 'WFPC2'
+    L3_EXTENSION: str = 'drz'
     science_suffixes = ('_c0m.fits', '_jhat.fits')
     FILTERS: tuple[str, ...] = (
         'F122M', 'F160BW', 'F185W', 'F218W', 'F255W', 'F300W', 'F336W', 'F375N',
@@ -58,13 +59,13 @@ class WFPC2DataModel(HSTDataModel):
         'sig_frac': 0.3,
         'obj_lim': 6.0,
     }
-    OVERSCAN_EDGE_PIX: int = 32
-    OVERSCAN_LEFT_EXTRA: int = 20
+    OVERSCAN_EDGE_PIX: int = 16
+    OVERSCAN_LEFT_EXTRA: int = 8
     OVERSCAN_DQ_BIT: int = 256
     SCI_FLOOR: float = -20.0
     BAD_GROW_PIX: int = 2
     BAD_COL_FRAC: float = 0.50
-    VAR_EDGE_PIX: int = 48
+    VAR_EDGE_PIX: int = 24
     VAR_SIGMA: float = 5.0
     DROP_SINGLE_CTX_EDGE_PIX: int = 16
 

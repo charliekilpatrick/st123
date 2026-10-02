@@ -15,11 +15,11 @@ import shutil
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Iterable, MutableMapping, Optional, Sequence, Union
+from typing import Any, Iterator, Iterable, Mapping, MutableMapping, Optional, Sequence, Union
 
 from astropy.io import fits
 from st123.datamodels import as_datamodel
-from st123.datamodels.hst.hst import HSTDataModel
+from st123.datamodels.hst.hst import HST_CALIBRATION_NAME_MARKERS, HSTDataModel
 from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
 from st123.datamodels.hst.wfpc2 import WFPC2DataModel
 
@@ -498,6 +498,128 @@ def _ctx_single_bit_mask(ctx: np.ndarray) -> np.ndarray:
     return (cu != 0) & ((cu & (cu - np.uint32(1))) == 0)
 
 
+# Isolated SCI specks (hot pixels drizzled in because final_bits includes
+# CALACS bit 16) to inpaint after CTX fill. Stars are larger than this.
+HOT_CLIP_MAX_PIX = 4
+HOT_CLIP_NSIGMA = 10.0
+
+
+def _isolated_sci_outliers(
+    sci,
+    good,
+    *,
+    max_size: int = HOT_CLIP_MAX_PIX,
+    n_sigma: float = HOT_CLIP_NSIGMA,
+):
+    """
+    Isolated 1-N pixel SCI spikes vs a 3x3 median (drizzled-in hot pixels).
+
+    CTX fill only inpaints ``CTX==0`` holes. ACS/UVIS ``final_bits=112``
+    lets CALACS hot pixels (bit 16) into SCI, so 4-frame F555W stacks still
+    show speckles. Stars are larger than *max_size* ACS/UVIS pixels.
+    """
+    import numpy as np
+    from scipy.ndimage import label, median_filter
+
+    out = np.zeros(np.asarray(sci).shape, dtype=bool)
+    g = np.asarray(good, dtype=bool)
+    if int(np.count_nonzero(g)) < 50:
+        return out
+    arr = np.asarray(sci, dtype=np.float32)
+    loc = median_filter(np.nan_to_num(arr, nan=0.0), size=3)
+    res = arr - loc
+    sample = res[g]
+    med = float(np.median(sample))
+    mad = 1.4826 * float(np.median(np.abs(sample - med)))
+    if not np.isfinite(mad) or mad <= 0:
+        return out
+    hot = g & np.isfinite(res) & (np.abs(res) > float(n_sigma) * mad)
+    if not np.any(hot):
+        return out
+    lab, n = label(hot)
+    if n == 0:
+        return out
+    sizes = np.bincount(lab.ravel())
+    keep = (sizes >= 1) & (sizes <= int(max_size))
+    keep[0] = False
+    return keep[lab]
+
+
+def _inpaint_from_neighbors(sci: np.ndarray, hole: np.ndarray, valid: np.ndarray):
+    """Nearest-neighbor fill of *hole* pixels from *valid* SCI values."""
+    import numpy as np
+    from scipy import ndimage
+
+    out = np.asarray(sci, dtype=np.float32).copy()
+    if not np.any(hole) or not np.any(valid):
+        return out
+    # Distance to the nearest valid pixel; indices are the donor location.
+    inv = np.asarray(~valid, dtype=bool)
+    _, (iy, ix) = ndimage.distance_transform_edt(inv, return_indices=True)
+    sel = np.asarray(hole, dtype=bool)
+    out[sel] = out[iy[sel], ix[sel]]
+    return out
+
+
+def _split_empty_components(
+    empty: np.ndarray,
+    *,
+    max_pix: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Split an empty-pixel mask into small interior holes vs exterior / large gaps.
+
+    Small holes (not touching the array border, size ``<= max_pix``) can be
+    interpolated for cosmetics. Border-touching or huge components are true
+    uncovered footprint.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    empty_b = np.asarray(empty, dtype=bool)
+    small = np.zeros(empty_b.shape, dtype=bool)
+    exterior = np.zeros(empty_b.shape, dtype=bool)
+    if not np.any(empty_b):
+        return small, exterior
+    lab, n = ndimage.label(empty_b)
+    if n == 0:
+        return small, exterior
+    sizes = np.bincount(lab.ravel())
+    border_labs = np.unique(
+        np.concatenate(
+            [lab[0, :], lab[-1, :], lab[:, 0], lab[:, -1]]
+        )
+    )
+    on_border = np.zeros(int(n) + 1, dtype=bool)
+    on_border[border_labs[border_labs > 0]] = True
+    is_ext = on_border.copy()
+    is_ext |= sizes > int(max_pix)
+    is_ext[0] = False
+    is_small = (sizes > 0) & (sizes <= int(max_pix)) & ~on_border
+    is_small[0] = False
+    small = is_small[lab]
+    exterior = is_ext[lab]
+    return small, exterior
+
+
+def _ensure_l3_dq_hdu(hdul: fits.HDUList, shape: tuple[int, ...]):
+    """Return the coadd DQ ImageHDU, creating a zero array when missing."""
+    import numpy as np
+
+    for hdu in hdul:
+        if str(getattr(hdu, 'name', '') or '').upper() == 'DQ' and hdu.data is not None:
+            data = np.asarray(hdu.data)
+            if tuple(data.shape) == tuple(shape):
+                return hdu
+    dq = fits.ImageHDU(
+        np.zeros(shape, dtype=np.int16),
+        name='DQ',
+    )
+    dq.header['EXTNAME'] = 'DQ'
+    hdul.append(dq)
+    return dq
+
+
 def _product_is_wfpc2(path: Path, hdul: fits.HDUList) -> bool:
     """Detect WFPC2 drizzle products via INSTRUME or filename."""
     inst = str(hdul[0].header.get('INSTRUME') or '').upper()
@@ -512,22 +634,27 @@ def fill_drizzle_uncovered_with_sky(
     drop_single_ctx_edge_pix: int | None = None,
 ) -> dict:
     """
-    Replace uncovered / non-finite SCI pixels with the image median sky.
+    Cosmetically fill uncovered SCI pixels and flag them in DQ / WHT.
 
     AstroDrizzle leaves ``CTX==0`` (and often NaN SCI) outside the illuminated
-    footprint. Align and mosaic coadds are sanitized so SCI has no NaNs: those
-    pixels are set to a sigma-clipped median of the illuminated SCI, with
-    ``WHT=0`` and ``CTX=0`` retained so DOLPHOT ``*mask`` tools later map them
-    to the instrument DMIN ignore value on the staged photometry copy.
+    footprint. Align and mosaic coadds are sanitized so SCI has no NaNs:
 
-    For WFPC2, single-bit CTX pixels (exactly one contributing input) that lie
-    within ``drop_single_ctx_edge_pix`` of the uncovered footprint are also
-    treated as uncovered (default from
-    :attr:`WFPC2DataModel.DROP_SINGLE_CTX_EDGE_PIX`). Interior
-    single-coverage pixels are kept. Set the edge width to 0 to disable.
+    - Large / border-touching empty regions get the illuminated median sky
+      (true non-coverage).
+    - Small interior holes are nearest-neighbor interpolated from valid SCI
+      so the image looks continuous.
+    - WFPC2 single-bit CTX pixels near the footprint edge keep their drizzle
+      SCI (real detector data) instead of being replaced with sky.
 
-    Returns a summary dict (``n_filled``, ``n_single_ctx``, ``sky``, ...).
-    Idempotent.
+    In all three cases ``WHT=0`` so DOLPHOT ``*mask`` still maps them to DMIN.
+    A ``DQ`` extension records why: bit 1 = no data (sky), bit 2 = inpainted
+    hole, bit 4 = kept SCI but untrustworthy (single-coverage edge).
+
+    For WFPC2, the single-bit edge cut uses
+    :attr:`WFPC2DataModel.DROP_SINGLE_CTX_EDGE_PIX` but only when the mosaic
+    already has overlapping coverage. Set the edge width to 0 to disable.
+
+    Returns a summary dict. Idempotent.
     """
     import numpy as np
     from astropy.stats import sigma_clipped_stats
@@ -537,11 +664,17 @@ def fill_drizzle_uncovered_with_sky(
     summary: dict = {
         'path': str(p),
         'n_filled': 0,
+        'n_inpaint': 0,
         'n_single_ctx': 0,
+        'n_hot': 0,
         'sky': None,
         'skipped': False,
         'drop_single_ctx_edge_pix': 0,
     }
+    no_data_bit = int(HSTDataModel.L3_DQ_NO_DATA)
+    inpaint_bit = int(HSTDataModel.L3_DQ_INPAINT)
+    unreliable_bit = int(HSTDataModel.L3_DQ_UNRELIABLE)
+    max_inpaint = int(HSTDataModel.L3_INPAINT_MAX_PIX)
     with as_datamodel(p).open(mode='update', memmap=False) as hdul:
         try:
             sci_hdu = hdul['SCI']
@@ -570,6 +703,8 @@ def fill_drizzle_uncovered_with_sky(
             elif name == 'WHT' and hdu.data is not None and wht_hdu is None:
                 wht_hdu = hdu
         single_edge = np.zeros(sci.shape, dtype=bool)
+        small_holes = np.zeros(sci.shape, dtype=bool)
+        exterior = np.zeros(sci.shape, dtype=bool)
         if ctx_hdu is None and wht_hdu is None:
             # Still scrub NaNs using finite SCI alone.
             bad = ~np.isfinite(sci)
@@ -578,6 +713,7 @@ def fill_drizzle_uncovered_with_sky(
                 summary['reason'] = 'no CTX/WHT and SCI finite'
                 return summary
             good = np.isfinite(sci)
+            exterior = bad
         else:
             uncovered = np.zeros(sci.shape, dtype=bool)
             ctx = None
@@ -589,6 +725,19 @@ def fill_drizzle_uncovered_with_sky(
                         single = _ctx_single_bit_mask(ctx)
                         # Distance to uncovered / empty-weight footprint edge.
                         illuminated = (ctx != 0)
+                        n_illum = int(np.count_nonzero(illuminated))
+                        n_multi = int(
+                            np.count_nonzero(illuminated & ~single)
+                        )
+                        # No dither overlap: do not treat chip-gap edges as
+                        # extra-bad (1-frame WFPC2 pyramids).
+                        if (
+                            n_illum < 50
+                            or (n_multi / float(n_illum)) < CTX_OVERLAP_MIN_FRAC
+                        ):
+                            edge_pix = 0
+                            summary['drop_single_ctx_edge_pix'] = 0
+                            single = np.zeros(sci.shape, dtype=bool)
                         if wht_hdu is not None:
                             wht0 = np.asarray(wht_hdu.data, dtype=np.float32)
                             if wht0.shape == sci.shape:
@@ -598,7 +747,6 @@ def fill_drizzle_uncovered_with_sky(
                         if np.any(~illuminated) and np.any(single):
                             dist = ndimage.distance_transform_edt(illuminated)
                             single_edge = single & (dist < float(edge_pix))
-                            uncovered |= single_edge
                 else:
                     logger.debug(
                         'CTX shape %s != SCI %s in %s; ignoring CTX',
@@ -610,14 +758,21 @@ def fill_drizzle_uncovered_with_sky(
             if wht_hdu is not None:
                 wht = np.asarray(wht_hdu.data, dtype=np.float32)
                 if wht.shape == sci.shape:
-                    # Fully empty weight is equivalent to uncovered footprint.
                     uncovered |= ~np.isfinite(wht) | (wht <= 0)
-            bad = uncovered | ~np.isfinite(sci)
-            # Sky from pixels that will remain illuminated.
+            uncovered |= ~np.isfinite(sci)
+            # Single-coverage edges keep SCI; do not treat them as empty holes.
+            uncovered = uncovered & ~single_edge
+            small_holes, exterior = _split_empty_components(
+                uncovered, max_pix=max_inpaint
+            )
             if ctx is not None:
                 good = (ctx != 0) & ~single_edge & np.isfinite(sci)
+                if wht_hdu is not None:
+                    wht_g = np.asarray(wht_hdu.data, dtype=np.float32)
+                    if wht_g.shape == sci.shape:
+                        good = good & np.isfinite(wht_g) & (wht_g > 0)
             else:
-                good = ~bad & np.isfinite(sci)
+                good = ~uncovered & ~single_edge & np.isfinite(sci)
 
         if int(np.count_nonzero(good)) < 50:
             summary['skipped'] = True
@@ -632,59 +787,87 @@ def fill_drizzle_uncovered_with_sky(
             return summary
         sky_f = float(sky)
         n_single = int(np.count_nonzero(single_edge))
-        n_filled = int(np.count_nonzero(bad))
-        if n_filled:
-            sci = sci.copy()
-            sci[bad] = np.float32(sky_f)
-            sci_hdu.data = sci
-        # Ensure DOLPHOT mask inputs agree: no weight / no context on fills.
+        n_inpaint = int(np.count_nonzero(small_holes))
+        n_ext = int(np.count_nonzero(exterior))
+        sci = sci.copy()
+        if n_ext:
+            sci[exterior] = np.float32(sky_f)
+        if n_inpaint:
+            sci = _inpaint_from_neighbors(sci, small_holes, good)
+        still = ~np.isfinite(sci)
+        if np.any(still):
+            sci[still] = np.float32(sky_f)
+            exterior = exterior | still
+            n_ext = int(np.count_nonzero(exterior))
+        hot = _isolated_sci_outliers(sci, good)
+        n_hot = int(np.count_nonzero(hot))
+        if n_hot:
+            remain = good & ~hot
+            sci = _inpaint_from_neighbors(sci, hot, remain)
+        sci_hdu.data = sci
+        ignore = exterior | small_holes | single_edge | hot
         if wht_hdu is not None and np.asarray(wht_hdu.data).shape == sci.shape:
             wht = np.asarray(wht_hdu.data, dtype=np.float32).copy()
-            wht[bad] = 0.0
+            wht[ignore] = 0.0
             wht_hdu.data = wht
         if ctx_hdu is not None and np.asarray(ctx_hdu.data).shape == sci.shape:
             ctx_out = np.asarray(ctx_hdu.data).copy()
-            ctx_out[bad] = 0
+            ctx_out[exterior | small_holes] = 0
             ctx_hdu.data = ctx_out
-        # Final guarantee: no NaNs/Infs remain in SCI.
-        still = ~np.isfinite(sci_hdu.data)
-        if np.any(still):
-            data = np.asarray(sci_hdu.data, dtype=np.float32).copy()
-            data[still] = np.float32(sky_f)
-            sci_hdu.data = data
-            n_filled += int(np.count_nonzero(still))
+        dq_hdu = _ensure_l3_dq_hdu(hdul, sci.shape)
+        dq = np.asarray(dq_hdu.data, dtype=np.int16).copy()
+        if n_ext:
+            dq[exterior] = np.int16(dq[exterior] | no_data_bit)
+        if n_inpaint:
+            dq[small_holes] = np.int16(dq[small_holes] | inpaint_bit)
+        if n_hot:
+            dq[hot] = np.int16(dq[hot] | inpaint_bit)
+        if n_single:
+            dq[single_edge] = np.int16(dq[single_edge] | unreliable_bit)
+        dq_hdu.data = dq
         prim = hdul[0].header
-        # Drop obsolete full-single-bit flag if present from older runs.
         if 'ST123SGL' in prim:
             del prim['ST123SGL']
         prim['ST123CTX'] = (
             True,
             (
-                f'st123: filled {n_filled} CTX=0/edge-single/NaN SCI '
-                f'(edge_single={n_single}) sky={sky_f:.6g}'
+                f'st123: SCI fill ext={n_ext} inpaint={n_inpaint} '
+                f'hot={n_hot} edge_single={n_single} sky={sky_f:.6g}'
             ),
         )
         prim['ST123CSY'] = (
             sky_f,
-            'st123: median sky used for CTX=0 / edge-single / NaN SCI fill',
+            'st123: median sky used for large uncovered SCI fill',
+        )
+        prim['ST123DQ'] = (
+            True,
+            'st123: L3 DQ bit1=no_data bit2=inpaint bit4=unreliable',
         )
         if n_single > 0:
             prim['ST123SGE'] = (
                 int(edge_pix),
                 'st123: WFPC2 edge single-bit CTX drop width (pix)',
             )
+        if n_hot > 0:
+            prim['ST123HOT'] = (
+                int(n_hot),
+                'st123: isolated SCI hot/cold pixels inpainted',
+            )
         hdul.flush()
-        summary['n_filled'] = n_filled
+        summary['n_filled'] = n_ext
+        summary['n_inpaint'] = n_inpaint
         summary['n_single_ctx'] = n_single
+        summary['n_hot'] = n_hot
         summary['sky'] = sky_f
     logger.info(
-        'Filled %d uncovered/edge-single/NaN SCI pixel(s) in %s with sky=%.6g '
-        '(edge_single=%d, edge_pix=%d)',
-        summary['n_filled'],
+        'Filled %s: sky=%d inpaint=%d hot=%d edge_single=%d (edge_pix=%d) sky=%.6g',
         p.name,
-        summary['sky'] if summary['sky'] is not None else float('nan'),
+        summary['n_filled'],
+        summary['n_inpaint'],
+        summary['n_hot'],
         summary['n_single_ctx'],
         summary['drop_single_ctx_edge_pix'],
+        summary['sky'] if summary['sky'] is not None else float('nan'),
     )
     return summary
 
@@ -699,9 +882,9 @@ def _finalize_drizzle_product(
     Move AstroDrizzle output to *desired* and drop WFPC2 ``_drw`` duplicates.
 
     DrizzlePac forces ``_drw.fits`` for WFPC2 when given a bare stem; we always
-    keep a single ``_drz.fits`` (or ``_drc.fits``) product. Uncovered ``CTX==0``
-    / non-finite SCI pixels (and WFPC2 *edge* single-bit CTX) are then filled
-    with the image median sky and zeroed in WHT/CTX so photometry ignores them.
+    keep a single ``_drz.fits`` (or ``_drc.fits``) product. Uncovered pixels
+    are then filled in SCI (sky or inpaint) and flagged in ``DQ`` / ``WHT=0``
+    so photometry ignores them while the image stays visually continuous.
     """
     product = product.resolve()
     desired = desired.resolve()
@@ -921,6 +1104,13 @@ def _stage_drizzle_input(
                     data = np.asarray(hdu.data)
                     hdu.header['NGOODPIX'] = int(np.isfinite(data).sum())
         hdul.flush()
+
+    from st123.datamodels import sanitize_science_fits
+
+    try:
+        sanitize_science_fits(dst, materialize_headers=True)
+    except Exception as exc:
+        logger.debug('Sanitize staged drizzle input %s: %s', dst.name, exc)
     return dst
 
 
@@ -1007,6 +1197,11 @@ def group_hst_frames(
     groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
     for path in paths:
         p = Path(path)
+        if not HSTDataModel.matches_science_filename(p):
+            logger.warning(
+                'Skipping non-science / calibration file %s', p.name
+            )
+            continue
         try:
             inst = get_instrument(p).split('_')[0].lower()
             filt = get_filter(p).lower()
@@ -1027,24 +1222,28 @@ def _drizzle_suffix(
     """
     Pipeline-style coadd suffix for the final product basename.
 
-    - ACS/WFC and WFC3/UVIS -> ``drc`` (CR-cleaned drizzle)
-    - WFC3/IR -> ``drz`` (IR ``flt`` drizzle; no CR-split ``drc``)
-    - WFPC2 -> ``drz`` (AstroDrizzle may emit ``_drw``; we rename to ``_drz``)
+    Taken from the instrument datamodel :attr:`L3_EXTENSION`:
+
+    - ACS/WFC and WFC3/UVIS -> ``drc``
+    - WFC3/IR -> ``drz``
+    - WFPC2 -> ``drz``
     """
-    inst = str(instrument).lower().split('_')[0]
-    if inst == 'wfpc2':
-        return 'drz'
-    if inst == 'wfc3' and images:
-        for path in images:
-            try:
-                hdr = as_datamodel(path).header(0)
-            except Exception:
-                continue
-            aper = str(hdr.get('APERTURE') or '').upper()
-            det = str(hdr.get('DETECTOR') or '').upper()
-            if aper.startswith('IR') or det == 'IR':
-                return 'drz'
-    return 'drc'
+    from st123.datamodels.instrument import InstrumentDataModel
+
+    path = images[0] if images else None
+    if path is not None:
+        try:
+            return type(as_datamodel(path)).L3_EXTENSION
+        except Exception:
+            pass
+    det = None
+    if path is not None:
+        try:
+            det = str(as_datamodel(path).detector or '')
+        except Exception:
+            det = None
+    cls = InstrumentDataModel.class_for_l3(instrument, detector=det)
+    return cls.L3_EXTENSION
 
 
 def _default_final_scale(instrument: str) -> float | None:
@@ -1118,10 +1317,36 @@ def build_boxed_drizzle_wcs(
     out = WCS(hdr)
     out.pixel_shape = (int(hdr['NAXIS1']), int(hdr['NAXIS2']))
     out = recenter_wcs_on_array(out)
+    from st123.stages.mosaic.mosaic import strip_header_obsgeo, wcs_without_observatory
+
+    out = wcs_without_observatory(out)
     hdr = out.to_header(relax=True)
+    strip_header_obsgeo(hdr)
     hdr['NAXIS1'] = int(out.pixel_shape[0])
     hdr['NAXIS2'] = int(out.pixel_shape[1])
     return hdr, out
+
+
+def _pickle_safe_output_wcs(output_wcs):
+    """
+    Strip observatory location so ProcessPool unpickle does not obsfix.
+
+    Stamp WCS objects inherit OBSGEO-XYZ from JWST i2d donors.
+    ``WCS.to_header()`` then omits L/B/H, and worker reconstruction warns.
+    """
+    if output_wcs is None:
+        return None
+    from astropy.wcs import WCS as AstropyWCS
+
+    from st123.stages.mosaic.mosaic import strip_header_obsgeo, wcs_without_observatory
+
+    if isinstance(output_wcs, fits.Header):
+        hdr = output_wcs.copy()
+        strip_header_obsgeo(hdr)
+        return hdr
+    if isinstance(output_wcs, AstropyWCS):
+        return wcs_without_observatory(output_wcs)
+    return output_wcs
 
 
 def astrodrizzle_wcs_kwargs_from_header(header) -> dict[str, object]:
@@ -1192,6 +1417,24 @@ def _resolve_astrodrizzle_product(output_stem: Path) -> Path | None:
             continue
         return m.resolve()
     return None
+
+
+def _promote_drizzle_products(scratch_dir: Path, dest_dir: Path) -> None:
+    """Move AstroDrizzle science products and logs out of *scratch_dir*.
+
+    Calibration intermediates (``*staticMask*``, blot, median, CR masks) stay
+    in scratch and are deleted with the directory. They are not science frames.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for item in scratch_dir.iterdir():
+        if not item.is_file():
+            continue
+        name = item.name.lower()
+        if any(marker in name for marker in HST_CALIBRATION_NAME_MARKERS):
+            continue
+        if item.suffix.lower() not in {'.fits', '.log'}:
+            continue
+        shutil.move(str(item), dest_dir / item.name)
 
 
 def _write_group_frame_list(
@@ -1362,6 +1605,98 @@ def subtract_per_chip_sky(
     return report
 
 
+# 1-2 frame stacks cannot fill DQ holes from a second dither.
+THIN_STACK_NMAX = 2
+# Mixed-epoch / deep stacks: minmed + driz_cr treats transients as CRs.
+CROWDED_STACK_NMIN = 10
+# Skip the WFPC2 single-CTX edge cut unless this fraction of illuminated
+# pixels already has multi-bit (overlapping) coverage.
+CTX_OVERLAP_MIN_FRAC = 0.05
+
+
+def optical_drizzle_masking_policy(
+    n_frames: int, *, is_ir: bool
+) -> dict[str, object]:
+    """
+    Choose cosmic / driz_cr / static / combine knobs for an HST drizzle.
+
+    Thin stacks (1-2 frames) cannot replace rejected pixels, so astroscrappy,
+    AstroDrizzle CR rejection, and the static mask are disabled. Stacks of
+    10+ frames use median combine without ``driz_cr`` so a transient (SN)
+    is not flagged as a cosmic ray. Optical ``static=False`` always: the
+    4-sigma-below-mode static mask flags galaxy structure as defects.
+    """
+    n = int(n_frames)
+    if is_ir:
+        return {
+            'run_cosmic': False,
+            'driz_cr': False,
+            'static': None,
+            'combine_type': 'median' if n < 4 else 'minmed',
+        }
+    thin = n <= THIN_STACK_NMAX
+    crowded = n >= CROWDED_STACK_NMIN
+    skip_reject = thin or crowded
+    if n < 4 or crowded:
+        combine = 'median'
+    else:
+        combine = 'minmed'
+    return {
+        'run_cosmic': not skip_reject,
+        'driz_cr': False if skip_reject else True,
+        'static': False,
+        'combine_type': combine,
+    }
+
+
+def optical_drizzle_bits(
+    n_frames: int, *, base_bits: int, is_ir: bool
+) -> int:
+    """
+    AstroDrizzle ``final_bits`` for an optical stack.
+
+    ACS/UVIS ``DRIZ_BITS=112`` includes hot pixels (bit 16). Those spikes
+    survive into 1-2 frame SCI (SN 2014cx F555W). Drop bit 16 for every
+    optical stack: 3+ frames fill from other dithers; thin stacks leave
+    CTX==0 holes that ``fill_drizzle_uncovered_with_sky`` inpaints.
+    IR bits are unchanged.
+    """
+    bits = int(base_bits)
+    if is_ir:
+        return bits
+    bits &= ~int(HSTDataModel.HOT_DQ_BIT)
+    return bits
+
+
+def astrodrizzle_cr_flags(
+    *,
+    is_ir: bool,
+    driz_cr: bool | None = None,
+    static: bool | None = None,
+) -> dict[str, object]:
+    """
+    AstroDrizzle CR / static-mask flags.
+
+    UVIS/ACS default: ``driz_cr=True``, ``static=False``. IR default:
+    :attr:`WFC3IRDataModel.DRIZ_CR` (False) and ``static`` unset. Pass
+    *driz_cr* / *static* to override. ``static=None`` leaves DrizzlePac's
+    default unset so callers can omit the keyword.
+    """
+    if driz_cr is None:
+        do_cr = bool(WFC3IRDataModel.DRIZ_CR) if is_ir else True
+    else:
+        do_cr = bool(driz_cr)
+    if static is None and not is_ir:
+        static = False
+    out: dict[str, object] = {
+        'driz_cr': do_cr,
+        'driz_cr_corr': do_cr,
+    }
+    if static is not None:
+        out['static'] = bool(static)
+    return out
+
+
 def drizzle_filter_group(
     images: Sequence[PathLike],
     output_path: PathLike,
@@ -1374,6 +1709,8 @@ def drizzle_filter_group(
     build: bool = True,
     per_chip_sky: bool | None = None,
     output_wcs=None,
+    driz_cr: bool | None = None,
+    static: bool | None = None,
 ) -> Path:
     """
     Drizzle one instrument/filter group with AstroDrizzle.
@@ -1407,6 +1744,13 @@ def drizzle_filter_group(
         Shared mosaic-box sky grid. When set, AstroDrizzle is forced onto this
         footprint (same stamp as JWST boxed coadds) at the HST pixel scale
         encoded in the WCS/header.
+    driz_cr : bool or None, optional
+        Override AstroDrizzle ``driz_cr`` / ``driz_cr_corr``. ``None`` uses
+        :func:`optical_drizzle_masking_policy` (off for 1-2 frames, off for
+        10+ frames, on for UVIS/ACS/WFPC2 in between; always off for IR).
+    static : bool or None, optional
+        Override AstroDrizzle ``static``. ``None`` disables the static mask
+        for optical data (it flags galaxy structure as defects).
 
     Returns
     -------
@@ -1446,27 +1790,21 @@ def drizzle_filter_group(
 
         pixscale = float(scale or _default_final_scale(inst) or 0.05)
         if isinstance(output_wcs, fits.Header):
-            wcs_hdr = output_wcs
+            from st123.stages.mosaic.mosaic import strip_header_obsgeo
+
+            wcs_hdr = output_wcs.copy()
+            strip_header_obsgeo(wcs_hdr)
         elif isinstance(output_wcs, AstropyWCS):
-            wcs_hdr, _ = build_boxed_drizzle_wcs(output_wcs, pixscale)
+            from st123.stages.mosaic.mosaic import wcs_without_observatory
+
+            clean_wcs = wcs_without_observatory(output_wcs)
+            wcs_hdr, _ = build_boxed_drizzle_wcs(clean_wcs, pixscale)
         else:
             raise TypeError(
                 f'output_wcs must be WCS or Header, got {type(output_wcs)!r}'
             )
         forced_wcs_kwargs = astrodrizzle_wcs_kwargs_from_header(wcs_hdr)
         scale = float(forced_wcs_kwargs['final_scale'])
-
-    scratch_dir = out.parent / f'.drizzle_scratch_{output_stem.name}'
-    if scratch_dir.exists():
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-    staged = [
-        str(
-            _stage_drizzle_input(
-                p, scratch_dir, instrument=inst, filt=filt
-            )
-        )
-        for p in src_imgs
-    ]
 
     dd = dict(HSTDataModel.DRIZZLE_DEFAULTS)
     # Instrument-specific good-DQ bits (hst123 detector_defaults).
@@ -1488,6 +1826,31 @@ def drizzle_filter_group(
     elif inst == 'acs':
         is_uvis = True  # two-chip WFC; same pedestal/gap issue
     driz_bits = int(HSTDataModel.drizzle_bits(bits_key) or HSTDataModel.drizzle_bits(inst))
+    is_ir = bits_key == 'wfc3_ir'
+    policy = optical_drizzle_masking_policy(len(src_imgs), is_ir=is_ir)
+    driz_bits = optical_drizzle_bits(
+        len(src_imgs), base_bits=driz_bits, is_ir=is_ir
+    )
+    if driz_cr is None:
+        driz_cr = policy['driz_cr']
+    if static is None:
+        static = policy['static']
+
+    scratch_dir = out.parent / f'.drizzle_scratch_{output_stem.name}'
+    if scratch_dir.exists():
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+    staged = [
+        str(
+            _stage_drizzle_input(
+                p,
+                scratch_dir,
+                instrument=inst,
+                filt=filt,
+                run_cosmic_clean=bool(policy['run_cosmic']),
+            )
+        )
+        for p in src_imgs
+    ]
 
     do_per_chip = bool(is_uvis) if per_chip_sky is None else bool(per_chip_sky)
     if do_per_chip:
@@ -1516,10 +1879,14 @@ def drizzle_filter_group(
         sky_method = 'globalmin+match'
         do_skysub = True
 
-    is_ir = bits_key == 'wfc3_ir'
     # calwf3 already CR-flags IR (bit 512 in final_bits). AstroDrizzle driz_cr
     # false-rejects undersampled stars when one frame has a negative spike.
-    do_driz_cr = bool(WFC3IRDataModel.DRIZ_CR) if is_ir else True
+    cr_flags = astrodrizzle_cr_flags(
+        is_ir=is_ir,
+        driz_cr=driz_cr,
+        static=static,
+    )
+    do_driz_cr = bool(cr_flags['driz_cr'])
 
     kwargs: MutableMapping[str, object] = {
         'output': str(output_stem),
@@ -1535,7 +1902,7 @@ def drizzle_filter_group(
         'updatewcs': False,
         'driz_sep_pixfrac': float(dd.get('driz_sep_pixfrac', final_pixfrac)),
         'combine_maskpt': float(dd.get('combine_maskpt', 0.2)),
-        'combine_type': 'minmed' if len(staged) >= 4 else 'median',
+        'combine_type': str(policy['combine_type']),
         'combine_nsigma': str(dd.get('combine_nsigma', '4 3')),
         'driz_cr': do_driz_cr,
         'driz_cr_corr': do_driz_cr,
@@ -1550,6 +1917,8 @@ def drizzle_filter_group(
         # Avoid NumPy 2 uint16 overflow in drizzlepac resetbits path.
         'resetbits': 0,
     }
+    if 'static' in cr_flags:
+        kwargs['static'] = cr_flags['static']
     if is_ir:
         logger.info(
             'WFC3/IR drizzle: bits=%d driz_cr=%s (sci_floor=%.1f)',
@@ -1571,9 +1940,11 @@ def drizzle_filter_group(
         kwargs['final_scale'] = float(scale)
 
     # DrizzlePac builds outroot via ``'_'.join(output.split('_')[:-1]).lower()``.
-    # Absolute paths with underscores in the *basename* (e.g. coadd_wfc3_f336w)
-    # then lowercase parent dirs (HST -> hst) and break staticMask writes.
-    # Always chdir to the output dir and pass basename + relative inputs.
+    # For ``coadd_0_0_wfpc2_f336w_drz.fits`` that collapses to ``coadd_0_0_wfpc2``,
+    # so every WFPC2 (and likewise ACS/WFC3) filter in the same directory shares
+    # ``*_staticMask.fits`` names. Parallel filter drizzle then races: one job
+    # writes/cleans the mask, the next opens a truncated file as if it were
+    # science. Isolate each job in its own scratch cwd so masks stay private.
     #
     # Pass an explicit ``*.fits`` output name so WFPC2 does not create a
     # parallel ``*_drw.fits`` product (DrizzlePac only forces ``_drw`` when the
@@ -1586,23 +1957,30 @@ def drizzle_filter_group(
         desired = out if not out.name.endswith('_drw.fits') else (
             out.parent / out.name.replace('_drw.fits', '_drz.fits')
         )
-    input_rel = [os.path.relpath(p, out.parent) for p in staged]
+    input_rel = [Path(p).name for p in staged]
     kwargs['output'] = desired.name
     kwargs['runfile'] = f'{output_base}_astrodrizzle.log'
 
     logger.info(
-        'AstroDrizzle %d frame(s) -> %s (pixfrac=%.2f scale=%s cores=%d)',
+        'AstroDrizzle %d frame(s) -> %s (pixfrac=%.2f scale=%s cores=%d '
+        'bits=%d driz_cr=%s static=%s cosmic=%s combine=%s)',
         len(staged),
         desired.name,
         final_pixfrac,
         scale,
         kwargs['num_cores'],
+        driz_bits,
+        do_driz_cr,
+        cr_flags.get('static'),
+        policy['run_cosmic'],
+        policy['combine_type'],
     )
     cwd = Path.cwd()
     try:
-        os.chdir(out.parent)
+        os.chdir(scratch_dir)
         with _suppress_drizzlepac_dgeo_prompt(), capture_output():
             astrodrizzle.AstroDrizzle(input_rel, **kwargs)
+        _promote_drizzle_products(scratch_dir, out.parent)
     finally:
         os.chdir(cwd)
         shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -1795,9 +2173,12 @@ def unify_hst_astrometric_frame(
 
 
     from st123.stages.alignment.hst_jhat import (
+        FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC,
+        FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC,
         HST_ABS_OFFSET_MAX_ARCSEC,
         HST_L3_ALIGN_MAX_ARCSEC,
         measure_hst_sky_offset_2dhist,
+        measure_hst_sky_offset_smooth_peak,
         validate_hst_coadds_alignment,
         validate_hst_group_internal_alignment,
         HST_INTERNAL_ALIGN_MAX_ARCSEC,
@@ -1882,9 +2263,22 @@ def unify_hst_astrometric_frame(
                 iter_rows.append(row)
                 continue
 
-            off = measure_hst_sky_offset_2dhist(
-                coadd, abs_ref, max_offset_arcsec=search
+            peak = measure_hst_sky_offset_smooth_peak(
+                coadd,
+                abs_ref,
+                max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
             )
+            off = {'ok': False}
+            if (
+                peak.get('ok')
+                and float(peak.get('abs_arcsec') or 0.0)
+                > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
+            ):
+                off = peak
+            else:
+                off = measure_hst_sky_offset_2dhist(
+                    coadd, abs_ref, max_offset_arcsec=search
+                )
             row['measure'] = {
                 'ok': bool(off.get('ok')),
                 'abs_arcsec': off.get('abs_arcsec'),
@@ -1892,6 +2286,7 @@ def unify_hst_astrometric_frame(
                 'ddec_arcsec': off.get('ddec_arcsec'),
                 'peak_count': off.get('peak_count'),
                 'n_pairs': off.get('n_pairs'),
+                'method': off.get('method'),
             }
             if not off.get('ok'):
                 logger.warning(
@@ -2100,13 +2495,14 @@ def _drizzle_visit_coadds(
     box_id: int | str | None = None,
     output_wcs=None,
     all_visits: bool = False,
+    assume_aligned: bool = True,
 ) -> list[dict]:
     """
     Optionally drizzle per-visit sidecars (not the primary instrument+filter coadd).
 
     When *all_visits* is False (default), only *dropped_visits* are written.
     When True, every visit is written. Visits that fail within-visit internal QA
-    are skipped.
+    are skipped unless *assume_aligned* (``align`` already owns registration).
     """
     from collections import defaultdict
 
@@ -2125,7 +2521,7 @@ def _drizzle_visit_coadds(
     for vid, vpaths in sorted(by_v.items()):
         if not (want_all or vid in dropped_visits):
             continue
-        if len(vpaths) >= 2:
+        if (not assume_aligned) and len(vpaths) >= 2:
             vqa = validate_hst_group_internal_alignment(
                 vpaths,
                 max_coherent_arcsec=HST_INTERNAL_ALIGN_MAX_ARCSEC,
@@ -2201,6 +2597,45 @@ def _drizzle_visit_coadds(
     return products
 
 
+_HST_RAW_SCIENCE_SUFFIXES = ('_flc.fits', '_flt.fits', '_c0m.fits')
+
+
+def hst_science_rootname(path: PathLike) -> str:
+    """Rootname used to pair a JHAT product with its calibrated sibling."""
+    name = Path(path).name.lower()
+    for suffix in ('_jhat.fits', *_HST_RAW_SCIENCE_SUFFIXES, '_cal.fits'):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(path).stem.lower()
+
+
+def collect_unaligned_hst_raw_frames(jhat_dir: PathLike) -> list[Path]:
+    """Calibrated HST frames in ``reduction/raw`` that have no JHAT sibling.
+
+    Align can leave sparse WFPC2 chips without ``*_jhat.fits`` when JHAT finds
+    too few refcat matches. Mosaic still needs those frames so every requested
+    filter can be dribbled onto the shared stamp.
+    """
+    jhat = Path(jhat_dir)
+    raw_dir = jhat.parent / 'raw'
+    if not raw_dir.is_dir():
+        return []
+    have = {
+        hst_science_rootname(path)
+        for path in jhat.glob('*_jhat.fits')
+        if path.is_file()
+    }
+    found: list[Path] = []
+    for path in sorted(raw_dir.iterdir()):
+        name = path.name.lower()
+        if not name.endswith(_HST_RAW_SCIENCE_SUFFIXES):
+            continue
+        if hst_science_rootname(path) in have:
+            continue
+        found.append(path.resolve())
+    return found
+
+
 def _collect_hst_jhat_frames(
     jhat_dir: PathLike,
     *,
@@ -2213,16 +2648,130 @@ def _collect_hst_jhat_frames(
     frames = sorted(jhat.glob(pattern))
     if not frames:
         frames = sorted(
-            p for p in jhat.glob('*.fits') if not p.name.endswith(('.sky.fits',))
+            p
+            for p in jhat.glob('*.fits')
+            if HSTDataModel.matches_science_filename(p)
         )
     frames = [
         p
         for p in frames
-        if not p.name.lower().startswith('coadd_')
+        if HSTDataModel.matches_science_filename(p)
+        and not p.name.lower().startswith('coadd_')
         and not p.name.lower().startswith('jw')
         and 'l3_ref' not in p.parts
     ]
-    return filter_paths_for_stage(frames, stage='mosaic-collect')
+    extra = collect_unaligned_hst_raw_frames(jhat)
+    if extra:
+        logger.info(
+            'Including %d calibrated HST frame(s) with no JHAT product',
+            len(extra),
+        )
+        frames.extend(extra)
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for path in frames:
+        key = str(Path(path).resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(path)
+    frames = filter_paths_for_stage(uniq, stage='mosaic-collect')
+    kept, dropped = _drop_catastrophic_jhat_frames(
+        frames, context=str(jhat.name)
+    )
+    del dropped
+    return kept
+
+
+def _drop_catastrophic_jhat_frames(
+    paths: Sequence[Path],
+    *,
+    peer_n_calibrators: int | None = None,
+    context: str = '',
+) -> tuple[list[Path], list[dict]]:
+    """Exclude JHAT frames with a catastrophic alignment residual."""
+    from st123.stages.alignment.frame_qa import filter_catastrophic_jhat_frames
+
+    kept, dropped = filter_catastrophic_jhat_frames(
+        list(paths), peer_n_calibrators=peer_n_calibrators
+    )
+    rejected: list[dict] = []
+    if dropped:
+        names = ', '.join(p.name for p, _ in dropped)
+        logger.error(
+            'Dropping %d catastrophically misaligned JHAT frame(s)%s: %s',
+            len(dropped),
+            f' ({context})' if context else '',
+            names,
+        )
+        for path, qual in dropped:
+            disp = qual.get('residual_arcsec')
+            rejected.append(
+                {
+                    'path': str(path),
+                    'status': 'failed',
+                    'error': (
+                        'catastrophic alignment residual: '
+                        f'{1000.0 * float(disp):.1f} mas'
+                        if disp is not None
+                        else 'catastrophic alignment residual'
+                    ),
+                    'n_calibrators': qual.get('n_calibrators'),
+                    'residual_arcsec': disp,
+                }
+            )
+    return kept, rejected
+
+
+def _reject_catastrophic_l3_coadds(
+    results: list[dict],
+    qa_report: Mapping[str, Any] | None,
+    *,
+    abs_ref_name: str | None = None,
+) -> list[dict]:
+    """
+    Fail and sideline L3 coadds that share no sources with the astrometric hub.
+
+    Renames ``coadd_*.fits`` to ``*.rejected.fits`` so a later photometry
+    stage cannot pick up a catastrophically shifted stack.
+    """
+    from st123.stages.alignment.frame_qa import isolated_unmatched_coadds
+
+    if not qa_report:
+        return []
+    drop_names = set(
+        isolated_unmatched_coadds(qa_report, abs_ref_name=abs_ref_name)
+    )
+    if not drop_names:
+        return []
+    rejected: list[dict] = []
+    for rec in results:
+        if rec.get('status') != 'ok':
+            continue
+        out = Path(rec.get('output') or '')
+        if out.name not in drop_names:
+            continue
+        rec['status'] = 'failed'
+        rec['error'] = (
+            'catastrophic L3 alignment: no common sources vs aligned coadds'
+        )
+        logger.error(
+            'Rejecting mosaic product %s (%s/%s): %s',
+            out.name,
+            rec.get('instrument'),
+            rec.get('filter'),
+            rec['error'],
+        )
+        if out.is_file():
+            dest = out.with_name(out.name.replace('.fits', '.rejected.fits'))
+            try:
+                out.replace(dest)
+                rec['rejected_output'] = str(dest)
+                rec['output'] = str(dest)
+            except Exception as exc:
+                logger.warning('Could not sideline %s: %s', out.name, exc)
+        rejected.append(rec)
+    return rejected
 
 
 def _parallel_drizzle_budget(n_jobs: int, num_cores: int) -> tuple[int, int]:
@@ -2603,8 +3152,7 @@ def _filter_drizzle_worker(job: dict) -> dict:
         )
         logger.info('Wrote %s (%d frames)', product, len(drizzle_imgs))
 
-        harm = record.get('harmonize') or {}
-        if bool(job.get('visit_coadds')) and harm.get('method') == 'visit_split_harmonize':
+        if bool(job.get('visit_coadds')):
             imgs = [Path(p) for p in job.get('input_imgs') or drizzle_imgs]
             record['visit_coadds'] = _drizzle_visit_coadds(
                 imgs,
@@ -2620,6 +3168,7 @@ def _filter_drizzle_worker(job: dict) -> dict:
                 box_id=box_id,
                 output_wcs=job.get('output_wcs'),
                 all_visits=True,
+                assume_aligned=bool(record.get('assume_aligned', True)),
             )
     except Exception as exc:
         record['status'] = 'failed'
@@ -2661,7 +3210,13 @@ def _run_filter_drizzle_jobs(
     )
     ctx = mp.get_context('spawn')
     ordered: list[dict | None] = [None] * len(jobs)
-    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+    from st123.utils.logging import configure_worker_logging
+
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=ctx,
+        initializer=configure_worker_logging,
+    ) as pool:
         future_map = {
             pool.submit(_filter_drizzle_worker, job): i for i, job in enumerate(jobs)
         }
@@ -2737,9 +3292,68 @@ def _drizzle_box_groups(
                 exc,
             )
 
-    ready_jobs: list[dict] = []
+    from st123.stages.alignment.frame_qa import (
+        median_healthy_n_calibrators,
+        read_jhat_quality_headers,
+    )
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    peer_n = median_healthy_n_calibrators(
+        read_jhat_quality_headers(p).get('n_calibrators') for p in box_frames
+    )
+    filtered_ranked: list[tuple[tuple[str, str], list[Path]]] = []
     failed_prep: list[dict] = []
     for (inst, filt), imgs in ranked:
+        kept, rejected = _drop_catastrophic_jhat_frames(
+            [Path(p) for p in imgs],
+            peer_n_calibrators=peer_n,
+            context=f'{inst}/{filt} group {group_id} box {box_id}',
+        )
+        if not kept:
+            suffix = _drizzle_suffix(inst, list(imgs))
+            from st123.stages.mosaic.mosaic import mosaic_hst_coadd_basename
+
+            coadd_name = mosaic_hst_coadd_basename(
+                group_id, box_id, inst, filt, suffix=suffix
+            )
+            coadd_path = out / coadd_name
+            if coadd_path.is_file():
+                dest = coadd_path.with_name(
+                    coadd_path.name.replace('.fits', '.rejected.fits')
+                )
+                try:
+                    coadd_path.replace(dest)
+                    logger.error(
+                        'Sidelined stale mosaic product %s -> %s',
+                        coadd_path.name,
+                        dest.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        'Could not sideline stale %s: %s', coadd_path.name, exc
+                    )
+            failed_prep.append(
+                {
+                    'instrument': inst,
+                    'filter': filt,
+                    'group': group_id,
+                    'box': box_id,
+                    'frames': [str(p) for p in imgs],
+                    'output': str(coadd_path),
+                    'status': 'failed',
+                    'error': (
+                        rejected[0]['error']
+                        if rejected
+                        else 'catastrophic alignment residual'
+                    ),
+                    'dropped_catastrophic': [r['path'] for r in rejected],
+                }
+            )
+            continue
+        filtered_ranked.append(((inst, filt), kept))
+
+    ready_jobs: list[dict] = []
+    for (inst, filt), imgs in filtered_ranked:
         record = _prepare_filter_drizzle(
             inst,
             filt,
@@ -2762,7 +3376,7 @@ def _drizzle_box_groups(
                 'final_pixfrac': float(final_pixfrac),
                 'final_scale': final_scale,
                 'num_cores': int(num_cores),
-                'output_wcs': output_wcs,
+                'output_wcs': _pickle_safe_output_wcs(output_wcs),
                 'input_imgs': [str(Path(p).resolve()) for p in imgs],
                 'visit_coadds': bool(visit_coadds),
             }
@@ -2796,7 +3410,9 @@ def _drizzle_box_groups(
         )
         unify = None
         if assume_aligned:
-            # Align owns registration; mosaic only reports optional pairwise QA.
+            # Align owns registration. Still run L3 QA; if a coadd is off
+            # the shared frame (classic WFPC2 ~1" pipeline WCS that visit
+            # retie refused), unify rather than keeping the residual.
             from st123.stages.alignment.frame_qa import (
                 build_frame_qa,
                 read_frame_qa,
@@ -2809,63 +3425,89 @@ def _drizzle_box_groups(
             final_qa = validate_hst_coadds_alignment(
                 coadd_paths, max_coherent_arcsec=HST_L3_ALIGN_MAX_ARCSEC
             )
-            unify = {
-                'ok': bool(final_qa.get('ok')),
-                'abs_ref': None,
-                'iterations': 0,
-                'final_qa': final_qa,
-                'qa_path': None,
-                'skipped_shift': True,
-                'reason': 'assume_aligned',
-            }
-            try:
-                import json
+            if final_qa.get('ok'):
+                unify = {
+                    'ok': True,
+                    'abs_ref': None,
+                    'iterations': 0,
+                    'final_qa': final_qa,
+                    'qa_path': None,
+                    'skipped_shift': True,
+                    'reason': 'assume_aligned',
+                }
+                try:
+                    import json
 
-                qa_path = out / 'astrometric_frame_qa.json'
-                qa_path.write_text(
-                    json.dumps(unify, indent=2, default=str) + '\n'
-                )
-                unify['qa_path'] = str(qa_path)
-                # Prefer align-produced frame_qa from JHAT dir; else synthesize.
-                jhat_qa = None
-                for parent in (out.parent.parent / 'jhat_hst', out.parent / 'jhat_hst'):
-                    jhat_qa = read_frame_qa(parent)
-                    if jhat_qa:
-                        break
-                max_mas = float(final_qa.get('max_abs_arcsec') or 0.0) * 1000.0
-                mosaic_qa = build_frame_qa(
-                    mission='hst',
-                    align_mode='MOSAIC_QA',
-                    residual_mas=(
-                        (jhat_qa.get('abs') or {}).get('residual_mas')
-                        if jhat_qa
-                        else None
-                    ),
-                    n_calibrators=(
-                        (jhat_qa.get('abs') or {}).get('n_calibrators')
-                        if jhat_qa
-                        else None
-                    ),
-                    abs_method='align_frame_qa' if jhat_qa else None,
-                    max_delta_mas=max_mas,
-                    pairs=final_qa.get('pairs') or [],
-                    frames=(jhat_qa.get('frames') if jhat_qa else None),
-                    extra={'mosaic_coadd_qa': final_qa, 'assume_aligned': True},
-                )
-                write_frame_qa(out, mosaic_qa)
-                warn_if_frame_qa_soft(
-                    mosaic_qa,
-                    log=logger,
-                    context=f'group {group_id} box {box_id}',
-                )
-                logger.info(
-                    'Wrote alignment QA (no mosaic shifts) %s '
-                    '(max |Delta|=%.3f")',
-                    qa_path,
+                    qa_path = out / 'astrometric_frame_qa.json'
+                    qa_path.write_text(
+                        json.dumps(unify, indent=2, default=str) + '\n'
+                    )
+                    unify['qa_path'] = str(qa_path)
+                    jhat_qa = None
+                    for parent in (
+                        out.parent.parent / 'jhat_hst',
+                        out.parent / 'jhat_hst',
+                    ):
+                        jhat_qa = read_frame_qa(parent)
+                        if jhat_qa:
+                            break
+                    max_mas = float(final_qa.get('max_abs_arcsec') or 0.0) * 1000.0
+                    mosaic_qa = build_frame_qa(
+                        mission='hst',
+                        align_mode='MOSAIC_QA',
+                        residual_mas=(
+                            (jhat_qa.get('abs') or {}).get('residual_mas')
+                            if jhat_qa
+                            else None
+                        ),
+                        n_calibrators=(
+                            (jhat_qa.get('abs') or {}).get('n_calibrators')
+                            if jhat_qa
+                            else None
+                        ),
+                        abs_method='align_frame_qa' if jhat_qa else None,
+                        max_delta_mas=max_mas,
+                        pairs=final_qa.get('pairs') or [],
+                        frames=(jhat_qa.get('frames') if jhat_qa else None),
+                        extra={
+                            'mosaic_coadd_qa': final_qa,
+                            'assume_aligned': True,
+                        },
+                    )
+                    write_frame_qa(out, mosaic_qa)
+                    warn_if_frame_qa_soft(
+                        mosaic_qa,
+                        log=logger,
+                        context=f'group {group_id} box {box_id}',
+                    )
+                    logger.info(
+                        'Wrote alignment QA (no mosaic shifts) %s '
+                        '(max |Delta|=%.3f")',
+                        qa_path,
+                        float(final_qa.get('max_abs_arcsec') or 0.0),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        'Could not write astrometric_frame_qa.json: %s', exc
+                    )
+            else:
+                logger.warning(
+                    'L3 QA failed under assume_aligned (max |Delta|=%.3f"); '
+                    'running astrometric unify',
                     float(final_qa.get('max_abs_arcsec') or 0.0),
                 )
-            except Exception as exc:
-                logger.warning('Could not write astrometric_frame_qa.json: %s', exc)
+                unify = unify_hst_astrometric_frame(
+                    ok,
+                    outdir=out,
+                    max_residual_arcsec=HST_L3_ALIGN_MAX_ARCSEC,
+                    num_cores=num_cores,
+                    final_pixfrac=final_pixfrac,
+                    final_scale=final_scale,
+                    remosaic=True,
+                    preferred_abs_ref=preferred_abs_ref,
+                    output_wcs=output_wcs,
+                )
+                unify['reason'] = 'assume_aligned_qa_failed'
         else:
             unify = unify_hst_astrometric_frame(
                 ok,
@@ -2888,6 +3530,40 @@ def _drizzle_box_groups(
                 'assume_aligned': bool(assume_aligned),
             }
             r['l3_qa'] = unify.get('final_qa')
+
+        dropped_l3 = _reject_catastrophic_l3_coadds(
+            results,
+            unify.get('final_qa') if unify else None,
+            abs_ref_name=(
+                Path(unify['abs_ref']).name
+                if unify and unify.get('abs_ref')
+                else None
+            ),
+        )
+        if dropped_l3 and unify is not None:
+            remaining_ok = [
+                r
+                for r in results
+                if r.get('status') == 'ok' and Path(r.get('output') or '').is_file()
+            ]
+            remaining_paths = [Path(r['output']) for r in remaining_ok]
+            if len(remaining_paths) >= 2:
+                re_qa = validate_hst_coadds_alignment(
+                    remaining_paths, max_coherent_arcsec=HST_L3_ALIGN_MAX_ARCSEC
+                )
+                unify['final_qa'] = re_qa
+                unify['ok'] = bool(re_qa.get('ok'))
+            elif remaining_ok:
+                unify['ok'] = True
+            unify['dropped_catastrophic'] = [
+                r.get('rejected_output') or r.get('output') for r in dropped_l3
+            ]
+            for r in results:
+                r['l3_qa'] = unify.get('final_qa')
+                ast = r.get('astrometric_unify') or {}
+                ast['ok'] = bool(unify.get('ok'))
+                r['astrometric_unify'] = ast
+            ok = [r for r in results if r.get('status') == 'ok']
 
         if not unify.get('ok'):
             max_abs = (unify.get('final_qa') or {}).get('max_abs_arcsec')
@@ -3009,16 +3685,20 @@ def drizzle_project_boxed(
     """
     Drizzle HST frames into an existing :class:`~st123.stages.mosaic.mosaic.MosaicPlan`.
 
-    Each plan box receives one ``coadd_{G}_{B}_{inst}_{filt}_drc.fits`` product
+    Each plan box receives one ``coadd_{G}_{B}_{inst}_{filt}_{drc|drz}.fits``
+    product (name from :meth:`InstrumentDataModel.l3_coadd_basename`).
     combining all visits in that instrument+filter pair (default). Optional
-    *visit_coadds* writes visit-tagged sidecars; *drop_outlier_visits* excludes
+    *visit_coadds* writes one sidecar per HST visit/epoch even when
+    *assume_aligned* (``--existing-box`` remosaics); *drop_outlier_visits* excludes
     cross-visit outliers from the primary stack. *require_coverage_ra/dec*
     keeps only frames whose footprint contains that sky point. *filters*
     restricts to named bands (e.g. ``F160W`` only).
 
-    By default (*assume_aligned*=True) mosaic does **not** re-harmonize JHAT
-    WCS or remosaic after L3 unify -- ``align`` owns registration. Residuals
-    are reported in ``astrometric_frame_qa.json`` without failing coadds.
+    By default (*assume_aligned*=True) mosaic does not re-harmonize JHAT WCS
+    before drizzle -- ``align`` owns registration. After coadds are written,
+    L3 pairwise QA still runs; if a coadd is off the shared frame, mosaic
+    runs :func:`unify_hst_astrometric_frame` (shift L2 + remosaic) instead of
+    keeping the residual.
 
     When *parallel_boxes* is True and mosaic boxes have disjoint HST frame sets,
     boxes are drizzleed concurrently (``spawn`` process pool). Shared-frame boxes
@@ -3142,7 +3822,7 @@ def drizzle_project_boxed(
                 'num_cores': int(num_cores),
                 'all_box_frames': [str(Path(p).resolve()) for p in hst_paths],
                 'preferred_abs_ref': [str(Path(p).resolve()) for p in preferred],
-                'output_wcs': box_wcs,
+                'output_wcs': _pickle_safe_output_wcs(box_wcs),
                 'parallel_filters': True,
                 'drop_outlier_visits': bool(drop_outlier_visits),
                 'visit_coadds': bool(visit_coadds),
@@ -3183,7 +3863,13 @@ def drizzle_project_boxed(
 
         ctx = mp.get_context('spawn')
         ordered: list[dict | None] = [None] * len(box_jobs)
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+        from st123.utils.logging import configure_worker_logging
+
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=ctx,
+            initializer=configure_worker_logging,
+        ) as pool:
             future_map = {
                 pool.submit(_drizzle_box_worker, job): i
                 for i, job in enumerate(box_jobs)

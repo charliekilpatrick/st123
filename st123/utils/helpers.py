@@ -119,8 +119,11 @@ def get_filter(image) -> str:
     Returns
     -------
     str
-        Lowercase filter name (``FILTNAM1``, ``FILTER``, or ``FILTER1``/``FILTER2``;
-        ``PHOTMODE`` as a last resort for stripped JHAT products).
+        Lowercase science bandpass. NIRCam dual-filter visits use the
+        pupil-wheel filter (``F405N``, ``F164N``, ...) rather than the
+        blocking ``FILTER`` keyword (``F444W``, ``F150W2``). Otherwise
+        ``FILTNAM1`` / ``FILTER`` / ``FILTER1``+``FILTER2``, with
+        ``PHOTMODE`` as a last resort for stripped JHAT products.
     """
     from st123.datamodels.instrument import as_datamodel
 

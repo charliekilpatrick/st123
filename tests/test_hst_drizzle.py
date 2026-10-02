@@ -13,14 +13,18 @@ from st123.stages.mosaic.hst_drizzle import (
     _finalize_drizzle_product,
     _header_exptime,
     _repair_zero_exptime,
+    astrodrizzle_cr_flags,
     fill_drizzle_uncovered_with_sky,
     group_hst_frames,
     mask_wfc3_ir_bad_pixels,
     mask_wfpc2_overscan,
+    optical_drizzle_bits,
+    optical_drizzle_masking_policy,
 )
 from st123.scripts import dolphot as dolphot_script
 from st123.scripts import mosaic as mosaic_script
 from st123.utils import helpers
+from st123.datamodels.hst.hst import HSTDataModel
 from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
 from st123.datamodels.hst.wfpc2 import WFPC2DataModel
 
@@ -92,6 +96,40 @@ def test_group_hst_frames_photmode_fallback(tmp_path: Path):
     assert helpers.get_filter(path) == 'f336w'
     groups = group_hst_frames([path])
     assert list(groups) == [('wfc3', 'f336w')]
+
+
+def test_group_hst_frames_skips_static_mask(tmp_path: Path):
+    """AstroDrizzle staticMask files are calibration, not science inputs."""
+    from st123.datamodels.hst.hst import HSTDataModel
+
+    sci = _write_hst_frame(
+        tmp_path / 'u3lx0101r_jhat.fits',
+        instrument='WFPC2',
+        filtnam1='F336W',
+    )
+    mask = tmp_path / 'coadd_0_0_wfpc2_800x800_1_staticMask.fits'
+    mask.write_bytes(b'not a FITS file')
+    assert not HSTDataModel.matches_science_filename(mask)
+    assert HSTDataModel.matches_science_filename(sci)
+    groups = group_hst_frames([sci, mask])
+    assert list(groups) == [('wfpc2', 'f336w')]
+    assert groups[('wfpc2', 'f336w')] == [sci.resolve()]
+
+
+def test_promote_drizzle_products_leaves_static_mask(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import _promote_drizzle_products
+
+    scratch = tmp_path / 'scratch'
+    dest = tmp_path / 'box'
+    scratch.mkdir()
+    (scratch / 'coadd_0_0_wfpc2_f336w_drz.fits').write_bytes(b'SCI')
+    (scratch / 'coadd_0_0_wfpc2_800x800_1_staticMask.fits').write_bytes(b'MASK')
+    (scratch / 'coadd_0_0_wfpc2_f336w_astrodrizzle.log').write_text('log')
+    _promote_drizzle_products(scratch, dest)
+    assert (dest / 'coadd_0_0_wfpc2_f336w_drz.fits').is_file()
+    assert (dest / 'coadd_0_0_wfpc2_f336w_astrodrizzle.log').is_file()
+    assert not (dest / 'coadd_0_0_wfpc2_800x800_1_staticMask.fits').exists()
+    assert (scratch / 'coadd_0_0_wfpc2_800x800_1_staticMask.fits').is_file()
 
 
 def test_get_filter_prefers_filtnam1_over_numeric_filter1(tmp_path: Path):
@@ -175,6 +213,15 @@ def test_mask_wfpc2_overscan_flags_edges_and_floor(tmp_path: Path):
 def test_wfc3_ir_driz_cr_disabled_and_floor_bit_excluded():
     assert WFC3IRDataModel.DRIZ_CR is False
     assert (WFC3IRDataModel.BAD_DQ_BIT & WFC3IRDataModel.DRIZ_BITS) == 0
+    ir = astrodrizzle_cr_flags(is_ir=True)
+    assert ir['driz_cr'] is False
+    assert ir['driz_cr_corr'] is False
+    assert 'static' not in ir
+    uvis = astrodrizzle_cr_flags(is_ir=False)
+    assert uvis['driz_cr'] is True
+    assert uvis.get('static') is False
+    sparse = astrodrizzle_cr_flags(is_ir=False, driz_cr=False, static=False)
+    assert sparse == {'driz_cr': False, 'driz_cr_corr': False, 'static': False}
 
 
 def test_mask_wfc3_ir_bad_pixels_floor_and_grow(tmp_path: Path):
@@ -333,6 +380,9 @@ def test_fill_drizzle_uncovered_with_sky_ctx_and_nan(tmp_path: Path):
         # Illuminated core unchanged (aside from the bright pixel).
         assert float(data[16, 16]) == 2.5
         assert hdul[0].header.get('ST123CTX') is True
+        dq = np.asarray(hdul['DQ'].data)
+        assert int(dq[2, 2]) & HSTDataModel.L3_DQ_NO_DATA
+        assert int(dq[16, 16]) == 0
 
 
 def test_fill_drizzle_drops_wfpc2_edge_single_bit_ctx(tmp_path: Path):
@@ -369,11 +419,16 @@ def test_fill_drizzle_drops_wfpc2_edge_single_bit_ctx(tmp_path: Path):
     assert summary['drop_single_ctx_edge_pix'] == 16
     assert summary['n_single_ctx'] > 0
     with fits.open(path) as hdul:
-        # Edge single-bit overhang cleared.
-        assert np.allclose(hdul['SCI'].data[:, 2:8], summary['sky'])
+        # Edge single-bit overhang: keep SCI, drop WHT, flag DQ.
+        assert np.allclose(hdul['SCI'].data[:, 2:8], 9.0)
         assert np.all(hdul['WHT'].data[:, 2:8] == 0)
-        assert np.all(hdul['CTX'].data[:, 2:8] == 0)
-        # Interior single-bit island retained.
+        assert np.all(hdul['CTX'].data[:, 2:8] == 1)
+        dq = np.asarray(hdul['DQ'].data)
+        assert np.all(dq[:, 2:8] & HSTDataModel.L3_DQ_UNRELIABLE)
+        # True uncovered rim is sky + no-data DQ.
+        assert np.allclose(hdul['SCI'].data[:, 0:2], summary['sky'])
+        assert np.all(dq[:, 0:2] & HSTDataModel.L3_DQ_NO_DATA)
+        # Interior single-bit island retained as good.
         assert float(hdul['SCI'].data[24, 34]) == 4.0
         assert int(hdul['CTX'].data[24, 34]) == 1
         assert float(hdul['SCI'].data[16, 16]) == 2.5
@@ -404,6 +459,137 @@ def test_fill_drizzle_drops_wfpc2_edge_single_bit_ctx(tmp_path: Path):
     with fits.open(path2) as hdul:
         assert float(hdul['SCI'].data[16, 4]) == 9.0
         assert int(hdul['CTX'].data[16, 4]) == 1
+
+
+def test_optical_drizzle_masking_policy_thin_and_crowded():
+    thin = optical_drizzle_masking_policy(1, is_ir=False)
+    assert thin['run_cosmic'] is False
+    assert thin['driz_cr'] is False
+    assert thin['static'] is False
+    assert thin['combine_type'] == 'median'
+    two = optical_drizzle_masking_policy(2, is_ir=False)
+    assert two['driz_cr'] is False
+    mid = optical_drizzle_masking_policy(4, is_ir=False)
+    assert mid['run_cosmic'] is True
+    assert mid['driz_cr'] is True
+    assert mid['combine_type'] == 'minmed'
+    deep = optical_drizzle_masking_policy(22, is_ir=False)
+    assert deep['run_cosmic'] is False
+    assert deep['driz_cr'] is False
+    assert deep['combine_type'] == 'median'
+    ir = optical_drizzle_masking_policy(6, is_ir=True)
+    assert ir['run_cosmic'] is False
+    assert ir['driz_cr'] is False
+
+
+def test_optical_drizzle_bits_drops_hot_for_optical_stacks():
+    thin = optical_drizzle_bits(2, base_bits=112, is_ir=False)
+    thick = optical_drizzle_bits(4, base_bits=112, is_ir=False)
+    ir = optical_drizzle_bits(4, base_bits=576, is_ir=True)
+    assert thin == 96
+    assert thick == 96
+    assert thin & HSTDataModel.HOT_DQ_BIT == 0
+    assert ir == 576
+
+
+def test_fill_drizzle_keeps_wfpc2_single_coverage_footprint(tmp_path: Path):
+    """1-frame WFPC2 (no multi-bit CTX) must not carve chip-gap edges."""
+    ny = nx = 48
+    sci = np.full((ny, nx), 2.5, dtype=np.float32)
+    wht = np.full((ny, nx), 100.0, dtype=np.float32)
+    ctx = np.full((ny, nx), 1, dtype=np.int32)
+    ctx[:, 0:2] = 0
+    wht[:, 0:2] = 0.0
+    sci[:, 0:2] = np.nan
+    # Near-gap single coverage that DROP_SINGLE would have wiped.
+    sci[:, 2:8] = 9.0
+    path = tmp_path / 'coadd_wfpc2_f606w_drz.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFPC2'
+    fits.HDUList(
+        [
+            primary,
+            fits.ImageHDU(sci, name='SCI'),
+            fits.ImageHDU(wht, name='WHT'),
+            fits.ImageHDU(ctx, name='CTX'),
+        ]
+    ).writeto(path)
+
+    summary = fill_drizzle_uncovered_with_sky(path)
+    assert summary['drop_single_ctx_edge_pix'] == 0
+    assert summary['n_single_ctx'] == 0
+    with fits.open(path) as hdul:
+        assert float(hdul['SCI'].data[16, 4]) == 9.0
+        assert int(hdul['CTX'].data[16, 4]) == 1
+        assert float(hdul['WHT'].data[16, 4]) == 100.0
+        # True uncovered rim still filled.
+        assert float(hdul['WHT'].data[16, 0]) == 0.0
+
+
+def test_fill_drizzle_inpaints_small_holes_and_flags_dq(tmp_path: Path):
+    """Interior speckle holes are interpolated in SCI and flagged in DQ."""
+    ny = nx = 64
+    sci = np.full((ny, nx), 5.0, dtype=np.float32)
+    sci[20:24, 20:24] = np.nan
+    wht = np.full((ny, nx), 50.0, dtype=np.float32)
+    wht[20:24, 20:24] = 0.0
+    ctx = np.full((ny, nx), 3, dtype=np.int32)
+    ctx[20:24, 20:24] = 0
+    path = tmp_path / 'coadd_wfpc2_f300w_drz.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFPC2'
+    fits.HDUList(
+        [
+            primary,
+            fits.ImageHDU(sci, name='SCI'),
+            fits.ImageHDU(wht, name='WHT'),
+            fits.ImageHDU(ctx, name='CTX'),
+        ]
+    ).writeto(path)
+
+    summary = fill_drizzle_uncovered_with_sky(path, drop_single_ctx_edge_pix=0)
+    assert summary['n_inpaint'] == 16
+    with fits.open(path) as hdul:
+        hole = np.asarray(hdul['SCI'].data)[20:24, 20:24]
+        assert np.isfinite(hole).all()
+        assert np.allclose(hole, 5.0, atol=1e-5)
+        assert np.all(hdul['WHT'].data[20:24, 20:24] == 0)
+        dq = np.asarray(hdul['DQ'].data)
+        assert np.all(dq[20:24, 20:24] & HSTDataModel.L3_DQ_INPAINT)
+        assert int(dq[40, 40]) == 0
+        assert hdul[0].header.get('ST123DQ') is True
+
+
+def test_fill_drizzle_clips_isolated_hot_pixels(tmp_path: Path):
+    """Drizzled-in ACS hot pixels (CTX>0) are inpainted; stars are kept."""
+    ny = nx = 64
+    rng = np.random.default_rng(0)
+    sci = np.full((ny, nx), 5.0, dtype=np.float32)
+    sci += rng.normal(0.0, 0.05, (ny, nx)).astype(np.float32)
+    sci[40, 40] = 80.0
+    sci[12:18, 12:18] = 20.0  # extended source, must survive
+    wht = np.full((ny, nx), 50.0, dtype=np.float32)
+    ctx = np.full((ny, nx), 5, dtype=np.int32)
+    path = tmp_path / 'coadd_acs_f555w_drc.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'ACS'
+    fits.HDUList(
+        [
+            primary,
+            fits.ImageHDU(sci, name='SCI'),
+            fits.ImageHDU(wht, name='WHT'),
+            fits.ImageHDU(ctx, name='CTX'),
+        ]
+    ).writeto(path)
+
+    summary = fill_drizzle_uncovered_with_sky(path, drop_single_ctx_edge_pix=0)
+    assert summary['n_hot'] >= 1
+    with fits.open(path) as hdul:
+        assert float(hdul['SCI'].data[40, 40]) < 20.0
+        assert float(hdul['WHT'].data[40, 40]) == 0.0
+        assert int(hdul['DQ'].data[40, 40]) & HSTDataModel.L3_DQ_INPAINT
+        assert float(hdul['SCI'].data[15, 15]) > 15.0
+        assert hdul[0].header.get('ST123HOT') == summary['n_hot']
 
 
 def test_repair_zero_exptime_from_expstart_expend(tmp_path: Path):
@@ -521,3 +707,61 @@ def test_filter_frames_overlapping_box_drops_nonoverlap(tmp_path: Path):
     )
     assert str(inside) in kept
     assert str(outside) not in kept
+
+
+def test_drop_catastrophic_jhat_frames(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import _drop_catastrophic_jhat_frames
+
+    good = tmp_path / 'good_jhat.fits'
+    bad = tmp_path / 'bad_jhat.fits'
+    for p, disp, ncal in ((good, 0.012, 460), (bad, 0.316, 16)):
+        hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32))
+        hdu.header['JWDISPD'] = disp
+        hdu.header['JWNCAL'] = ncal
+        hdu.writeto(p)
+    kept, rejected = _drop_catastrophic_jhat_frames([good, bad])
+    assert kept == [good.resolve()]
+    assert len(rejected) == 1
+    assert 'catastrophic' in rejected[0]['error']
+
+
+def test_reject_catastrophic_l3_coadds(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import _reject_catastrophic_l3_coadds
+
+    good = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    bad = tmp_path / 'coadd_0_0_acs_f606w_drc.fits'
+    good.write_bytes(b'good')
+    bad.write_bytes(b'bad')
+    results = [
+        {
+            'status': 'ok',
+            'instrument': 'acs',
+            'filter': 'f814w',
+            'output': str(good),
+        },
+        {
+            'status': 'ok',
+            'instrument': 'acs',
+            'filter': 'f606w',
+            'output': str(bad),
+        },
+    ]
+    qa = {
+        'ok': False,
+        'pairs': [
+            {
+                'a': good.name,
+                'b': bad.name,
+                'ok': False,
+                'n_match': 0,
+            }
+        ],
+    }
+    dropped = _reject_catastrophic_l3_coadds(
+        results, qa, abs_ref_name=good.name
+    )
+    assert len(dropped) == 1
+    assert results[1]['status'] == 'failed'
+    assert results[0]['status'] == 'ok'
+    assert not bad.is_file()
+    assert Path(str(bad).replace('.fits', '.rejected.fits')).is_file()

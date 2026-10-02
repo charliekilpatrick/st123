@@ -116,11 +116,13 @@ def test_mosaic_resolve_instruments_all():
     ) == [
         'f150w',
         'f150w2',
+        'f164n',
         'f187n',
         'f200w',
         'f300m',
         'f335m',
         'f360m',
+        'f405n',
         'f430m',
         'f444w',
         'f770w',

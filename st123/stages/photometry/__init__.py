@@ -35,10 +35,17 @@ _APERTURE_EXPORTS = frozenset(
 )
 _CATALOG_EXPORTS = frozenset(
     {
+        'apply_neighbor_limits',
         'create_common_catalog',
+        'combine_visit_photometry',
         'get_filters',
+        'inverse_variance_abmag',
         'map_columns',
+        'parse_per_image_phot_columns',
         'save_photfiles',
+        'source_image_photometry',
+        'source_lightcurve',
+        'three_sigma_limit_abmag',
     }
 )
 _DOLPHOT_EXPORTS = frozenset(

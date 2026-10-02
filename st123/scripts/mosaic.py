@@ -80,7 +80,8 @@ def create_parser():
         help=(
             'Skip overlap box-splitting (ref_0, ref_1, ...). For each group, '
             'mosaic every JHAT frame of each filter into one coadd under '
-            'reference/group_<G>/ref_full/ (JWST: coadd_<G>_full_<filter>_i2d.fits; '
+            'reference/group_<G>/ref_full/ (JWST: '
+            'coadd_<G>_full_<nircam|miri>_<filter>_i2d.fits; '
             'HST: coadd_<G>_full_<inst>_<filter>_drc.fits).'
         ),
     )
@@ -184,9 +185,11 @@ def create_parser():
         '--visit-coadds',
         action='store_true',
         help=(
-            'HST only: also write visit-tagged sidecars '
-            '(coadd_*_<visit>_drc/drz.fits). Default is one combined coadd '
-            'per instrument+filter (all visits stacked), like NIRCam.'
+            'HST only: also write one coadd per visit/epoch '
+            '(coadd_*_<visit>_drc/drz.fits) on the shared stamp. Use this to '
+            'keep a later SN visit separate from pre-explosion frames of the '
+            'same filter (e.g. --existing-box remosaics). Default is still one '
+            'combined coadd per instrument+filter (all visits stacked).'
         ),
     )
     parser.add_argument(
@@ -233,13 +236,12 @@ def _resolve_coverage_sky(
 
     1. Explicit ``--require-coverage-ra/dec``
     2. ``--center-ra/dec`` (implied for custom stamps)
-    3. Stamp center when ``--existing-box`` remosaics a shared FoV
-    4. Opt-in ``--require-coverage`` for auto-split boxes (uses
-       ``--contains-ra/dec`` or the stamp center)
+    3. Opt-in ``--require-coverage`` (uses ``--contains-ra/dec`` or the
+       stamp center, including ``--existing-box`` remosaics)
 
-    Custom ``--center-ra/dec`` stamps and ``--existing-box`` remosaics always
-    filter frames to the stamp FoV (and its center); ``--require-coverage`` is
-    only needed for auto-planned ``ref_*`` boxes.
+    Custom ``--center-ra/dec`` stamps filter frames to that point.
+    ``--existing-box`` remosaics keep every frame that overlaps the stamp;
+    pass ``--require-coverage`` to also demand the stamp center.
     """
     ra = getattr(args, 'require_coverage_ra', None)
     dec = getattr(args, 'require_coverage_dec', None)
@@ -265,12 +267,11 @@ def _resolve_coverage_sky(
             return stamp_sky_center(target.wcs)
         return None, None
 
-    # --existing-box: match the on-disk stamp FoV; require its center.
-    if getattr(args, 'existing_box', None):
-        return _stamp_center()
-
     if not bool(getattr(args, 'require_coverage', False)):
         return None, None
+
+    if getattr(args, 'existing_box', None):
+        return _stamp_center()
 
     cra = getattr(args, 'contains_ra', None)
     cdec = getattr(args, 'contains_dec', None)
@@ -461,6 +462,15 @@ def _collect_mission_jhat(
             if not os.path.basename(p).lower().startswith('jw')
             and not os.path.basename(p).lower().startswith('coadd_')
         ]
+        from st123.stages.mosaic.hst_drizzle import collect_unaligned_hst_raw_frames
+
+        extra = collect_unaligned_hst_raw_frames(jhat_dir)
+        if extra:
+            logger.info(
+                'Including %d calibrated HST frame(s) with no JHAT product',
+                len(extra),
+            )
+            paths.extend(str(path) for path in extra)
     return [str(Path(p).resolve()) for p in paths]
 
 
@@ -651,7 +661,9 @@ def _run_default_sw_coadd(
 
     coadd_filename = os.path.join(
         box_outdir,
-        mosaic_coadd_basename(group_id, box_index, target_filter),
+        mosaic_coadd_basename(
+            group_id, box_index, target_filter, instrument='nircam'
+        ),
     )
     coadd(mosaics, target_filter, coadd_filename)
     apply_wcs_to_coadd(coadd_filename)
@@ -1069,8 +1081,8 @@ def run_orchestrated_mosaic(
         except FileNotFoundError as exc:
             logger.error('%s', exc)
             return 2
-        # Stamp FoV + center coverage are always applied inside plan_existing_box.
-        # Optional --require-coverage-ra/dec overrides the stamp center.
+        # Stamp FoV overlap is always applied inside plan_existing_box.
+        # Stamp-center coverage is opt-in via --require-coverage.
         try:
             cov_ra, cov_dec = _resolve_coverage_sky(args)
         except ValueError as exc:

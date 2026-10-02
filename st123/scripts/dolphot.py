@@ -121,8 +121,8 @@ def create_parser():
         type=str,
         default=None,
         help=(
-            'In mosaic mode, prefer coadd_*_<filter>_*.fits (JWST i2d or '
-            'HST drc/drz) as the reference. Default: F560W for MIRI; for '
+            'In mosaic mode, prefer coadd_*_{nircam|miri|acs|wfc3}_<filter>_*.fits '
+            '(JWST i2d or HST drc/drz) as the reference. Default: F560W for MIRI; for '
             'NIRCam, auto-prefer SW i2d (F150W2, F200W, F150W, ...).'
         ),
     )

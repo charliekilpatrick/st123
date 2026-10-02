@@ -77,14 +77,13 @@ def default_ee_fraction(instrument: str | None) -> float:
 
 
 def _header_instrument_filter(image: str) -> tuple[str, str]:
-    """Return ``(INSTRUME, FILTER)`` from a FITS primary/SCI header."""
-    with as_datamodel(image).open() as hdul:
-        hdr = hdul[0].header
-        sci = hdul['SCI'].header if 'SCI' in hdul else hdr
-    instrument = str(
-        hdr.get('INSTRUME') or sci.get('INSTRUME') or 'NIRCAM'
-    ).upper()
-    filt = str(hdr.get('FILTER') or sci.get('FILTER') or 'UNKNOWN').upper()
+    """Return ``(INSTRUME, FILTER)`` using the science bandpass."""
+    model = as_datamodel(image)
+    instrument = str(model.instrument_name or 'NIRCAM').upper()
+    try:
+        filt = str(model.filter_name or 'UNKNOWN').upper()
+    except KeyError:
+        filt = 'UNKNOWN'
     return instrument, filt
 
 

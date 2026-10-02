@@ -33,6 +33,8 @@ def test_science_fits_paths_excludes_sky(tmp_path: Path):
     (tmp_path / 'a_jhat.fits').write_text('')
     (tmp_path / 'a_jhat.sky.fits').write_text('')
     (tmp_path / 'b_jhat.fits').write_text('')
+    (tmp_path / 'phot_0_sn.phot.57.res.fits').write_text('')
+    (tmp_path / 'phot_0_sn.phot.57.psf.fits').write_text('')
     paths = science_fits_paths(tmp_path)
     names = sorted(Path(p).name for p in paths)
     assert names == ['a_jhat.fits', 'b_jhat.fits']
@@ -313,6 +315,38 @@ def test_flatten_dolphot_fits_coadd_like(tmp_path: Path):
         assert hdul[0].header['INSTRUME'] == 'WFC3'
         assert hdul[0].header['EXPTIME'] == 360.0
     assert flatten_dolphot_fits(path) is False
+
+
+def test_flatten_dolphot_fits_wfc3mask_missing_pcount(tmp_path: Path):
+    """wfc3mask can leave SCI without PCOUNT; flatten must still rewrite img0."""
+    from astropy.io import fits
+    import numpy as np
+
+    from st123.stages.photometry.dolphot import flatten_dolphot_fits
+
+    path = tmp_path / 'coadd_wfc3_f555w_drc.fits'
+    primary = fits.PrimaryHDU(header=fits.Header({'INSTRUME': 'WFC3'}))
+    sci_hdr = fits.Header()
+    sci_hdr['XTENSION'] = 'IMAGE'
+    sci_hdr['BITPIX'] = -32
+    sci_hdr['NAXIS'] = 2
+    sci_hdr['NAXIS1'] = 8
+    sci_hdr['NAXIS2'] = 8
+    sci_hdr['GCOUNT'] = 1
+    sci_hdr['EXTNAME'] = 'SCI'
+    sci = fits.ImageHDU(data=np.ones((8, 8), dtype=np.float32), header=sci_hdr)
+    fits.HDUList([primary, sci]).writeto(path, output_verify='ignore')
+    with fits.open(path, mode='update') as hdul:
+        if 'PCOUNT' in hdul[1].header:
+            del hdul[1].header['PCOUNT']
+        hdul.flush()
+
+    assert flatten_dolphot_fits(path) is True
+    with fits.open(path) as hdul:
+        assert len(hdul) == 1
+        assert hdul[0].data.shape == (8, 8)
+        assert 'XTENSION' not in hdul[0].header
+        assert hdul[0].header['INSTRUME'] == 'WFC3'
 
 
 def test_flatten_dolphot_fits_breaks_hardlink(tmp_path: Path):
@@ -672,6 +706,49 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
     assert (outdir / frame.name).is_file()
     # mirimask + calcsky for ref and science frame
     assert mock_run.call_count >= 2
+
+
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
+def test_prepare_mosaic_phot_job_clears_leftover_phot_products(
+    mock_run, tmp_path: Path
+):
+    """Restaging must not nircammask leftover residuals or a legacy coadd."""
+    from st123.stages.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
+
+    outdir = tmp_path / 'phot_0_sn'
+    outdir.mkdir()
+    leftover_coadd = outdir / 'coadd_0_sn_f150w2_i2d.fits'
+    leftover_res = outdir / 'phot_0_sn.phot.57.res.fits'
+    leftover_coadd.write_bytes(b'old')
+    leftover_res.write_bytes(b'old')
+    ref = tmp_path / 'coadd_0_sn_nircam_f150w2_i2d.fits'
+    frame = tmp_path / 'jw_nrcb1_jhat.fits'
+    ref.write_bytes(b'new')
+    frame.write_bytes(b'new')
+    job = MosaicPhotJob(
+        group=0,
+        box='sn',
+        refimage=ref,
+        frames=(frame,),
+        phot_outdir=outdir,
+        frame_list=tmp_path / 'dolphot_frames.txt',
+    )
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    prepare_mosaic_phot_job(job, instrument='nircam', dolphot_bin=bin_dir)
+    assert not leftover_coadd.is_file()
+    assert not leftover_res.is_file()
+    assert (outdir / ref.name).is_file()
+    assert (outdir / frame.name).is_file()
+    masked = []
+    for call in mock_run.call_args_list:
+        cmd = call.args[0]
+        if cmd and str(cmd[0]).endswith('nircammask'):
+            masked.extend(str(tok) for tok in cmd[1:])
+    assert 'coadd_0_sn_f150w2_i2d.fits' not in masked
+    assert 'phot_0_sn.phot.57.res.fits' not in masked
+    assert 'coadd_0_sn_nircam_f150w2_i2d.fits' in masked
+    assert 'jw_nrcb1_jhat.fits' in masked
 
 
 def test_dolphot_prep_parser_miri_defaults():

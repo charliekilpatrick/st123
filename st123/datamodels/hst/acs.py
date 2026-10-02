@@ -36,7 +36,10 @@ class ACSDataModel(HSTDataModel):
         'sigma_low': 2.25,
         'sigma_high': 2.00,
     }
-    DRIZ_BITS: int = 96
+    # 16 (hot) + 32 (warm) + 64 (warm/CTE) is the CALACS good-DQ set.
+    # drizzle_filter_group always drops bit 16; remaining hot-pixel holes
+    # are inpainted by fill_drizzle_uncovered_with_sky.
+    DRIZ_BITS: int = 112
     CRPARS: dict[str, float] = {
         'rdnoise': 6.5,
         'gain': 1.0,

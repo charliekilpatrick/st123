@@ -19,7 +19,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from st123.utils.logging import capture_output, configure_worker_logging
 from st123.datamodels import as_datamodel
@@ -28,12 +28,18 @@ from st123.stages.alignment.frame_qa import (
     FRAME_ABS_RETIE_MIN_PEAK,
     FRAME_ABS_RETIE_TOL_ARCSEC,
     FRAME_ABS_TOL_ARCSEC,
+    FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC,
+    FRAME_CATASTROPHIC_TOL_ARCSEC,
     FRAME_INTERNAL_TOL_ARCSEC,
+    FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC,
+    FRAME_L3_NO_MATCH_MAX,
     FRAME_L3_SOFT_TOL_ARCSEC,
     FRAME_MIN_MATCH_HEALTHY,
     FRAME_SPARSE_TOL_ARCSEC,
     build_frame_qa,
     coherent_tol_arcsec,
+    is_catastrophic_alignment,
+    median_healthy_n_calibrators,
     stamp_quality_headers,
     warn_if_frame_qa_soft,
     write_alignment_summary_table,
@@ -108,6 +114,10 @@ HST_JHAT_NARROWBAND_PARAMS: dict[str, Any] = {
     'rough_cut_px_max': 25.0,
     'd_rotated_Nsigma': 4.0,
 }
+
+# JHAT d2d when prelim L3 has Gaia in FOV but zero detections (WCS too far
+# off for the default 2" match; SN 2014cx F606W was 2.5-3.5" from Gaia).
+HST_JHAT_UNANCHORED_D2D_MAX = 5.0
 
 # Preferred broadband parents when tying narrowband frames (HST_REL).
 HST_NARROWBAND_PARENT_FILTERS: tuple[str, ...] = (
@@ -2241,6 +2251,425 @@ HST_ABS_OFFSET_MAX_ARCSEC = 5.0
 HST_SPARSE_ALIGN_MAX_ARCSEC = FRAME_SPARSE_TOL_ARCSEC
 
 
+def histogram_sky_offset(
+    dra_arcsec,
+    ddec_arcsec,
+    *,
+    max_offset_arcsec: float,
+    bin_arcsec: float = 0.1,
+    min_peak: int = 8,
+    exclude_zero_arcsec: float = 0.35,
+) -> dict[str, Any]:
+    """
+    Peak of a 2-D histogram of (dRA, dDec) in arcsec.
+
+    Prefers a dominant outer peak so a ~1-5" coherent offset is not lost to
+    chance pairs near zero. Returns ``ok``, ``dra_arcsec``, ``ddec_arcsec``,
+    ``abs_arcsec``, ``peak_count``.
+    """
+    import numpy as np
+
+    stats: dict[str, Any] = {
+        'ok': False,
+        'method': '2dhist',
+        'n_pairs': 0,
+        'peak_count': 0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'abs_arcsec': 0.0,
+        'peak_mode': None,
+        'peak_core': 0,
+        'peak_outer': 0,
+    }
+    dra = np.asarray(dra_arcsec, dtype=float)
+    ddec = np.asarray(ddec_arcsec, dtype=float)
+    good = np.isfinite(dra) & np.isfinite(ddec)
+    dra = dra[good]
+    ddec = ddec[good]
+    stats['n_pairs'] = int(dra.size)
+    if dra.size < int(min_peak):
+        return stats
+    rmax = float(max_offset_arcsec)
+    bins = np.arange(-rmax, rmax + float(bin_arcsec), float(bin_arcsec))
+    if len(bins) < 4:
+        return stats
+    hist, xe, ye = np.histogram2d(dra, ddec, bins=[bins, bins])
+    cx = 0.5 * (xe[:-1] + xe[1:])
+    cy = 0.5 * (ye[:-1] + ye[1:])
+    xx, yy = np.meshgrid(cx, cy, indexing='ij')
+    hist_use = hist.copy()
+    core = np.hypot(xx, yy) < float(exclude_zero_arcsec)
+    peak_core = int(hist[core].max(initial=0)) if bool(np.any(core)) else 0
+    peak_outer = int(hist[~core].max(initial=0)) if bool(np.any(~core)) else 0
+    stats['peak_core'] = peak_core
+    stats['peak_outer'] = peak_outer
+    if peak_outer >= int(min_peak) and peak_outer > peak_core:
+        hist_use[core] = 0
+        stats['peak_mode'] = 'outer'
+    else:
+        stats['peak_mode'] = 'core' if peak_core >= peak_outer else 'global'
+    iy, ix = np.unravel_index(int(np.argmax(hist_use)), hist_use.shape)
+    peak = int(hist_use[iy, ix])
+    if peak < int(min_peak):
+        iy, ix = np.unravel_index(int(np.argmax(hist)), hist.shape)
+        peak = int(hist[iy, ix])
+        stats['peak_mode'] = 'global_fallback'
+        if peak < int(min_peak):
+            return stats
+    dra_as = float(cx[iy])
+    ddec_as = float(cy[ix])
+    near = np.hypot(dra - dra_as, ddec - ddec_as) < max(2.5 * float(bin_arcsec), 0.2)
+    if int(np.count_nonzero(near)) >= int(min_peak):
+        dra_as = float(np.median(dra[near]))
+        ddec_as = float(np.median(ddec[near]))
+        peak = int(np.count_nonzero(near))
+    stats.update(
+        {
+            'ok': True,
+            'peak_count': peak,
+            'dra_arcsec': dra_as,
+            'ddec_arcsec': ddec_as,
+            'abs_arcsec': float(np.hypot(dra_as, ddec_as)),
+        }
+    )
+    return stats
+
+
+def _sky_offset_pairs_arcsec(
+    c_img,
+    c_ref,
+    max_offset_arcsec: float,
+    *,
+    all_pairs: bool = True,
+):
+    """
+    Return ``(dra_arcsec, ddec_arcsec, dec0_deg)`` for img-ref pairs.
+
+    ``dra_arcsec`` is ``(img - ref) * cos(Dec)``. All-pairs
+    (``search_around_sky``) is required to recover a coherent 1-5"
+    translation: nearest-neighbour matching inside a wide radius prefers
+    chance close pairs and hides the true peak (SN 2014cx F606W).
+    """
+    import numpy as np
+    from astropy.coordinates import search_around_sky
+    import astropy.units as u
+
+    empty = np.asarray([], dtype=float)
+    n_img = int(len(c_img))
+    n_ref = int(len(c_ref))
+    if n_img == 0 or n_ref == 0:
+        return empty, empty, 0.0
+    rmax = float(max_offset_arcsec) * u.arcsec
+    if all_pairs:
+        idx_img, idx_ref, _, _ = search_around_sky(c_img, c_ref, rmax)
+        if idx_img.size:
+            dra = (c_img.ra[idx_img] - c_ref.ra[idx_ref]).to(u.deg).value
+            ddec = (c_img.dec[idx_img] - c_ref.dec[idx_ref]).to(u.deg).value
+            dec0 = float(np.median(c_img.dec[idx_img].deg))
+            cosdec = float(np.cos(np.radians(dec0)))
+            dra_as = np.asarray(dra, dtype=float) * 3600.0 * cosdec
+            ddec_as = np.asarray(ddec, dtype=float) * 3600.0
+            return dra_as, ddec_as, dec0
+        return empty, empty, 0.0
+    idx, sep, _ = c_img.match_to_catalog_sky(c_ref)
+    good = sep.arcsec < float(max_offset_arcsec)
+    if not np.any(good):
+        return empty, empty, 0.0
+    dra = (c_img.ra[good] - c_ref.ra[idx[good]]).to(u.deg).value
+    ddec = (c_img.dec[good] - c_ref.dec[idx[good]]).to(u.deg).value
+    dec0 = float(np.median(c_img.dec[good].deg))
+    cosdec = float(np.cos(np.radians(dec0)))
+    dra_as = np.asarray(dra, dtype=float) * 3600.0 * cosdec
+    ddec_as = np.asarray(ddec, dtype=float) * 3600.0
+    return dra_as, ddec_as, dec0
+
+
+def _fft_xcorr_shift_pixels(ref, img):
+    """
+    Return ``(dy, dx, peak)`` that shifts *img* onto *ref* via padded FFT.
+
+    Both arrays must be the same shape. Padding avoids wrap-around aliases
+    on offsets up to the cutout size (NGC 337 / SN 2014cx F606W).
+    """
+    import numpy as np
+    from numpy.fft import fft2, ifft2
+
+    a = np.asarray(ref, dtype=float)
+    b = np.asarray(img, dtype=float)
+    ny, nx = a.shape
+    py, px = 2 * int(ny), 2 * int(nx)
+    pa = np.zeros((py, px), dtype=float)
+    pb = np.zeros((py, px), dtype=float)
+    pa[:ny, :nx] = a
+    pb[:ny, :nx] = b
+    corr = np.fft.fftshift(np.real(ifft2(fft2(pa) * np.conj(fft2(pb)))))
+    peak = np.unravel_index(int(np.argmax(corr)), corr.shape)
+    cy, cx = int(py // 2), int(px // 2)
+    dy = int(peak[0] - cy)
+    dx = int(peak[1] - cx)
+    return dy, dx, float(corr[peak])
+
+
+def _smoothed_sci_peak_sky(
+    path: str | Path,
+    *,
+    smooth_pix: float = 20.0,
+    edge_pix: int = 40,
+    sci_ext: int | None = None,
+) -> dict[str, Any] | None:
+    """Brightest Gaussian-smoothed SCI peak and its sky coordinate."""
+    import numpy as np
+    from astropy.wcs import WCS
+    from scipy.ndimage import gaussian_filter
+
+    img = Path(path).expanduser().resolve()
+    if not img.is_file():
+        return None
+    best: dict[str, Any] | None = None
+    try:
+        with as_datamodel(img).open(memmap=True) as hdul:
+            idxs = _sci_hdu_indices(hdul)
+            if sci_ext is not None:
+                idxs = [i for i in idxs if int(i) == int(sci_ext)]
+            for sci_i in idxs:
+                data = np.nan_to_num(np.asarray(hdul[sci_i].data, dtype=float), nan=0.0)
+                if data.ndim > 2:
+                    data = data[0]
+                if data.ndim != 2 or min(data.shape) < 8:
+                    continue
+                sm = gaussian_filter(data, float(smooth_pix))
+                ny, nx = sm.shape
+                e = int(edge_pix)
+                if e > 0 and ny > 2 * e and nx > 2 * e:
+                    sm2 = sm.copy()
+                    sm2[:e, :] = -np.inf
+                    sm2[-e:, :] = -np.inf
+                    sm2[:, :e] = -np.inf
+                    sm2[:, -e:] = -np.inf
+                else:
+                    sm2 = sm
+                y, x = np.unravel_index(int(np.argmax(sm2)), sm2.shape)
+                peak = float(sm[int(y), int(x)])
+                if not np.isfinite(peak) or peak <= 0.0:
+                    continue
+                wcs = WCS(hdul[sci_i].header, hdul, naxis=2)
+                ra, dec = wcs.pixel_to_world_values(float(x), float(y))
+                cand = {
+                    'sci_ext': int(sci_i),
+                    'x': int(x),
+                    'y': int(y),
+                    'peak': peak,
+                    'ra': float(ra),
+                    'dec': float(dec),
+                }
+                if best is None or peak > float(best['peak']):
+                    best = cand
+    except Exception:
+        return None
+    return best
+
+
+def measure_hst_sky_offset_smooth_peak(
+    path_img: str | Path,
+    path_ref: str | Path,
+    *,
+    max_offset_arcsec: float = FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC,
+    smooth_pix: float = 20.0,
+    edge_pix: int = 40,
+    sci_ext: int | None = None,
+) -> dict[str, Any]:
+    """
+    Sky offset of *path_img* vs *path_ref* from smoothed-SCI galaxy peaks.
+
+    Catalog 2-D histograms and small-cutout FFT miss tens-of-arcsec
+    translations on a shared stamp (SN 2014cx F606W is 25" west and 6"
+    north of F555W after a false ~69" FFT lock; pipeline WCS placed the
+    nucleus ~65" off). The brightest smoothed peak is the galaxy
+    nucleus; the sky difference is the CRVAL correction.
+
+    Returns ``img - ref`` (east/north arcsec); add ``-dra/-ddec`` to
+    *path_img* CRVAL to place it on *path_ref*.
+    """
+    import numpy as np
+
+    stats: dict[str, Any] = {
+        'ok': False,
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'peak_count': 1,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'abs_arcsec': 0.0,
+    }
+    img_p = _smoothed_sci_peak_sky(
+        path_img, smooth_pix=smooth_pix, edge_pix=edge_pix, sci_ext=sci_ext
+    )
+    ref_p = _smoothed_sci_peak_sky(
+        path_ref, smooth_pix=smooth_pix, edge_pix=edge_pix
+    )
+    if img_p is None or ref_p is None:
+        stats['error'] = 'no smoothed peak'
+        return stats
+    dra = (float(img_p['ra']) - float(ref_p['ra']) + 180.0) % 360.0 - 180.0
+    ddec = float(img_p['dec']) - float(ref_p['dec'])
+    dec0 = 0.5 * (float(img_p['dec']) + float(ref_p['dec']))
+    cosdec = float(np.cos(np.radians(dec0)))
+    dra_as = float(dra) * 3600.0 * cosdec
+    ddec_as = float(ddec) * 3600.0
+    abs_as = float(np.hypot(dra_as, ddec_as))
+    stats['dra_deg'] = float(dra)
+    stats['ddec_deg'] = float(ddec)
+    stats['dra_arcsec'] = dra_as
+    stats['ddec_arcsec'] = ddec_as
+    stats['abs_arcsec'] = abs_as
+    stats['sci_ext'] = img_p.get('sci_ext')
+    stats['img_peak'] = {'x': img_p['x'], 'y': img_p['y'], 'peak': img_p['peak']}
+    stats['ref_peak'] = {'x': ref_p['x'], 'y': ref_p['y'], 'peak': ref_p['peak']}
+    if abs_as > float(max_offset_arcsec):
+        stats['error'] = 'offset exceeds search'
+        return stats
+    stats['ok'] = True
+    return stats
+
+
+def measure_hst_sky_offset_image_xcorr(
+    path_img: str | Path,
+    path_ref: str | Path,
+    *,
+    cutout_pix: int = 360,
+    max_offset_arcsec: float = FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC,
+    sci_ext: int | None = None,
+) -> dict[str, Any]:
+    """
+    Translational offset of *path_img* vs *path_ref* from galaxy-cutout FFT.
+
+    Catalog 2-D histograms fail on NGC 337: detections are galaxy knots, not
+    Gaia stars. Cross-correlating a nucleus cutout against an already-aligned
+    hub coadd recovers the CRVAL shift. Returns ``img - ref``; add
+    ``-dra/-ddec`` to *path_img* CRVAL to place it on *path_ref*.
+    """
+    import numpy as np
+    from astropy.nddata import Cutout2D
+    from astropy.wcs import WCS
+    from reproject import reproject_interp
+
+    stats: dict[str, Any] = {
+        'ok': False,
+        'method': 'image_xcorr',
+        'n_match': 0,
+        'peak_count': 0,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'abs_arcsec': 0.0,
+    }
+    img_path = Path(path_img).expanduser().resolve()
+    ref_path = Path(path_ref).expanduser().resolve()
+    if not img_path.is_file() or not ref_path.is_file():
+        stats['error'] = 'missing image or abs_ref'
+        return stats
+    try:
+        with as_datamodel(ref_path).open(memmap=True) as hdul:
+            ridx = _sci_hdu_indices(hdul)
+            if not ridx:
+                stats['error'] = 'no SCI in abs_ref'
+                return stats
+            ref = np.asarray(hdul[ridx[0]].data, dtype=float)
+            rwcs = WCS(hdul[ridx[0]].header, hdul, naxis=2)
+        sm = np.nan_to_num(ref, nan=0.0)
+        step = 8
+        coarse = sm[::step, ::step]
+        iy, ix = np.unravel_index(int(np.argmax(coarse)), coarse.shape)
+        cy, cx = int(iy * step), int(ix * step)
+        pixscale = float(
+            np.sqrt(np.abs(np.linalg.det(rwcs.pixel_scale_matrix)))
+        ) * 3600.0
+        if pixscale <= 0:
+            pixscale = 0.05
+        # 15" cutouts miss 25-65" shared-stamp translations (SN 2014cx F606W).
+        need = int(2.2 * float(max_offset_arcsec) / pixscale) + 80
+        cut_n = int(max(int(cutout_pix), need))
+        cut_n = int(min(cut_n, max(int(ref.shape[0]), int(ref.shape[1]))))
+        cut = Cutout2D(
+            ref, (cx, cy), cut_n, wcs=rwcs, mode='partial', fill_value=0
+        )
+        a = np.nan_to_num(cut.data, nan=0.0)
+        candidates: list[dict[str, Any]] = []
+        with as_datamodel(img_path).open(memmap=True) as hdul:
+            idxs = _sci_hdu_indices(hdul)
+            if sci_ext is not None:
+                idxs = [i for i in idxs if int(i) == int(sci_ext)]
+            for sci_i in idxs:
+                data = np.asarray(hdul[sci_i].data, dtype=float)
+                iwcs = WCS(hdul[sci_i].header, hdul, naxis=2)
+                reproj, fp = reproject_interp(
+                    (data, iwcs), cut.wcs, shape_out=cut.data.shape
+                )
+                b = np.nan_to_num(np.asarray(reproj, dtype=float), nan=0.0)
+                m = (np.asarray(fp) > 0.5) & (a > 0) & (b > 0)
+                if int(np.count_nonzero(m)) < 2000:
+                    continue
+                thr = float(np.percentile(a[m], 70))
+                mask = m & (a > thr)
+                ny, nx = a.shape
+                r = max(int(min(ny, nx) * 0.12), 24)
+                inner = np.zeros_like(mask)
+                inner[ny // 2 - r : ny // 2 + r, nx // 2 - r : nx // 2 + r] = True
+                n_inner = int(np.count_nonzero(mask & inner))
+                n_mask = int(np.count_nonzero(mask))
+                if n_mask < 200:
+                    continue
+                aa = np.where(mask, a - float(np.mean(a[mask])), 0.0)
+                bb = np.where(m, b - float(np.mean(b[m])), 0.0)
+                dy, dx, peak = _fft_xcorr_shift_pixels(aa, bb)
+                pixscale = float(
+                    np.sqrt(np.abs(np.linalg.det(cut.wcs.pixel_scale_matrix)))
+                ) * 3600.0
+                abs_px = float(np.hypot(dx, dy))
+                abs_as = abs_px * pixscale
+                if abs_as > float(max_offset_arcsec):
+                    continue
+                x0, y0 = nx / 2.0, ny / 2.0
+                ra0, dec0 = cut.wcs.pixel_to_world_values(x0, y0)
+                ra1, dec1 = cut.wcs.pixel_to_world_values(x0 + dx, y0 + dy)
+                # Pixel shift of the reprojected image on the hub grid. The
+                # CRVAL correction that aligned SN 2014cx F606W is +this sky
+                # delta, so img-ref (apply negative) is the opposite.
+                s_ra = (float(ra1) - float(ra0)) * 3600.0 * float(
+                    np.cos(np.radians(float(dec0)))
+                )
+                s_dec = (float(dec1) - float(dec0)) * 3600.0
+                cand = {
+                    'ok': True,
+                    'method': 'image_xcorr',
+                    'sci_ext': int(sci_i),
+                    'n_match': n_mask,
+                    'peak_count': n_inner,
+                    'n_inner': n_inner,
+                    'dx': int(dx),
+                    'dy': int(dy),
+                    'corr': float(peak),
+                    'dra_arcsec': -s_ra,
+                    'ddec_arcsec': -s_dec,
+                    'abs_arcsec': float(np.hypot(s_ra, s_dec)),
+                    'dra_deg': (-s_ra / (3600.0 * float(np.cos(np.radians(float(dec0))))))
+                    if np.cos(np.radians(float(dec0)))
+                    else 0.0,
+                    'ddec_deg': -s_dec / 3600.0,
+                }
+                candidates.append(cand)
+        if candidates:
+            candidates.sort(key=lambda c: (float(c['abs_arcsec']), -int(c['n_inner'])))
+            stats['candidates'] = candidates
+            stats.update(candidates[0])
+    except Exception as exc:
+        stats['error'] = f'{type(exc).__name__}: {exc}'
+    return stats
+
+
 def measure_hst_sky_offset_2dhist(
     path_img: str | Path,
     path_ref: str | Path,
@@ -2500,21 +2929,36 @@ def find_hst_abs_ref_image(jhat_dir: str | Path) -> Path | None:
 
 
 def _frame_exptime(path: str | Path) -> float:
-    """EXPTIME from primary/SCI, else EXPSTART/EXPEND; 0.0 if missing."""
+    """EXPTIME from primary/SCI; 0.0 if missing, zero, or a failed EXPFLAG.
+
+    Does not fall back to EXPSTART/EXPEND when EXPTIME is explicitly 0
+    (dead ``EXCESSIVE DOWNTIME`` frames can still carry planned times and
+    must not become visit abs-retie anchors).
+    """
 
     p = Path(path)
     try:
         with as_datamodel(p).open(memmap=True) as hdul:
+            prim = hdul[0].header
+            expflag = str(prim.get('EXPFLAG') or '').strip().upper()
+            if expflag and expflag not in {'NORMAL', 'INDETERMINATE'}:
+                return 0.0
+            saw_exptime = False
+            last_exp = 0.0
             for hdu in hdul:
                 val = hdu.header.get('EXPTIME')
-                if val is not None:
-                    try:
-                        exp = float(val)
-                    except (TypeError, ValueError):
-                        exp = 0.0
-                    if exp > 0:
-                        return exp
-            prim = hdul[0].header
+                if val is None:
+                    continue
+                saw_exptime = True
+                try:
+                    exp = float(val)
+                except (TypeError, ValueError):
+                    exp = 0.0
+                last_exp = exp
+                if exp > 0:
+                    return exp
+            if saw_exptime:
+                return float(last_exp)
             start, end = prim.get('EXPSTART'), prim.get('EXPEND')
             if start is not None and end is not None:
                 derived = (float(end) - float(start)) * 86400.0
@@ -3196,8 +3640,39 @@ def validate_hst_coadds_alignment(
     if len(paths) < 2:
         return report
     worst = 0.0
+    image_tol = float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
     for i in range(len(paths)):
         for j in range(i + 1, len(paths)):
+            peak = measure_hst_sky_offset_smooth_peak(
+                paths[i],
+                paths[j],
+                max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+            )
+            if peak.get('ok') and float(peak.get('abs_arcsec') or 0.0) > image_tol:
+                pair = {
+                    'a': paths[i].name,
+                    'b': paths[j].name,
+                    'ok': False,
+                    'abs_arcsec': float(peak.get('abs_arcsec') or 0.0),
+                    'dra_arcsec': float(peak.get('dra_arcsec') or 0.0),
+                    'ddec_arcsec': float(peak.get('ddec_arcsec') or 0.0),
+                    'n_match': int(peak.get('n_match') or 1),
+                    'method': 'smooth_peak',
+                    'reason': 'image_offset',
+                }
+                report['pairs'].append(pair)
+                report['failed_pairs'].append(pair)
+                report['ok'] = False
+                worst = max(worst, float(pair['abs_arcsec']))
+                log.warning(
+                    'L3 QA: galaxy-peak offset %s vs %s is %.3f" '
+                    '(limit %.1f"; SN 2014cx F606W-class WCS)',
+                    paths[i].name,
+                    paths[j].name,
+                    pair['abs_arcsec'],
+                    image_tol,
+                )
+                continue
             # 2-D histogram recovers arcsecond-scale systematics that small-radius
             # NN matching false-locks near zero.
             st = measure_hst_sky_offset_2dhist(
@@ -3223,6 +3698,14 @@ def validate_hst_coadds_alignment(
                     match_radius_arcsec=match_radius_arcsec,
                     min_matches=min_matches,
                 )
+            if (
+                not st.get('ok')
+                and peak.get('ok')
+                and float(peak.get('abs_arcsec') or 0.0) <= image_tol
+            ):
+                # Crowded galaxy: catalog methods find no stars, but the
+                # nucleus is already on the shared stamp.
+                st = peak
             pair = {
                 'a': paths[i].name,
                 'b': paths[j].name,
@@ -3241,6 +3724,16 @@ def validate_hst_coadds_alignment(
                     paths[j].name,
                     pair['n_match'],
                 )
+                # Overlapping box coadds with 0-1 common sources are a wrong
+                # WCS, not an unmeasurable pair (SN 2014cx F606W vs F814W).
+                if int(pair['n_match']) <= int(FRAME_L3_NO_MATCH_MAX):
+                    pair['ok'] = False
+                    pair['reason'] = 'no_common_sources'
+                    report['failed_pairs'].append(pair)
+                    report['ok'] = False
+                continue
+            if st.get('method') == 'smooth_peak':
+                # Nucleus color (~0.16") is not a 50 mas catalog residual.
                 continue
             worst = max(worst, float(st['abs_arcsec']))
             if float(st['abs_arcsec']) > float(max_coherent_arcsec):
@@ -3455,7 +3948,9 @@ def measure_hst_sky_offset_vs_gaia(
 
     Matches detections to Gaia on sky (RA/Dec) only - avoids
     ``all_world2pix`` failures on pathological WFPC2 WCS solutions that break
-    refcat x/y projection.
+    refcat x/y projection. Pair offsets are histogrammed from *all* Gaia
+    neighbours inside ``max_offset_arcsec`` so a coherent 1-5" shift is not
+    lost to nearest-neighbour chance pairs.
 
     Returns the same key shape as :func:`measure_hst_sky_offset_2dhist`
     (``ok``, ``dra_deg``, ``ddec_deg``, ``abs_arcsec``, ...).
@@ -3554,31 +4049,71 @@ def measure_hst_sky_offset_vs_gaia(
                     np.asarray(ra_img, dtype=float) * u.deg,
                     np.asarray(dec_img, dtype=float) * u.deg,
                 )
-                idx, sep, _ = c_img.match_to_catalog_sky(c_ref)
-                good = sep.arcsec < float(max_offset_arcsec)
-                n = int(np.count_nonzero(good))
-                if n < int(min_matches):
+                # All-pairs inside the search radius. NN matching at 5-15"
+                # prefers chance close pairs and hides a coherent 2-3" peak.
+                dra_as_arr, ddec_as_arr, dec0 = _sky_offset_pairs_arcsec(
+                    c_img,
+                    c_ref,
+                    float(max_offset_arcsec),
+                    all_pairs=True,
+                )
+                n_pairs = int(dra_as_arr.size)
+                if n_pairs < int(min_matches):
                     continue
-                # Image - Gaia; apply -Delta to CRVAL to move image onto Gaia.
-                dra = (c_img.ra[good] - c_ref.ra[idx[good]]).to(u.deg).value
-                ddec = (c_img.dec[good] - c_ref.dec[idx[good]]).to(u.deg).value
-                dra_m = float(np.median(dra))
-                ddec_m = float(np.median(ddec))
-                dec0 = float(np.median(c_img.dec[good].deg))
-                dra_as = dra_m * 3600.0 * float(np.cos(np.radians(dec0)))
-                ddec_as = ddec_m * 3600.0
+                hist = histogram_sky_offset(
+                    dra_as_arr,
+                    ddec_as_arr,
+                    max_offset_arcsec=float(max_offset_arcsec),
+                    bin_arcsec=0.1,
+                    min_peak=max(int(min_matches) // 2, 8),
+                    exclude_zero_arcsec=0.35,
+                )
+                if hist.get('ok'):
+                    dra_as = float(hist['dra_arcsec'])
+                    ddec_as = float(hist['ddec_arcsec'])
+                    peak = int(hist.get('peak_count') or n_pairs)
+                    n = peak
+                    method = 'gaia_2dhist'
+                    cosdec = float(np.cos(np.radians(dec0)))
+                else:
+                    # All-pairs median is chance-dominated; NN is the fallback.
+                    dra_nn, ddec_nn, dec0 = _sky_offset_pairs_arcsec(
+                        c_img,
+                        c_ref,
+                        float(max_offset_arcsec),
+                        all_pairs=False,
+                    )
+                    n = int(dra_nn.size)
+                    if n < int(min_matches):
+                        continue
+                    dra_as = float(np.median(dra_nn))
+                    ddec_as = float(np.median(ddec_nn))
+                    peak = n
+                    method = 'gaia_match'
+                    hist = {
+                        'peak_mode': 'nn_median',
+                        'peak_core': 0,
+                        'peak_outer': 0,
+                    }
+                    cosdec = float(np.cos(np.radians(dec0)))
+                dra_m = dra_as / (3600.0 * cosdec) if cosdec else 0.0
+                ddec_m = ddec_as / 3600.0
                 cand = {
                     'ok': True,
                     'n_match': n,
-                    'peak_count': n,
+                    'peak_count': peak,
                     'dra_deg': dra_m,
                     'ddec_deg': ddec_m,
                     'dra_arcsec': dra_as,
                     'ddec_arcsec': ddec_as,
                     'abs_arcsec': float(np.hypot(dra_as, ddec_as)),
                     'sci_ext': int(sci_i),
+                    'method': method,
+                    'peak_mode': hist.get('peak_mode'),
+                    'peak_core': hist.get('peak_core'),
+                    'peak_outer': hist.get('peak_outer'),
                 }
-                if best is None or cand['n_match'] > best['n_match']:
+                if best is None or cand['peak_count'] > best['peak_count']:
                     best = cand
         if best is not None:
             stats.update(best)
@@ -3601,6 +4136,11 @@ def apply_common_abs_shift_vs_ref(
     Used after within-visit relative harmonize so multi-visit filter groups share
     an absolute frame before AstroDrizzle. When the coadd/image 2-D hist tie
     fails, fall back to a Gaia match on the visit anchor (same common shift).
+
+    A 2-D histogram vs an HST coadd may recover WFPC2 pipeline errors of
+    ~1" (the search radius is *max_abs_offset_arcsec*). Those shifts are
+    applied. Gaia fallback keeps the smaller JWST-style apply cap so a
+    false catalog peak cannot walk the visit.
     """
 
     paths = [Path(p).resolve() for p in frames]
@@ -3616,6 +4156,16 @@ def apply_common_abs_shift_vs_ref(
     }
     if not paths:
         return report
+    live = [p for p in paths if _frame_exptime(p) > 0]
+    if not live:
+        report['error'] = 'no live frames (EXPTIME/EXPFLAG)'
+        return report
+    if len(live) < len(paths):
+        log.warning(
+            'Visit abs retie: skipping %d dead/zero-exptime frame(s)',
+            len(paths) - len(live),
+        )
+    paths = live
     anchor = max(paths, key=_frame_exptime)
     report['anchor'] = str(anchor)
 
@@ -3664,14 +4214,19 @@ def apply_common_abs_shift_vs_ref(
     report['abs_arcsec'] = abs_as
     if abs_as < float(min_apply_arcsec):
         return report
-    # Cap large multimodal / false-Gaia peaks (JWST hub retie semantics).
-    if abs_as > float(FRAME_ABS_RETIE_MAX_APPLY_ARCSEC):
+    # Gaia NN matching can false-lock at large radius; 2dhist vs an HST
+    # coadd is the WFPC2 pipeline-WCS recovery path (search ~5").
+    max_apply = float(FRAME_ABS_RETIE_MAX_APPLY_ARCSEC)
+    if report.get('method') == 'abs_ref_2dhist':
+        max_apply = float(max_abs_offset_arcsec)
+    if abs_as > max_apply:
         report['skipped_large'] = True
         log.warning(
-            'Visit abs retie skip %s: |Delta|=%.3f" > max apply %.3f"',
+            'Visit abs retie skip %s: |Delta|=%.3f" > max apply %.3f" (%s)',
             anchor.name,
             abs_as,
-            FRAME_ABS_RETIE_MAX_APPLY_ARCSEC,
+            max_apply,
+            report.get('method'),
         )
         return report
     peak = int(off.get('peak_count') or off.get('n_match') or 0)
@@ -5534,6 +6089,7 @@ def align_hst_raw_dir(
     jhat_params: dict | None = None,
     instruments: Sequence[str] | None = None,
     workers: int = 1,
+    unanchored_filters: Sequence[str] | None = None,
 ) -> list[dict]:
     """
     Align all matching science frames under *raw_dir*.
@@ -5551,6 +6107,10 @@ def align_hst_raw_dir(
     workers : int, optional
         Parallel JHAT worker processes (default 1 = serial). Values ``>1`` use
         a ``spawn`` :class:`~concurrent.futures.ProcessPoolExecutor`.
+    unanchored_filters : sequence of str or None, optional
+        Filter names whose prelim L3 had Gaia in the FOV but zero detections.
+        Those frames use ``d2d_max=5"`` so JHAT can see ~arcsecond pipeline
+        offsets that the default 2" cut misses.
     """
     from st123.utils.helpers import get_filter as _get_filter_for_nb
     from st123.utils.helpers import get_instrument
@@ -5627,7 +6187,28 @@ def align_hst_raw_dir(
     )
 
     jobs: list[dict[str, Any]] = []
+    unanchored = {
+        str(f).strip().lower() for f in (unanchored_filters or []) if str(f).strip()
+    }
+    if unanchored:
+        log.warning(
+            'Unanchored L3 filters %s: JHAT d2d_max=%.1f" (pipeline WCS may '
+            'sit outside the default 2" match)',
+            sorted(unanchored),
+            float(HST_JHAT_UNANCHORED_D2D_MAX),
+        )
     for i, frame in enumerate(frames, start=1):
+        params = dict(jhat_params or {})
+        if unanchored:
+            try:
+                filt = str(_get_filter_for_nb(frame)).strip().lower()
+            except Exception:
+                filt = ''
+            if filt in unanchored:
+                params['d2d_max'] = float(HST_JHAT_UNANCHORED_D2D_MAX)
+                params['rough_cut_px_max'] = max(
+                    float(params.get('rough_cut_px_max') or 15.0), 25.0
+                )
         jobs.append(
             {
                 'frame': str(frame.resolve()),
@@ -5638,7 +6219,7 @@ def align_hst_raw_dir(
                 'use_gaia': use_gaia,
                 'photfilename': str(ref_phot) if ref_phot is not None else None,
                 'verbose': bool(verbose),
-                'jhat_params': dict(jhat_params or {}),
+                'jhat_params': params,
             }
         )
 
@@ -5919,6 +6500,139 @@ def stamp_hst_jhat_quality(
     report['ok'] = bool(residual.get('ok')) and abs_ok_local(
         med_as, n_calibrators=n_cal
     )
+    suspect = bool(
+        is_catastrophic_alignment(med_as, n_cal)
+        or n_cal is None
+        or int(n_cal) < 2 * int(FRAME_MIN_MATCH_HEALTHY)
+        or (
+            med_as is not None and float(med_as) > float(FRAME_SPARSE_TOL_ARCSEC)
+        )
+    )
+    gaia_as = None
+    n_gaia = None
+    if suspect:
+        gaia = measure_hst_sky_offset_vs_gaia(
+            jhat,
+            max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+            min_matches=int(FRAME_MIN_MATCH_HEALTHY),
+        )
+        if gaia.get('ok'):
+            gaia_as = float(gaia.get('abs_arcsec') or 0.0)
+            n_gaia = int(gaia.get('peak_count') or gaia.get('n_match') or 0)
+            report['gaia_residual_arcsec'] = gaia_as
+            report['n_gaia'] = n_gaia
+            log.info(
+                'Gaia residual %s: %.1f mas (n=%s, method=%s)',
+                jhat.name,
+                1000.0 * gaia_as,
+                n_gaia,
+                gaia.get('method'),
+            )
+    report['catastrophic'] = is_catastrophic_alignment(
+        med_as,
+        n_cal,
+        gaia_residual_arcsec=gaia_as,
+        n_gaia=n_gaia,
+    )
+    hub = Path(abs_ref).expanduser().resolve() if abs_ref else None
+    if hub is not None and hub.is_file() and (
+        report['catastrophic'] or suspect
+    ):
+        peak = measure_hst_sky_offset_smooth_peak(
+            jhat,
+            hub,
+            max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+        )
+        if peak.get('ok'):
+            p_as = float(peak.get('abs_arcsec') or 0.0)
+            report['image_peak_arcsec'] = p_as
+            report['image_peak'] = {
+                'abs_arcsec': p_as,
+                'dra_arcsec': peak.get('dra_arcsec'),
+                'ddec_arcsec': peak.get('ddec_arcsec'),
+                'sci_ext': peak.get('sci_ext'),
+            }
+            log.info(
+                'Galaxy-peak residual %s: %.1f mas (sci=%s)',
+                jhat.name,
+                1000.0 * p_as,
+                peak.get('sci_ext'),
+            )
+            if p_as > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+                report['catastrophic'] = True
+        xcorr = measure_hst_sky_offset_image_xcorr(
+            jhat,
+            hub,
+            max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+        )
+        if xcorr.get('ok'):
+            x_as = float(xcorr.get('abs_arcsec') or 0.0)
+            report['image_residual_arcsec'] = x_as
+            report['image_xcorr'] = {
+                'abs_arcsec': x_as,
+                'sci_ext': xcorr.get('sci_ext'),
+                'n_inner': xcorr.get('n_inner'),
+            }
+            log.info(
+                'Image xcorr residual %s: %.1f mas (sci=%s n_inner=%s)',
+                jhat.name,
+                1000.0 * x_as,
+                xcorr.get('sci_ext'),
+                xcorr.get('n_inner'),
+            )
+            peak_as = report.get('image_peak_arcsec')
+            peak_bad = (
+                peak_as is not None
+                and float(peak_as) > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
+            )
+            if x_as <= float(FRAME_CATASTROPHIC_TOL_ARCSEC) and not peak_bad:
+                report['catastrophic'] = False
+            else:
+                report['catastrophic'] = True
+                visit = _hst_visit_key(jhat)
+                for sib in sorted(jhat.parent.glob('*_jhat.fits')):
+                    if sib.resolve() == jhat:
+                        continue
+                    if _hst_visit_key(sib) != visit:
+                        continue
+                    rel = measure_hst_sky_offset_image_xcorr(
+                        jhat,
+                        sib,
+                        max_offset_arcsec=2.0,
+                    )
+                    if not rel.get('ok'):
+                        continue
+                    rel_as = rel.get('abs_arcsec')
+                    if rel_as is None or float(rel_as) > float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+                        continue
+                    rel_as = float(rel_as)
+                    sib_hub = measure_hst_sky_offset_image_xcorr(
+                        sib,
+                        hub,
+                        max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+                    )
+                    sib_ok = False
+                    for cand in sib_hub.get('candidates') or [sib_hub]:
+                        a = cand.get('abs_arcsec')
+                        if cand.get('ok') and a is not None and float(a) <= float(
+                            FRAME_CATASTROPHIC_TOL_ARCSEC
+                        ):
+                            sib_ok = True
+                            break
+                    if not sib_ok:
+                        continue
+                    if peak_bad:
+                        continue
+                    report['catastrophic'] = False
+                    report['image_residual_arcsec'] = rel_as
+                    report['image_xcorr_peer'] = sib.name
+                    log.info(
+                        'Image xcorr residual %s vs aligned peer %s: %.1f mas',
+                        jhat.name,
+                        sib.name,
+                        1000.0 * rel_as,
+                    )
+                    break
     report['algnref'] = original_ref
     report['aligned_to'] = aligned_to
     report['residual'] = residual
@@ -5934,6 +6648,7 @@ def stamp_hst_jhat_quality(
         n_calibrators=n_cal,
         internal_max_arcsec=internal_max_arcsec,
         catalog_basename=ref_path.name if ref_path else None,
+        catastrophic=bool(report['catastrophic']),
     )
     if med_as is not None:
         log.info(
@@ -6008,6 +6723,37 @@ def polish_hst_jhat_abs_residual(
     report['applied'] = True
     post = measure_hst_narrowband_residual_vs_refcat(jhat, ref, match_radius_arcsec=0.5)
     report['post'] = post
+    post_shift = float(post.get('residual_arcsec') or post.get('abs_arcsec') or shift)
+    post_n = int(post.get('n_match') or 0)
+    worsened = (
+        not post.get('ok')
+        or post_shift > shift + 0.005
+        or is_catastrophic_alignment(post_shift, post_n)
+    )
+    if worsened:
+        with as_datamodel(jhat).open(mode='update', memmap=False) as hdul:
+            apply_sky_translation_to_sci(
+                hdul,
+                -dra_deg,
+                -ddec_deg,
+                comment='st123: revert abs residual polish',
+            )
+            hdul[0].header['ST123VAB'] = (
+                False,
+                'st123: abs residual polish reverted',
+            )
+            hdul.flush()
+        report['applied'] = False
+        report['reverted'] = True
+        report['ok'] = shift <= coherent_tol_arcsec(n)
+        log.warning(
+            'Abs residual polish reverted %s: %.1f -> %.1f mas (n=%s); kept pre',
+            jhat.name,
+            1000.0 * shift,
+            1000.0 * post_shift,
+            post_n or n,
+        )
+        return report
     if post.get('ok'):
         report['ok'] = float(post['residual_arcsec']) <= coherent_tol_arcsec(
             int(post.get('n_match') or 0)
@@ -6020,6 +6766,255 @@ def polish_hst_jhat_abs_residual(
         post.get('n_match') or n,
     )
     return report
+
+
+def recover_catastrophic_hst_jhat(
+    frames: Sequence[str | Path],
+    *,
+    abs_ref: str | Path | None = None,
+    refcat: str | Path | None = None,
+    max_offset_arcsec: float = FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC,
+    min_peak: int = FRAME_ABS_RETIE_MIN_PEAK,
+) -> dict[str, Any]:
+    """
+    Recover a visit whose JHAT solution is a sparse false lock far from Gaia.
+
+    Restores pipeline WCS, measures a galaxy-peak / wide 2-D histogram vs
+    the aligned abs hub (else Gaia), applies one common CRVAL shift, then
+    refines onto the L3 phot catalog. Used when the true offset sits
+    outside JHAT ``d2d_max`` (SN 2014cx F606W is 25" west / 6" north of
+    F555W on the shared stamp).
+    """
+    live = [
+        Path(p).expanduser().resolve()
+        for p in frames
+        if Path(p).is_file() and _frame_exptime(p) > 0
+    ]
+    report: dict[str, Any] = {
+        'ok': False,
+        'applied': False,
+        'n_frames': len(live),
+        'method': None,
+        'abs_arcsec': 0.0,
+        'frames': [str(p) for p in live],
+    }
+    if not live:
+        report['error'] = 'no live frames'
+        return report
+    restore_pipeline_relative_wcs_with_common_shift(
+        live, dra_deg=0.0, ddec_deg=0.0
+    )
+    anchor = max(live, key=_frame_exptime)
+    report['anchor'] = str(anchor)
+    abs_path = Path(abs_ref).expanduser().resolve() if abs_ref else None
+    off: dict[str, Any] = {'ok': False}
+    already_applied = False
+    xcorr_cands: list[dict[str, Any]] = []
+    if abs_path is not None and abs_path.is_file():
+        pk = measure_hst_sky_offset_smooth_peak(
+            anchor,
+            abs_path,
+            max_offset_arcsec=float(max_offset_arcsec),
+        )
+        if pk.get('ok'):
+            restore_pipeline_relative_wcs_with_common_shift(
+                live, dra_deg=0.0, ddec_deg=0.0
+            )
+            restore_pipeline_relative_wcs_with_common_shift(
+                live,
+                dra_deg=-float(pk['dra_deg']),
+                ddec_deg=-float(pk['ddec_deg']),
+            )
+            left = measure_hst_sky_offset_smooth_peak(
+                anchor,
+                abs_path,
+                max_offset_arcsec=float(max_offset_arcsec),
+                sci_ext=pk.get('sci_ext'),
+            )
+            leftover = 1e9
+            if left.get('ok') and left.get('abs_arcsec') is not None:
+                leftover = float(left['abs_arcsec'])
+            if leftover <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+                off = pk
+                already_applied = True
+                report['method'] = 'smooth_peak'
+                report['probe'] = {
+                    'abs_arcsec': pk.get('abs_arcsec'),
+                    'dra_arcsec': pk.get('dra_arcsec'),
+                    'ddec_arcsec': pk.get('ddec_arcsec'),
+                    'sci_ext': pk.get('sci_ext'),
+                    'leftover_arcsec': leftover,
+                }
+            else:
+                restore_pipeline_relative_wcs_with_common_shift(
+                    live, dra_deg=0.0, ddec_deg=0.0
+                )
+        if not off.get('ok'):
+            xc = measure_hst_sky_offset_image_xcorr(
+                anchor,
+                abs_path,
+                max_offset_arcsec=float(max_offset_arcsec),
+            )
+            xcorr_cands = [c for c in (xc.get('candidates') or []) if c.get('ok')]
+            for cand in xcorr_cands:
+                restore_pipeline_relative_wcs_with_common_shift(
+                    live, dra_deg=0.0, ddec_deg=0.0
+                )
+                restore_pipeline_relative_wcs_with_common_shift(
+                    live,
+                    dra_deg=-float(cand['dra_deg']),
+                    ddec_deg=-float(cand['ddec_deg']),
+                )
+                left = measure_hst_sky_offset_image_xcorr(
+                    anchor,
+                    abs_path,
+                    max_offset_arcsec=float(max_offset_arcsec),
+                    sci_ext=cand.get('sci_ext'),
+                )
+                leftover = 1e9
+                n_inner_left = 0
+                if left.get('ok') and left.get('abs_arcsec') is not None:
+                    leftover = float(left['abs_arcsec'])
+                    n_inner_left = int(left.get('n_inner') or 0)
+                if leftover <= 0.25 and n_inner_left >= 200:
+                    off = cand
+                    already_applied = True
+                    report['method'] = 'image_xcorr'
+                    report['probe'] = {
+                        'abs_arcsec': cand.get('abs_arcsec'),
+                        'peak_count': cand.get('peak_count'),
+                        'sci_ext': cand.get('sci_ext'),
+                        'dx': cand.get('dx'),
+                        'dy': cand.get('dy'),
+                        'leftover_arcsec': leftover,
+                    }
+                    break
+            if not off.get('ok') and xcorr_cands:
+                restore_pipeline_relative_wcs_with_common_shift(
+                    live, dra_deg=0.0, ddec_deg=0.0
+                )
+        if not off.get('ok'):
+            off = measure_hst_sky_offset_2dhist(
+                anchor,
+                abs_path,
+                max_offset_arcsec=float(max_offset_arcsec),
+                bin_arcsec=0.15,
+                nbright=800,
+                min_peak=int(min_peak),
+                exclude_zero_arcsec=0.5,
+            )
+            if off.get('ok'):
+                report['method'] = 'abs_ref_2dhist'
+                report['probe'] = {
+                    'abs_arcsec': off.get('abs_arcsec'),
+                    'peak_count': off.get('peak_count'),
+                    'peak_mode': off.get('peak_mode'),
+                }
+    if not off.get('ok'):
+        off = measure_hst_sky_offset_vs_gaia(
+            anchor,
+            max_offset_arcsec=float(max_offset_arcsec),
+            min_matches=max(int(min_peak), 12),
+        )
+        if off.get('ok'):
+            report['method'] = str(off.get('method') or 'gaia_match')
+            report['probe'] = {
+                'abs_arcsec': off.get('abs_arcsec'),
+                'n_match': off.get('n_match'),
+                'peak_count': off.get('peak_count'),
+                'peak_mode': off.get('peak_mode'),
+            }
+    if not off.get('ok'):
+        report['error'] = 'no wide offset peak vs abs_ref or Gaia'
+        log.warning(
+            'Catastrophic recovery failed for %s: no 2dhist/Gaia peak '
+            'inside %.1f"',
+            anchor.name,
+            float(max_offset_arcsec),
+        )
+        return report
+    abs_as = float(off.get('abs_arcsec') or 0.0)
+    report['abs_arcsec'] = abs_as
+    report['dra_arcsec'] = float(off.get('dra_arcsec') or 0.0)
+    report['ddec_arcsec'] = float(off.get('ddec_arcsec') or 0.0)
+    if abs_as > float(max_offset_arcsec):
+        report['error'] = 'offset exceeds recover cap'
+        report['skipped_large'] = True
+        return report
+    peak = int(off.get('peak_count') or off.get('n_match') or 0)
+    if report.get('method') not in ('image_xcorr', 'smooth_peak') and peak < int(
+        min_peak
+    ):
+        report['error'] = 'weak recover peak'
+        report['skipped_weak_peak'] = True
+        return report
+    if not already_applied:
+        restore_pipeline_relative_wcs_with_common_shift(
+            live,
+            dra_deg=-float(off['dra_deg']),
+            ddec_deg=-float(off['ddec_deg']),
+        )
+    report['applied'] = True
+    log.info(
+        'Catastrophic recovery %s (%s): applied opposite of dRA=%+.3f" '
+        'dDec=%+.3f" (|Delta|=%.3f", peak=%s) on %d frame(s)',
+        anchor.name,
+        report.get('method'),
+        off.get('dra_arcsec'),
+        off.get('ddec_arcsec'),
+        abs_as,
+        peak,
+        len(live),
+    )
+    ref_path = Path(refcat).expanduser().resolve() if refcat else None
+    if ref_path is not None and ref_path.is_file():
+        for path in live:
+            # Gaia already removed the arcsecond offset; keep phot refine
+            # inside 2" so a sparse NN lock cannot walk the visit again.
+            refine_hst_narrowband_to_refcat(
+                path,
+                ref_path,
+                stages=(
+                    (2.0, 0.60),
+                    (0.5, 0.35),
+                    (0.25, 0.25),
+                    (0.15, 0.20),
+                ),
+                min_matches=8,
+            )
+    report['ok'] = True
+    return report
+
+
+def _quality_is_catastrophic(
+    quality: Mapping[str, Any] | None,
+    *,
+    peer_n_calibrators: int | None = None,
+) -> bool:
+    """True when stamp quality (phot and/or Gaia) is a wrong lock."""
+    q = quality or {}
+    # Verified galaxy-peak / image xcorr lock. Gaia NN and crowded-phot
+    # residuals on NGC 337 are not a veto (SN 2014cx F606W recovered to
+    # ~180 mas vs the hub, then Gaia NN still reported 8-10").
+    if q.get('catastrophic') is False:
+        return False
+    peak_as = q.get('image_peak_arcsec')
+    if peak_as is not None and float(peak_as) <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+        return False
+    x_as = q.get('image_residual_arcsec')
+    if x_as is not None and float(x_as) <= float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+        return False
+    if q.get('catastrophic'):
+        return True
+    disp = q.get('dispersion_mas')
+    res_as = None if disp is None else float(disp) / 1000.0
+    return is_catastrophic_alignment(
+        res_as,
+        q.get('n_calibrators'),
+        peer_n_calibrators=peer_n_calibrators,
+        gaia_residual_arcsec=q.get('gaia_residual_arcsec'),
+        n_gaia=q.get('n_gaia'),
+    )
 
 
 def finalize_hst_jhat_dir_quality(
@@ -6121,6 +7116,104 @@ def finalize_hst_jhat_dir_quality(
                 'mission': 'hst',
             }
         )
+
+    peer_n = median_healthy_n_calibrators(
+        r.get('n_calibrators') if isinstance(r.get('n_calibrators'), int) else None
+        for r in frame_rows
+    )
+    row_by_name = {str(r.get('path')): r for r in frame_rows}
+
+    cat_by_visit: dict[str, list[Path]] = defaultdict(list)
+    cat_results: list[dict] = []
+    for r in results:
+        if r.get('status') != 'ok':
+            continue
+        q = r.get('quality') or {}
+        if not _quality_is_catastrophic(q, peer_n_calibrators=peer_n):
+            continue
+        outpath = Path(r.get('outpath') or '').expanduser().resolve()
+        if not outpath.is_file():
+            continue
+        cat_by_visit[_hst_visit_key(outpath)].append(outpath)
+        cat_results.append(r)
+
+    if cat_by_visit:
+        log.warning(
+            'Attempting catastrophic WCS recovery on %d visit group(s) '
+            '(%d frame(s)); true offset may sit outside JHAT d2d_max',
+            len(cat_by_visit),
+            sum(len(v) for v in cat_by_visit.values()),
+        )
+        for visit, paths in cat_by_visit.items():
+            recov = recover_catastrophic_hst_jhat(
+                paths, abs_ref=hub, refcat=ref_phot
+            )
+            log.info(
+                'Catastrophic recovery visit=%s applied=%s method=%s '
+                '|Delta|=%.3f" ok=%s',
+                visit,
+                recov.get('applied'),
+                recov.get('method'),
+                float(recov.get('abs_arcsec') or 0.0),
+                recov.get('ok'),
+            )
+            if not recov.get('applied'):
+                continue
+            for r in cat_results:
+                p = Path(r.get('outpath') or '').expanduser().resolve()
+                if p not in paths:
+                    continue
+                stamped = stamp_hst_jhat_quality(
+                    p,
+                    refcat=ref_phot,
+                    abs_ref=hub,
+                    align_mode='VISIT_ABS',
+                    internal_max_arcsec=internal_by_path.get(p.resolve()),
+                )
+                r['quality'] = stamped
+                r['recover'] = recov
+                row = row_by_name.get(p.name)
+                if row is not None:
+                    row['n_calibrators'] = stamped.get('n_calibrators')
+                    row['dispersion_mas'] = stamped.get('dispersion_mas')
+                    row['align_mode'] = 'VISIT_ABS'
+        peer_n = median_healthy_n_calibrators(
+            r.get('n_calibrators')
+            if isinstance(r.get('n_calibrators'), int)
+            else None
+            for r in frame_rows
+        )
+
+    for r in results:
+        if r.get('status') != 'ok':
+            continue
+        q = r.get('quality') or {}
+        if not _quality_is_catastrophic(q, peer_n_calibrators=peer_n):
+            continue
+        disp = q.get('dispersion_mas')
+        n_cal = q.get('n_calibrators')
+        gaia_as = q.get('gaia_residual_arcsec')
+        q['ok'] = False
+        q['catastrophic'] = True
+        r['quality'] = q
+        r['status'] = 'failed'
+        r['error'] = (
+            'catastrophic alignment residual: '
+            f'{float(disp) if disp is not None else float("nan"):.1f} mas, '
+            f'n_cal={n_cal if n_cal is not None else "NA"}'
+            + (
+                f', Gaia={1000.0 * float(gaia_as):.1f} mas'
+                if gaia_as is not None
+                else ''
+            )
+        )
+        outpath = Path(r.get('outpath') or '')
+        log.error('Rejecting %s: %s', outpath.name or r.get('path'), r['error'])
+        if outpath.is_file():
+            stamp_quality_headers(outpath, align_mode=str(q.get('align_mode') or 'JHAT'), catastrophic=True)
+        row = row_by_name.get(outpath.name)
+        if row is not None:
+            row['status'] = 'failed'
 
     abs_vals = [
         float(r['dispersion_mas'])

@@ -35,6 +35,7 @@ class JWSTDataModel(InstrumentDataModel):
 
     telescope = 'JWST'
     dq_do_not_use = _JWST_DO_NOT_USE
+    L3_EXTENSION: str = 'i2d'
     INSTRUMENTS: tuple[str, ...] = ('NIRCAM', 'MIRI')
     DOLPHOT_BASE_PARAMS: dict[str, str] = {
         'FitSky': '2',
@@ -238,6 +239,8 @@ class JWSTDataModel(InstrumentDataModel):
                 pri.get('INSTRUME') or pri.get('INSTRUMENT') or self.instrument or ''
             ).strip().upper()
             if not force and pri.get('ST123SAN'):
+                if materialize_headers:
+                    report['headers'] = self._materialize_open_headers(hdul)
                 report['skipped'] = True
                 report['reason'] = 'already sanitized'
                 self._sanitized = True

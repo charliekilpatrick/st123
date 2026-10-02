@@ -36,14 +36,58 @@ __all__ = [
 ]
 
 
+def _obsgeo_lbh_from_xyz(xyz: Sequence[float]) -> tuple[float, float, float] | None:
+    """
+    Geodetic OBSGEO-L/B/H that wcslib/Astropy obsfix would write from XYZ.
+
+    EarthLocation WGS84 lon/lat/height differs by a few meters, which still
+    triggers ``FITSFixedWarning`` obsfix. Use a tiny dummy WCS so later
+    ``WCS(header)`` sees a consistent 6-vector.
+    """
+    import warnings
+
+    from astropy.wcs import FITSFixedWarning, WCS
+
+    tmp = fits.Header(
+        {
+            'NAXIS': 2,
+            'NAXIS1': 2,
+            'NAXIS2': 2,
+            'CRPIX1': 1.0,
+            'CRPIX2': 1.0,
+            'CRVAL1': 0.0,
+            'CRVAL2': 0.0,
+            'CDELT1': 1.0,
+            'CDELT2': 1.0,
+            'CTYPE1': 'RA---TAN',
+            'CTYPE2': 'DEC--TAN',
+            'CUNIT1': 'deg',
+            'CUNIT2': 'deg',
+            'OBSGEO-X': float(xyz[0]),
+            'OBSGEO-Y': float(xyz[1]),
+            'OBSGEO-Z': float(xyz[2]),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FITSFixedWarning)
+        wcs_obj = WCS(tmp, relax=True, naxis=2)
+    og = getattr(getattr(wcs_obj, 'wcs', None), 'obsgeo', None)
+    if og is None or len(og) < 6:
+        return None
+    lon, lat, alt = float(og[3]), float(og[4]), float(og[5])
+    if not all(np.isfinite(v) for v in (lon, lat, alt)):
+        return None
+    return lon, lat, alt
+
+
 def materialize_fits_wcs_keywords(header: fits.Header) -> dict[str, Any]:
     """
     Write derived DATE-* / OBSGEO-L/B/H cards that Astropy otherwise invents.
 
     JWST SCI headers often store ``MJD-*`` and ``OBSGEO-[XYZ]``. Opening a WCS
     then emits ``FITSFixedWarning`` ``datfix`` / ``obsfix`` on every read.
-    Materializing the derived keywords once silences those warnings without
-    changing the sky WCS.
+    Materializing the derived keywords once with wcslib-consistent L/B/H
+    silences those warnings without changing the sky WCS.
 
     Returns a small report of cards written.
     """
@@ -70,36 +114,44 @@ def materialize_fits_wcs_keywords(header: fits.Header) -> dict[str, Any]:
         except Exception:
             continue
 
-    need_lbh = any(
-        k not in header or header.get(k) is None
-        for k in ('OBSGEO-L', 'OBSGEO-B', 'OBSGEO-H')
-    )
-    if need_lbh and all(k in header for k in ('OBSGEO-X', 'OBSGEO-Y', 'OBSGEO-Z')):
+    if all(k in header for k in ('OBSGEO-X', 'OBSGEO-Y', 'OBSGEO-Z')):
         try:
-            import warnings
-
-            from astropy.wcs import FITSFixedWarning, WCS
-
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', FITSFixedWarning)
-                wcs_obj = WCS(header, relax=True, naxis=2)
-            og = getattr(wcs_obj.wcs, 'obsgeo', None)
-            if og is not None and len(og) >= 6 and all(
-                np.isfinite(float(og[i])) for i in range(6)
-            ):
-                header['OBSGEO-L'] = (
-                    float(og[3]),
-                    '[deg] lon from OBSGEO-XYZ (st123)',
-                )
-                header['OBSGEO-B'] = (
-                    float(og[4]),
-                    '[deg] lat from OBSGEO-XYZ (st123)',
-                )
-                header['OBSGEO-H'] = (
-                    float(og[5]),
-                    '[m] height from OBSGEO-XYZ (st123)',
-                )
-                written['obsgeo'] = ['OBSGEO-L', 'OBSGEO-B', 'OBSGEO-H']
+            xyz = [
+                float(header['OBSGEO-X']),
+                float(header['OBSGEO-Y']),
+                float(header['OBSGEO-Z']),
+            ]
+            if all(np.isfinite(v) for v in xyz) and any(v != 0.0 for v in xyz):
+                lbh = _obsgeo_lbh_from_xyz(xyz)
+                if lbh is not None:
+                    lon, lat, alt = lbh
+                    current = []
+                    for key in ('OBSGEO-L', 'OBSGEO-B', 'OBSGEO-H'):
+                        if key not in header or header.get(key) is None:
+                            current.append(None)
+                        else:
+                            current.append(float(header[key]))
+                    # Replace missing cards or WGS84 values that still obsfix.
+                    mismatch = (
+                        any(v is None for v in current)
+                        or abs(current[0] - lon) > 1.0e-8
+                        or abs(current[1] - lat) > 1.0e-8
+                        or abs(current[2] - alt) > 0.05
+                    )
+                    if mismatch:
+                        header['OBSGEO-L'] = (
+                            lon,
+                            '[deg] lon from OBSGEO-XYZ (st123)',
+                        )
+                        header['OBSGEO-B'] = (
+                            lat,
+                            '[deg] lat from OBSGEO-XYZ (st123)',
+                        )
+                        header['OBSGEO-H'] = (
+                            alt,
+                            '[m] height from OBSGEO-XYZ (st123)',
+                        )
+                        written['obsgeo'] = ['OBSGEO-L', 'OBSGEO-B', 'OBSGEO-H']
         except Exception:
             pass
 
@@ -281,6 +333,20 @@ def _select_class(path: PathLike, ident: FileIdentity) -> type[InstrumentDataMod
     return InstrumentDataModel
 
 
+# Forced L3 coadd: coadd_{group}_{ref}_{instrument}_{filter}_{extension}.fits
+# Optional visit token: coadd_{group}_{ref}_{instrument}_{filter}_{visit}_{extension}.fits
+_L3_COADD_RE = re.compile(
+    r'^coadd_(?P<group>[^_]+)_(?P<ref>[^_]+)_(?P<instrument>[^_]+)_'
+    r'(?P<filter>[a-z0-9]+)(?:_(?P<visit>[^_]+))?_'
+    r'(?P<extension>i2d|drc|drz)\.fits$',
+    re.IGNORECASE,
+)
+_L3_COADD_LEGACY_JWST_RE = re.compile(
+    r'^coadd_(?P<group>[^_]+)_(?P<ref>[^_]+)_(?P<filter>[a-z0-9]+)_i2d\.fits$',
+    re.IGNORECASE,
+)
+
+
 def open_datamodel(path: PathLike) -> InstrumentDataModel:
     """Construct the most specific datamodel for *path*."""
     ident = read_file_identity(path)
@@ -380,6 +446,12 @@ class InstrumentDataModel:
     CALCSKY_PARAMS: dict[str, float] = {}
     # Pivot / center wavelength (microns) keyed by uppercase FILTER name.
     FILTER_WAVELENGTH_UM: dict[str, float] = {}
+    # Forced L3 product name:
+    #   coadd_{group}_{ref}_{instrument}_{filter}_{extension}.fits
+    L3_COADD_TEMPLATE: str = (
+        'coadd_{group}_{ref}_{instrument}_{filter}_{extension}.fits'
+    )
+    L3_EXTENSION: str = 'i2d'
 
     def __init__(
         self,
@@ -406,6 +478,172 @@ class InstrumentDataModel:
         for sub in cls.__subclasses__():
             names |= sub.all_filters()
         return frozenset(names)
+
+    @classmethod
+    def l3_instrument_token(cls) -> str:
+        """Lowercase instrument token used in L3 coadd names (``nircam``, ``wfc3``)."""
+        raw = (cls.instrument or '').strip().lower().replace(' ', '').split('_')[0]
+        if raw in {'nrc', 'nircam'}:
+            return 'nircam'
+        if not raw:
+            raise ValueError(
+                f'{cls.__name__} has no instrument token for L3 coadd names'
+            )
+        return raw
+
+    @classmethod
+    def l3_coadd_basename(
+        cls,
+        group: int | str,
+        ref: int | str,
+        filter_name: str,
+        *,
+        extension: str | None = None,
+        visit: str | None = None,
+    ) -> str:
+        """
+        Forced L3 product basename.
+
+        Pattern (always)::
+
+            coadd_{group}_{ref}_{instrument}_{filter}_{extension}.fits
+
+        Optional *visit* inserts one extra token before the extension (HST
+        per-visit drizzle only). *extension* defaults to :attr:`L3_EXTENSION`
+        (``i2d`` / ``drc`` / ``drz``).
+        """
+        inst = cls.l3_instrument_token()
+        filt = str(filter_name).lower().replace(' ', '')
+        if not filt:
+            raise ValueError('L3 coadd name requires a filter')
+        ext = str(extension or cls.L3_EXTENSION).lower().replace('.fits', '').lstrip('_')
+        if not ext:
+            raise ValueError(f'{cls.__name__} has empty L3_EXTENSION')
+        if visit:
+            vid = str(visit).lower().replace(' ', '')
+            return f'coadd_{group}_{ref}_{inst}_{filt}_{vid}_{ext}.fits'
+        return cls.L3_COADD_TEMPLATE.format(
+            group=group,
+            ref=ref,
+            instrument=inst,
+            filter=filt,
+            extension=ext,
+        )
+
+    @classmethod
+    def l3_coadd_glob(
+        cls,
+        *,
+        group: str = '*',
+        ref: str = '*',
+        filter_name: str = '*',
+        extension: str | None = None,
+    ) -> str:
+        """Glob for this instrument's L3 coadds (same token order as the basename)."""
+        inst = cls.l3_instrument_token()
+        ext = str(extension or cls.L3_EXTENSION).lower().replace('.fits', '').lstrip('_')
+        filt = (
+            '*'
+            if filter_name == '*'
+            else str(filter_name).lower().replace(' ', '')
+        )
+        return cls.L3_COADD_TEMPLATE.format(
+            group=group,
+            ref=ref,
+            instrument=inst,
+            filter=filt,
+            extension=ext,
+        )
+
+    @classmethod
+    def parse_l3_coadd_name(cls, name: str) -> dict[str, str | None] | None:
+        """
+        Parse an L3 coadd basename into group / ref / instrument / filter / ext.
+
+        Understands the forced template and legacy JWST names that omitted
+        the instrument token (``coadd_{group}_{ref}_{filter}_i2d.fits``).
+        """
+        text = Path(name).name
+        match = _L3_COADD_RE.match(text)
+        if match:
+            out = {
+                key: (val.lower() if val else None)
+                for key, val in match.groupdict().items()
+            }
+            return out
+        match = _L3_COADD_LEGACY_JWST_RE.match(text)
+        if match:
+            return {
+                'group': match.group('group').lower(),
+                'ref': match.group('ref').lower(),
+                'instrument': None,
+                'filter': match.group('filter').lower(),
+                'visit': None,
+                'extension': 'i2d',
+            }
+        return None
+
+    @classmethod
+    def class_for_l3(
+        cls,
+        instrument: str | None = None,
+        *,
+        filter_name: str | None = None,
+        detector: str | None = None,
+        path: PathLike | None = None,
+    ) -> type[InstrumentDataModel]:
+        """Return the datamodel class that owns L3 names for *instrument*."""
+        from st123.datamodels.euclid.nir import EuclidNIRDataModel
+        from st123.datamodels.euclid.vis import EuclidVISDataModel
+        from st123.datamodels.hst.acs import ACSDataModel
+        from st123.datamodels.hst.wfc3_ir import WFC3IRDataModel
+        from st123.datamodels.hst.wfc3_uvis import WFC3UVISDataModel
+        from st123.datamodels.hst.wfpc2 import WFPC2DataModel
+        from st123.datamodels.jwst.miri import MIRIDataModel
+        from st123.datamodels.jwst.nircam import NIRCamDataModel
+        from st123.datamodels.roman.wfi import RomanWFIDataModel
+
+        if path is not None:
+            return type(open_datamodel(path))
+
+        inst = str(instrument or '').strip()
+        det = str(detector or '').strip().upper()
+        filt = str(filter_name or '').strip().upper()
+        inst_u = inst.upper().replace(' ', '')
+
+        if MIRIDataModel.matches(inst):
+            return MIRIDataModel
+        if NIRCamDataModel.matches(inst):
+            return NIRCamDataModel
+        if 'WFPC2' in inst_u:
+            return WFPC2DataModel
+        if inst_u.split('/')[0].split('_')[0] == 'ACS':
+            return ACSDataModel
+        if 'WFC3' in inst_u:
+            if det == 'IR' or det.startswith('IR') or (
+                filt and filt in WFC3IRDataModel.FILTERS
+            ):
+                return WFC3IRDataModel
+            return WFC3UVISDataModel
+        if RomanWFIDataModel.matches(inst):
+            return RomanWFIDataModel
+        if EuclidNIRDataModel.matches(inst):
+            return EuclidNIRDataModel
+        if EuclidVISDataModel.matches(inst) or inst_u in {'EUCLID', 'VIS'}:
+            return EuclidVISDataModel
+
+        if filt:
+            if filt in MIRIDataModel.FILTERS:
+                return MIRIDataModel
+            if filt in NIRCamDataModel.FILTERS:
+                return NIRCamDataModel
+            if filt in WFC3IRDataModel.FILTERS and filt not in WFC3UVISDataModel.FILTERS:
+                return WFC3IRDataModel
+
+        raise ValueError(
+            f'Cannot resolve L3 datamodel for instrument={instrument!r} '
+            f'filter={filter_name!r}'
+        )
 
     @classmethod
     def from_path(
@@ -568,7 +806,11 @@ class InstrumentDataModel:
 
     @property
     def filter_name(self) -> str:
-        """Lowercase bandpass (``FILTNAM1`` / ``FILTER`` / ``FILTER1``+``FILTER2`` / ``PHOTMODE``)."""
+        """Lowercase science bandpass (``FILTNAM1`` / ``FILTER`` / ``FILTER1``+``FILTER2`` / ``PHOTMODE``).
+
+        NIRCam overrides this to prefer a photometric ``PUPIL`` wheel
+        element over a blocking ``FILTER`` keyword.
+        """
         with self.open() as hdul:
             if not hdul:
                 raise KeyError(f'No filter keyword found in {self.path}')
@@ -843,6 +1085,30 @@ class InstrumentDataModel:
         )
 
     @property
+    def mjd(self) -> float | None:
+        """
+        Representative observation MJD.
+
+        Prefers ``MJD-AVG``, then ``MJD-OBS`` / ``EXPSTART`` / ``MJD-BEG``.
+        Values ``<= 0`` are ignored (DOLPHOT ``.info`` often writes 0 for
+        JWST). Falls back to :attr:`obs_datetime`.
+        """
+        for key in ('MJD-AVG', 'MJD-OBS', 'EXPSTART', 'MJD-BEG'):
+            val = self.keyword(key)
+            if val is None or str(val).strip() == '':
+                continue
+            try:
+                mjd = float(val)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(mjd) and mjd > 0.0:
+                return mjd
+        try:
+            return float(Time(self.obs_datetime).mjd)
+        except Exception:
+            return None
+
+    @property
     def pupil(self) -> str:
         """``PUPIL`` wheel, or ``CLEAR`` when the keyword is absent."""
         val = self.keyword('PUPIL')
@@ -958,6 +1224,7 @@ class InstrumentDataModel:
 
     def _materialize_open_headers(self, hdul: fits.HDUList) -> dict[str, Any]:
         hdr_report: dict[str, Any] = {}
+        lbh_src = None
         for hdu in hdul:
             if hdu.header is None:
                 continue
@@ -977,6 +1244,43 @@ class InstrumentDataModel:
             wrote = materialize_fits_wcs_keywords(hdr)
             if wrote.get('date') or wrote.get('obsgeo'):
                 hdr_report[str(hdu.name or 'PRIMARY')] = wrote
+            if all(
+                k in hdr and hdr.get(k) is not None
+                for k in ('OBSGEO-L', 'OBSGEO-B', 'OBSGEO-H')
+            ):
+                lbh_src = hdr
+        # Image HDUs with INHERIT often omit geodetic cards; copy XYZ+L/B/H
+        # from the donor so later WCS() on SCI does not re-run obsfix.
+        if lbh_src is not None:
+            geo_keys = (
+                'OBSGEO-X',
+                'OBSGEO-Y',
+                'OBSGEO-Z',
+                'OBSGEO-L',
+                'OBSGEO-B',
+                'OBSGEO-H',
+            )
+            for hdu in hdul:
+                if hdu.header is None:
+                    continue
+                hdr = hdu.header
+                name = str(getattr(hdu, 'name', '') or '').upper()
+                if name not in {'PRIMARY', 'SCI'} and not (
+                    name == '' and hdu is hdul[0]
+                ):
+                    continue
+                copied: list[str] = []
+                for key in geo_keys:
+                    if key not in lbh_src:
+                        continue
+                    if key not in hdr or hdr.get(key) is None:
+                        hdr[key] = lbh_src[key]
+                        copied.append(key)
+                if copied:
+                    slot = hdr_report.setdefault(str(hdu.name or 'PRIMARY'), {})
+                    slot['obsgeo'] = list(
+                        dict.fromkeys(list(slot.get('obsgeo') or []) + copied)
+                    )
         return hdr_report
 
     def _open_update(self, report: dict[str, Any]) -> fits.HDUList | None:
@@ -1026,6 +1330,8 @@ class InstrumentDataModel:
             return report
         try:
             if not force and hdul[0].header.get('ST123SAN'):
+                if materialize_headers:
+                    report['headers'] = self._materialize_open_headers(hdul)
                 report['skipped'] = True
                 report['reason'] = 'already sanitized'
                 self._sanitized = True

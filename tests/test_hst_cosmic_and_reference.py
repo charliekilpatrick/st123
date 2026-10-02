@@ -37,10 +37,17 @@ def _wcs_header(nx: int = 64, ny: int = 64) -> fits.Header:
 
 def test_hst_settings_cr_and_bits():
     assert WFPC2DataModel.DRIZ_BITS == 1032
-    assert WFC3UVISDataModel.DRIZ_BITS == 96
+    assert WFC3UVISDataModel.DRIZ_BITS == 112
+    assert ACSDataModel.DRIZ_BITS == 112
     assert ACSDataModel.CRPARS['rdnoise'] == 6.5
     assert 'rdnoise' in WFPC2DataModel.CRPARS
     assert HSTDataModel.CR_DQ_BIT == 4096
+    assert HSTDataModel.HOT_DQ_BIT == 16
+    assert HSTDataModel.L3_DQ_NO_DATA == 1
+    assert HSTDataModel.L3_DQ_INPAINT == 2
+    assert HSTDataModel.L3_DQ_UNRELIABLE == 4
+    assert ACSDataModel.DRIZ_BITS & HSTDataModel.HOT_DQ_BIT
+    assert WFC3UVISDataModel.DRIZ_BITS & HSTDataModel.HOT_DQ_BIT
 
 
 def test_wfpc2_c1m_path_and_companion(tmp_path: Path):

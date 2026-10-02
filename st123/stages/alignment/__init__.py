@@ -21,6 +21,7 @@ __all__ = [
     'HST_INTERNAL_ALIGN_MAX_ARCSEC',
     'HST_L3_ALIGN_MAX_ARCSEC',
     'FRAME_ABS_TOL_ARCSEC',
+    'FRAME_CATASTROPHIC_TOL_ARCSEC',
     'FRAME_INTERNAL_TOL_ARCSEC',
     'FRAME_SPARSE_TOL_ARCSEC',
     'align_hst_image',
@@ -100,9 +101,12 @@ _HST_EXPORTS = frozenset(
 _FRAME_QA_EXPORTS = frozenset(
     {
         'FRAME_ABS_TOL_ARCSEC',
+        'FRAME_CATASTROPHIC_TOL_ARCSEC',
         'FRAME_INTERNAL_TOL_ARCSEC',
         'FRAME_SPARSE_TOL_ARCSEC',
         'build_frame_qa',
+        'filter_catastrophic_jhat_frames',
+        'is_catastrophic_alignment',
         'read_frame_qa',
         'stamp_quality_headers',
         'write_frame_qa',

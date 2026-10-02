@@ -442,6 +442,7 @@ def run_hst_visit_alignment(
     from st123.stages.alignment.hst_reference import (
         ensure_preliminary_level3s,
         pick_best_level3,
+        unanchored_l3_filters,
     )
 
     if base_dir is None:
@@ -495,6 +496,7 @@ def run_hst_visit_alignment(
 
     ref_phot = None
     best_l3 = None
+    unanchored_filters: set[str] = set()
     if not skip_prelim_l3:
         try:
             logger.info(
@@ -572,6 +574,13 @@ def run_hst_visit_alignment(
                         exc,
                     )
             best_l3, scores = pick_best_level3(candidates=l3_candidates)
+            unanchored_filters = unanchored_l3_filters(scores)
+            if unanchored_filters:
+                logger.warning(
+                    'Prelim L3 has Gaia in FOV but 0 detections for %s; '
+                    'JHAT will use d2d_max=5" on those filters',
+                    sorted(unanchored_filters),
+                )
             if best_l3 is not None:
                 # Keep L3 JHAT products out of reduction/jhat science globs.
                 l3_outdir = jhat_dir / 'l3_ref'
@@ -703,6 +712,7 @@ def run_hst_visit_alignment(
         jhat_params=sci_params,
         instruments=instruments,
         workers=max(1, int(ncores)),
+        unanchored_filters=sorted(unanchored_filters),
     )
     # Attach reference metadata to the summary.
     for row in results:

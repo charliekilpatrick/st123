@@ -287,6 +287,20 @@ def sanitize_dolphot_wcs(path: PathLike, *, fit_inverse: bool = False) -> bool:
     return True
 
 
+_IMAGE_HDU_CARDS = frozenset({
+    'XTENSION',
+    'PCOUNT',
+    'GCOUNT',
+    'TFIELDS',
+    'INHERIT',
+    'EXTNAME',
+    'EXTVER',
+    'EXTLEVEL',
+    'CHECKSUM',
+    'DATASUM',
+})
+
+
 def flatten_dolphot_fits(path: PathLike) -> bool:
     """
     Rewrite a FITS file as a single-extension image (data in PRIMARY).
@@ -297,6 +311,8 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
     ``Number of extensions are not the same``. Returns True when a rewrite
     was performed.
 
+    Opens with ``fits.open`` (not :func:`as_datamodel`) so a wfc3mask SCI
+    header missing ``PCOUNT`` cannot abort via datamodel sanitize/verify.
     Writes via a temp file + :func:`os.replace` so hardlinked staged copies
     (warmstart) do not mutate the shared NIRCam/MIRI source inode.
     """
@@ -304,7 +320,7 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
     import tempfile
 
     p = Path(path)
-    with as_datamodel(p).open(mode='readonly') as hdul:
+    with fits.open(p, mode='readonly', memmap=True) as hdul:
         if len(hdul) == 1 and hdul[0].data is not None and hdul[0].data.ndim >= 2:
             return False
         sci_hdu = None
@@ -328,6 +344,9 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
             except Exception:
                 continue
         data = sci_hdu.data.copy()
+    for key in list(hdr.keys()):
+        if str(key).upper() in _IMAGE_HDU_CARDS:
+            del hdr[key]
     fd, tmp_name = tempfile.mkstemp(
         prefix=f'.{p.name}.',
         suffix='.flatten_tmp',
@@ -336,7 +355,9 @@ def flatten_dolphot_fits(path: PathLike) -> bool:
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        fits.PrimaryHDU(data=data, header=hdr).writeto(tmp, overwrite=True)
+        fits.PrimaryHDU(data=data, header=hdr).writeto(
+            tmp, overwrite=True, output_verify='silentfix'
+        )
         os.replace(tmp, p)
     except Exception:
         if tmp.is_file():
@@ -650,11 +671,23 @@ def dolphot_bin_dir(
     return resolved
 
 
+def _is_photometry_sidecar_fits(name: str) -> bool:
+    """True for calcsky / DOLPHOT byproduct FITS that must not be remasked."""
+    low = name.lower()
+    if low.endswith('.sky.fits'):
+        return True
+    # ``phot_0_sn.phot.57.res.fits``, ``.psf.fits``, per-image DOLPHOT copies.
+    if '.phot.' in low:
+        return True
+    return False
+
+
 def science_fits_paths(directory: PathLike) -> list[str]:
     """
     Return sorted science ``*.fits`` paths under a directory.
 
-    ``*.sky.fits`` calcsky products are excluded because they must not be
+    ``*.sky.fits`` calcsky products and DOLPHOT catalog sidecars
+    (``*.phot.*.fits`` residuals / PSFs) are excluded because they must not be
     passed to ``nircammask`` / ``mirimask`` / ``calcsky``.
 
     Parameters
@@ -666,13 +699,13 @@ def science_fits_paths(directory: PathLike) -> list[str]:
     -------
     list of str
         Sorted absolute or relative FITS paths (as strings) excluding
-        ``*.sky.fits`` sidecars.
+        ``*.sky.fits`` sidecars and DOLPHOT phot byproducts.
     """
     root = Path(directory)
     return sorted(
         str(path)
         for path in root.glob('*.fits')
-        if not path.name.endswith('.sky.fits')
+        if not _is_photometry_sidecar_fits(path.name)
     )
 
 
@@ -808,7 +841,8 @@ def resolve_coadd_ref(
         Mosaic box directory (``reference/group_*/ref_*``).
     ref_filter : str or None, optional
         Filter name (e.g. ``'F560W'``). When set, prefer
-        ``coadd_*_<filter>_i2d.fits`` (case-insensitive).
+        ``coadd_*_<filter>_i2d.fits`` / ``coadd_*_{nircam|miri}_<filter>_i2d.fits``
+        (case-insensitive).
     fallback : str or os.PathLike or None, optional
         Path returned when *ref_filter* is ``None`` or no matching coadd exists.
 
@@ -1152,7 +1186,11 @@ def prepare_mosaic_phot_job(
         global_params=global_params,
         phot_out=phot_out,
     )
-    work = [Path(p) for p in science_fits_paths(job.phot_outdir)]
+    if copy_files:
+        work = [job.phot_outdir / Path(job.refimage).name]
+        work.extend(job.phot_outdir / Path(p).name for p in job.frames)
+    else:
+        work = [Path(job.refimage), *[Path(p) for p in job.frames]]
     prepare_frames(
         work,
         instrument=inst,
@@ -2079,7 +2117,7 @@ def prepare_hst_frames(
             _flatten_dolphot_ref_and_sky(staged_ref)
         except Exception as exc:
             logger.warning(
-                'Flatten reference %s for DOLPHOT failed: %s',
+                'Flatten reference %s for DOLPHOT failed: %r',
                 staged_ref.name,
                 exc,
             )
@@ -2109,7 +2147,7 @@ def prepare_hst_frames(
                     remap_xyt_extension(xyt_path, 0)
         except Exception as exc:
             logger.warning(
-                'Flatten JWST reference %s for DOLPHOT failed: %s',
+                'Flatten JWST reference %s for DOLPHOT failed: %r',
                 staged_ref.name,
                 exc,
             )
@@ -2267,9 +2305,9 @@ def setup_paramfile(
         Reference / coadd FITS path.
     files : sequence of str or os.PathLike
         Science FITS paths to include after the reference.
-    copy_files : bool, optional
-        If True (default), copy *refimage* and *files* into *phot_outdir*
-        before writing the parameter file.
+    When *copy_files* is True, *phot_outdir* is replaced so leftover products
+    from a previous DOLPHOT run are not remasked.
+
     global_params : dict or None, optional
         Global DOLPHOT keywords forwarded to :func:`write_paramfile`.
     xytfile : str or os.PathLike or None, optional
@@ -2295,6 +2333,10 @@ def setup_paramfile(
     )
 
     outdir = Path(phot_outdir)
+    if copy_files and outdir.exists():
+        # Drop a previous phot run (legacy coadds, ``*.phot.*.fits`` residuals)
+        # so nircammask / calcsky only see the frames staged for this prep.
+        shutil.rmtree(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     if copy_files:

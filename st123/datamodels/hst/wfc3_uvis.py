@@ -40,7 +40,9 @@ class WFC3UVISDataModel(HSTDataModel):
         'sigma_low': 2.25,
         'sigma_high': 2.00,
     }
-    DRIZ_BITS: int = 96
+    # 16 (hot) + 32 (warm) + 64 (warm/CTE). drizzle_filter_group drops bit 16;
+    # fill inpaints remaining hot-pixel holes (see ACS DRIZ_BITS).
+    DRIZ_BITS: int = 112
     CRPARS: dict[str, float] = {
         'rdnoise': 6.5,
         'gain': 1.0,

@@ -83,6 +83,10 @@ def test_sanitize_jwst_l2_fills_nonfinite_and_materializes_headers(tmp_path: Pat
         assert 'OBSGEO-L' in hdr
         assert 'OBSGEO-B' in hdr
         assert 'OBSGEO-H' in hdr
+        pri = hdul[0].header
+        assert 'OBSGEO-L' in pri
+        assert 'OBSGEO-B' in pri
+        assert 'OBSGEO-H' in pri
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')

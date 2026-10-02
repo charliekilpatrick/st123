@@ -200,6 +200,32 @@ def test_get_module_miri_and_nircam_without_module(tmp_path: Path):
     assert helpers.get_module(str(nrc)) == 'b'
 
 
+def test_get_filter_prefers_nircam_pupil_bandpass(tmp_path: Path):
+    dual = _write_jwst_cal(
+        tmp_path / 'nrcblong_dual.fits',
+        filt='F444W',
+        detector='NRCBLONG',
+        pupil='F405N',
+    )
+    assert helpers.get_filter(str(dual)) == 'f405n'
+
+    sw_dual = _write_jwst_cal(
+        tmp_path / 'nrcb1_f164n.fits',
+        filt='F150W2',
+        detector='NRCB1',
+        pupil='F164N',
+    )
+    assert helpers.get_filter(str(sw_dual)) == 'f164n'
+
+    wide = _write_jwst_cal(
+        tmp_path / 'nrcblong_f444w.fits',
+        filt='F444W',
+        detector='NRCBLONG',
+        pupil='CLEAR',
+    )
+    assert helpers.get_filter(str(wide)) == 'f444w'
+
+
 def test_get_filter_falls_back_to_filter2(tmp_path: Path):
     path = tmp_path / 'filt2.fits'
     primary = fits.PrimaryHDU()

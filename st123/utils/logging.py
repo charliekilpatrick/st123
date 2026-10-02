@@ -52,6 +52,7 @@ COLORS = {
 PACKAGE_LOGGER_NAME = 'st123'
 EXTERNAL_LOGGER_NAME = f'{PACKAGE_LOGGER_NAME}.external'
 LOG_FILE_ENV = 'ST123_LOG_FILE'
+LOG_START_ENV = 'ST123_LOG_START'
 _QUIET_THIRD_PARTY = (
     'stpipe',
     'jwst',
@@ -532,6 +533,7 @@ def setup_script_logging(
     configure_runtime_warnings()
 
     os.environ[LOG_FILE_ENV] = str(log_path)
+    os.environ[LOG_START_ENV] = str(time.time())
     package_logger.info('Logging to %s', log_path)
     return log_path
 
@@ -540,6 +542,7 @@ def shutdown_logging() -> None:
     """
     Flush and close handlers attached to the ``st123`` logger.
 
+    Writes ``ELAPSED_SEC`` when :func:`setup_script_logging` started a timer.
     Clears :data:`LOG_FILE_ENV` from the environment.
 
     Returns
@@ -547,5 +550,12 @@ def shutdown_logging() -> None:
     None
     """
     package_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
+    raw_start = os.environ.pop(LOG_START_ENV, None)
+    try:
+        start = float(raw_start) if raw_start else None
+    except (TypeError, ValueError):
+        start = None
+    if start is not None:
+        package_logger.info('ELAPSED_SEC=%.2f', time.time() - start)
     _clear_handlers(package_logger)
     os.environ.pop(LOG_FILE_ENV, None)

@@ -257,7 +257,8 @@ PY
 Layout: `$PROJ/download/HST/.../<obsid>/<filename>`,
 `$PROJ/reduction/{raw,jhat_hst,reference/group_*/ref_*}/`, `$PROJ/dolphot/hst_G_B/`.
 HST and JWST mosaics share the same `group_*/ref_*` boxes; each box may hold
-both `coadd_*_i2d.fits` (JWST) and `coadd_*_{acs|wfc3}_*_{drc|drz}.fits` (HST).
+both `coadd_*_{nircam|miri}_*_i2d.fits` (JWST) and
+`coadd_*_{acs|wfc3|wfpc2}_*_{drc|drz}.fits` (HST).
 
 ### HST warmstart from NIRCam
 

@@ -284,3 +284,101 @@ def test_visit_cross_filter_applies_to_all_frames(tmp_path: Path):
         'ieec43abq_jhat.fits',
         'ieec43acq_jhat.fits',
     }
+
+
+def _sci_jhat(path: Path) -> Path:
+    pri = fits.PrimaryHDU(
+        header=fits.Header(
+            {
+                'TELESCOP': 'HST',
+                'INSTRUME': 'WFPC2',
+                'FILTNAM1': 'F606W',
+                'EXPTIME': 500.0,
+            }
+        )
+    )
+    hdr = fits.Header(
+        {
+            'CRVAL1': 159.69,
+            'CRVAL2': 53.50,
+            'CRPIX1': 10.0,
+            'CRPIX2': 10.0,
+            'CD1_1': -1.0e-5,
+            'CD1_2': 0.0,
+            'CD2_1': 0.0,
+            'CD2_2': 1.0e-5,
+            'CTYPE1': 'RA---TAN',
+            'CTYPE2': 'DEC--TAN',
+            'CUNIT1': 'deg',
+            'CUNIT2': 'deg',
+        }
+    )
+    sci = np.ones((20, 20), dtype=np.float32)
+    fits.HDUList(
+        [pri, fits.ImageHDU(sci, header=hdr, name='SCI')]
+    ).writeto(path)
+    return path
+
+
+def test_visit_abs_retie_applies_arcsecond_2dhist(tmp_path: Path):
+    """WFPC2 ~1 arcsec pipeline WCS must not be discarded by the JWST 0.40 cap."""
+    from st123.stages.alignment.hst_jhat import apply_common_abs_shift_vs_ref
+
+    jhat = _sci_jhat(tmp_path / 'u2e67q01t_jhat.fits')
+    abs_ref = tmp_path / 'coadd_wfc3_f625w_drc.fits'
+    abs_ref.write_bytes(b'')
+    fake = {
+        'ok': True,
+        'dra_deg': -0.28 / 3600.0,
+        'ddec_deg': 0.75 / 3600.0,
+        'dra_arcsec': -0.28,
+        'ddec_arcsec': 0.75,
+        'abs_arcsec': 0.795,
+        'peak_count': 40,
+        'n_match': 40,
+    }
+    with patch(
+        'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+        return_value=fake,
+    ):
+        report = apply_common_abs_shift_vs_ref([jhat], abs_ref)
+    assert report['ok'] is True
+    assert report['applied'] is True
+    assert report.get('skipped_large') is not True
+    assert report.get('method') == 'abs_ref_2dhist'
+    with fits.open(jhat) as hdul:
+        # Applied opposite of img-ref, so CRVAL2 decreases.
+        assert hdul['SCI'].header['CRVAL2'] < 53.50
+
+
+def test_visit_abs_retie_gaia_keeps_jwst_apply_cap(tmp_path: Path):
+    """Gaia fallback still refuses large shifts (false catalog peaks)."""
+    from st123.stages.alignment.hst_jhat import apply_common_abs_shift_vs_ref
+
+    jhat = _sci_jhat(tmp_path / 'u2e67q01t_jhat.fits')
+    fake_gaia = {
+        'ok': True,
+        'dra_deg': -0.28 / 3600.0,
+        'ddec_deg': 0.75 / 3600.0,
+        'dra_arcsec': -0.28,
+        'ddec_arcsec': 0.75,
+        'abs_arcsec': 0.795,
+        'n_match': 20,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value={'ok': False},
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_vs_gaia',
+            return_value=fake_gaia,
+        ),
+    ):
+        report = apply_common_abs_shift_vs_ref(
+            [jhat], None, allow_gaia_fallback=True
+        )
+    assert report['ok'] is True
+    assert report['applied'] is False
+    assert report.get('skipped_large') is True
+    assert report.get('method') == 'gaia_match'

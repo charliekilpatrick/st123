@@ -109,7 +109,10 @@ def test_full_group_naming_helpers():
     assert mosaic_box_dirname(FULL_GROUP_LABEL) == 'ref_full'
     assert mosaic_box_dirname(0) == 'ref_0'
     assert mosaic_coadd_basename(1, FULL_GROUP_LABEL, 'F770W') == (
-        'coadd_1_full_f770w_i2d.fits'
+        'coadd_1_full_miri_f770w_i2d.fits'
+    )
+    assert mosaic_coadd_basename(0, 'sn', 'F150W', instrument='NIRCAM') == (
+        'coadd_0_sn_nircam_f150w_i2d.fits'
     )
     assert mosaic_hst_coadd_basename(0, 5, 'ACS', 'F660N') == (
         'coadd_0_5_acs_f660n_drc.fits'
@@ -118,8 +121,38 @@ def test_full_group_naming_helpers():
         0, 5, 'WFC3', 'F814W', visit='iejn62'
     ) == 'coadd_0_5_wfc3_f814w_iejn62_drc.fits'
     assert mosaic_hst_coadd_basename(
-        1, 'full', 'WFPC2', 'F814W', suffix='drz'
+        1, 'full', 'WFPC2', 'F814W'
     ) == 'coadd_1_full_wfpc2_f814w_drz.fits'
+    assert mosaic_hst_coadd_basename(0, 0, 'WFC3', 'F160W') == (
+        'coadd_0_0_wfc3_f160w_drz.fits'
+    )
+
+
+def test_jwst_coadd_name_regex_new_and_legacy():
+    from st123.datamodels import InstrumentDataModel, NIRCamDataModel
+
+    parsed = InstrumentDataModel.parse_l3_coadd_name(
+        'coadd_0_sn_nircam_f150w2_i2d.fits'
+    )
+    assert parsed is not None
+    assert parsed['instrument'] == 'nircam'
+    assert parsed['filter'] == 'f150w2'
+    assert parsed['extension'] == 'i2d'
+    miri = InstrumentDataModel.parse_l3_coadd_name(
+        'coadd_1_full_miri_f770w_i2d.fits'
+    )
+    assert miri is not None and miri['instrument'] == 'miri'
+    legacy = InstrumentDataModel.parse_l3_coadd_name('coadd_0_sn_f200w_i2d.fits')
+    assert legacy is not None
+    assert legacy['instrument'] is None
+    assert legacy['filter'] == 'f200w'
+    hst = InstrumentDataModel.parse_l3_coadd_name(
+        'coadd_0_sn_wfc3_f625w_drc.fits'
+    )
+    assert hst is not None
+    assert hst['instrument'] == 'wfc3'
+    assert hst['extension'] == 'drc'
+    assert NIRCamDataModel.l3_coadd_glob() == 'coadd_*_*_nircam_*_i2d.fits'
 
 
 def test_split_observations_as_full_group():
@@ -328,7 +361,7 @@ def test_resolve_existing_box_path_under_reference(tmp_path: Path):
 
 
 def test_resolve_coverage_sky_implied_by_center_and_existing_box():
-    """Custom stamps / existing-box imply coverage without --require-coverage."""
+    """Custom stamps imply coverage; existing-box overlap does not."""
     from types import SimpleNamespace
 
     from astropy import wcs as astropy_wcs
@@ -348,7 +381,7 @@ def test_resolve_coverage_sky_implied_by_center_and_existing_box():
     )
     assert mosaic_script._resolve_coverage_sky(args) == (70.37, -2.87)
 
-    # --existing-box implies stamp-center coverage once a box WCS exists.
+    # --existing-box does not imply stamp-center coverage unless opted in.
     w = astropy_wcs.WCS(naxis=2)
     w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
     w.wcs.crval = [185.73, 15.82]
@@ -375,11 +408,15 @@ def test_resolve_coverage_sky_implied_by_center_and_existing_box():
         existing_box='group_0/ref_sn',
     )
     ra, dec = mosaic_script._resolve_coverage_sky(args, plan=plan, box=box)
+    assert (ra, dec) == (None, None)
+    args.require_coverage = True
+    ra, dec = mosaic_script._resolve_coverage_sky(args, plan=plan, box=box)
     assert ra == pytest.approx(185.73, abs=1e-4)
     assert dec == pytest.approx(15.82, abs=1e-4)
 
     # Auto-split boxes still require the opt-in flag.
     args.existing_box = None
+    args.require_coverage = False
     assert mosaic_script._resolve_coverage_sky(args, plan=plan, box=box) == (
         None,
         None,
@@ -415,3 +452,18 @@ def test_plan_mosaic_boxes_smoke_with_synthetic_table(tmp_path: Path):
     assert (ref / hst_name).as_posix().endswith(
         'group_0/ref_0/coadd_0_0_wfc3_f625w_drc.fits'
     )
+
+
+def test_collect_unaligned_hst_raw_frames(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import collect_unaligned_hst_raw_frames
+
+    jhat = tmp_path / 'jhat_hst'
+    raw = tmp_path / 'raw'
+    jhat.mkdir()
+    raw.mkdir()
+    (jhat / 'j8yy12pqq_jhat.fits').write_bytes(b'')
+    (raw / 'j8yy12pqq_flc.fits').write_bytes(b'')
+    (raw / 'u6g22801r_c0m.fits').write_bytes(b'')
+    (raw / 'u6g22801r_c1m.fits').write_bytes(b'')
+    extra = collect_unaligned_hst_raw_frames(jhat)
+    assert [path.name for path in extra] == ['u6g22801r_c0m.fits']

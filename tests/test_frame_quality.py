@@ -91,6 +91,19 @@ def test_alignment_ceilings(tmp_path: Path):
     assert rejected == [bad_abs]
 
 
+def test_expflag_interrupted_rejected_after_sanitize(tmp_path: Path):
+    """Header sanitize must not keep EXPFLAG=INTERRUPTED frames."""
+    from st123.datamodels import sanitize_science_fits
+
+    bad = _hst_flc(tmp_path / 'jey378lkq_flc.fits', expflag='INTERRUPTED')
+    sanitize_science_fits(bad, materialize_headers=True)
+    assert read_expflag(bad) == 'INTERRUPTED'
+    assert not is_good_hst_expflag(bad)
+    kept, rejected = filter_good_hst_frames([bad])
+    assert kept == []
+    assert rejected == [bad]
+
+
 def test_prune_bad_hst_expflag(tmp_path: Path):
     good = _hst_flc(tmp_path / 'g_flc.fits', expflag='NORMAL')
     bad = _hst_flc(tmp_path / 'b_flc.fits', expflag='TDF-DOWN')

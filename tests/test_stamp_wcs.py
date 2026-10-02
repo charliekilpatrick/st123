@@ -41,6 +41,62 @@ def _tan_wcs(
     return w
 
 
+def test_write_stamp_wcs_strips_obsgeo(tmp_path: Path):
+    import pickle
+    import warnings
+
+    from astropy.wcs import FITSFixedWarning
+
+    from st123.stages.mosaic.mosaic import wcs_without_observatory
+
+    w = _tan_wcs()
+    w.wcs.obsgeo = np.array([-2.0e8, 1.6e9, 2.7e8, np.nan, np.nan, np.nan])
+    path = write_stamp_wcs(tmp_path, w)
+    hdr = fits.getheader(path)
+    assert not any(str(k).upper().startswith('OBSGEO') for k in hdr)
+
+    loaded = load_stamp_wcs(tmp_path)
+    assert loaded is not None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        pickle.loads(pickle.dumps(wcs_without_observatory(loaded)))
+    msgs = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, FITSFixedWarning)
+    ]
+    assert not any('obsfix' in m for m in msgs)
+
+
+def test_load_stamp_wcs_rewrites_legacy_obsgeo(tmp_path: Path):
+    import pickle
+    import warnings
+
+    from astropy.wcs import FITSFixedWarning
+
+    w = _tan_wcs()
+    path = write_stamp_wcs(tmp_path, w)
+    with fits.open(path, mode='update') as hdul:
+        hdul[0].header['OBSGEO-X'] = -2.0e8
+        hdul[0].header['OBSGEO-Y'] = 1.6e9
+        hdul[0].header['OBSGEO-Z'] = 2.7e8
+        hdul.flush()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        loaded = load_stamp_wcs(tmp_path)
+        assert loaded is not None
+        pickle.loads(pickle.dumps(loaded))
+    hdr = fits.getheader(path)
+    assert 'OBSGEO-X' not in hdr
+    msgs = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, FITSFixedWarning)
+    ]
+    assert not any('obsfix' in m for m in msgs)
+
+
 def test_write_load_stamp_wcs_roundtrip(tmp_path: Path):
     import warnings
 

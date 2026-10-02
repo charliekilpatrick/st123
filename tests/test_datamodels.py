@@ -10,6 +10,7 @@ from astropy.io import fits
 import numpy as np
 
 from st123.datamodels import (
+    ACSDataModel,
     ACSHRCDataModel,
     ACSWFCDataModel,
     HSTDataModel,
@@ -217,6 +218,47 @@ def test_as_datamodel_identity(tmp_path: Path):
     assert again.sci_wcs().naxis == 2
 
 
+def test_nircam_science_filter_prefers_pupil_wheel():
+    assert NIRCamDataModel.science_filter('F444W', 'F405N') == 'f405n'
+    assert NIRCamDataModel.science_filter('F150W2', 'F164N') == 'f164n'
+    assert NIRCamDataModel.science_filter('F322W2', 'F323N') == 'f323n'
+    assert NIRCamDataModel.science_filter('F444W', 'CLEAR') == 'f444w'
+    assert NIRCamDataModel.science_filter('F150W2', 'CLEARP') == 'f150w2'
+    assert NIRCamDataModel.science_filter('F200W', None) == 'f200w'
+    assert NIRCamDataModel.science_filter('F150W', 'GRISMR') == 'f150w'
+    with pytest.raises(KeyError):
+        NIRCamDataModel.science_filter(None, 'CLEAR')
+
+
+def test_nircam_filter_name_uses_pupil_not_filter_keyword(tmp_path: Path):
+    path = _write(
+        tmp_path / 'jw_nrcblong_f444w_f405n.fits',
+        TELESCOP='JWST',
+        INSTRUME='NIRCAM',
+        DETECTOR='NRCBLONG',
+        FILTER='F444W',
+        PUPIL='F405N',
+    )
+    model = open_datamodel(path)
+    assert isinstance(model, NIRCamDataModel)
+    assert model.keyword('FILTER') == 'F444W'
+    assert model.pupil == 'F405N'
+    assert model.filter_name == 'f405n'
+    assert NIRCamDataModel.l3_coadd_basename(0, 'sn', model.filter_name) == (
+        'coadd_0_sn_nircam_f405n_i2d.fits'
+    )
+
+    wide = _write(
+        tmp_path / 'jw_nrcblong_f444w.fits',
+        TELESCOP='JWST',
+        INSTRUME='NIRCAM',
+        DETECTOR='NRCBLONG',
+        FILTER='F444W',
+        PUPIL='CLEAR',
+    )
+    assert open_datamodel(wide).filter_name == 'f444w'
+
+
 def test_wfpc2_c0m_c1m_one_datamodel(tmp_path: Path):
     sci = tmp_path / 'u9ob0101m_c0m.fits'
     dq = tmp_path / 'u9ob0101m_c1m.fits'
@@ -313,6 +355,7 @@ def test_datamodel_metadata_accessors(tmp_path: Path):
                 'POLYGON ICRS 10.0 20.0 10.01 20.0 10.01 20.01 10.0 20.01'
             ),
             'PHOTPLAM': 15000.0,
+            'MJD-AVG': 60300.5,
         }
     )
     fits.HDUList(
@@ -324,6 +367,7 @@ def test_datamodel_metadata_accessors(tmp_path: Path):
     assert model.wavelength_um == pytest.approx(1.5)
     assert model.visit_id == 'V009'
     assert model.obs_datetime == '2024-01-02T03:04:05'
+    assert model.mjd == pytest.approx(60300.5)
     assert model.pupil == 'CLEAR'
     assert 'POLYGON ICRS' in model.s_region
     assert model.distortion_keywords()['A_ORDER'] == 2
@@ -357,3 +401,63 @@ def test_wavelength_um_from_photometric_headers(tmp_path: Path):
         PHOTPLAM=8140.0,
     )
     assert open_datamodel(angstroms).wavelength_um == pytest.approx(0.814)
+
+
+def test_l3_coadd_basename_is_datamodel_driven():
+    assert NIRCamDataModel.L3_EXTENSION == 'i2d'
+    assert MIRIDataModel.L3_EXTENSION == 'i2d'
+    assert ACSDataModel.L3_EXTENSION == 'drc'
+    assert WFC3UVISDataModel.L3_EXTENSION == 'drc'
+    assert WFC3IRDataModel.L3_EXTENSION == 'drz'
+    assert WFPC2DataModel.L3_EXTENSION == 'drz'
+
+    assert NIRCamDataModel.l3_instrument_token() == 'nircam'
+    assert MIRIDataModel.l3_instrument_token() == 'miri'
+    assert ACSDataModel.l3_instrument_token() == 'acs'
+
+    assert NIRCamDataModel.l3_coadd_basename(0, 'sn', 'F150W2') == (
+        'coadd_0_sn_nircam_f150w2_i2d.fits'
+    )
+    assert MIRIDataModel.l3_coadd_basename(0, 'sn', 'F770W') == (
+        'coadd_0_sn_miri_f770w_i2d.fits'
+    )
+    assert ACSDataModel.l3_coadd_basename(0, 'sn', 'F814W') == (
+        'coadd_0_sn_acs_f814w_drc.fits'
+    )
+    assert WFC3IRDataModel.l3_coadd_basename(0, 0, 'F160W') == (
+        'coadd_0_0_wfc3_f160w_drz.fits'
+    )
+    assert WFPC2DataModel.l3_coadd_basename(
+        1, 'full', 'F814W', visit='u6ea09'
+    ) == 'coadd_1_full_wfpc2_f814w_u6ea09_drz.fits'
+
+    assert NIRCamDataModel.l3_coadd_glob() == 'coadd_*_*_nircam_*_i2d.fits'
+    assert MIRIDataModel.l3_coadd_glob() == 'coadd_*_*_miri_*_i2d.fits'
+    parsed = InstrumentDataModel.parse_l3_coadd_name(
+        'coadd_0_sn_nircam_f150w2_i2d.fits'
+    )
+    assert parsed is not None
+    assert parsed['instrument'] == 'nircam'
+    assert parsed['filter'] == 'f150w2'
+    assert parsed['extension'] == 'i2d'
+    legacy = InstrumentDataModel.parse_l3_coadd_name('coadd_0_sn_f200w_i2d.fits')
+    assert legacy is not None
+    assert legacy['instrument'] is None
+    assert legacy['filter'] == 'f200w'
+
+    assert InstrumentDataModel.class_for_l3('NIRCAM') is NIRCamDataModel
+    assert InstrumentDataModel.class_for_l3('nrc') is NIRCamDataModel
+    assert InstrumentDataModel.class_for_l3('MIRI') is MIRIDataModel
+    assert InstrumentDataModel.class_for_l3(None, filter_name='F770W') is MIRIDataModel
+    assert InstrumentDataModel.class_for_l3('WFC3', filter_name='F160W') is (
+        WFC3IRDataModel
+    )
+    assert InstrumentDataModel.class_for_l3('WFC3', filter_name='F814W') is (
+        WFC3UVISDataModel
+    )
+    assert InstrumentDataModel.class_for_l3('WFPC2') is WFPC2DataModel
+    with pytest.raises(ValueError):
+        JWSTDataModel.l3_instrument_token()
+    with pytest.raises(ValueError):
+        InstrumentDataModel.class_for_l3()
+

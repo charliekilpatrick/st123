@@ -179,32 +179,23 @@ def _equal_chunks(
 
 
 def image_filter_key(path: PathLike) -> str:
-    """Return ``INSTRUMENT_FILTER`` from a FITS header, or the basename."""
+    """Return ``INSTRUMENT_FILTER`` from the science bandpass, or the basename."""
     p = Path(path)
     try:
-        with as_datamodel(p).open(memmap=True) as hdul:
-            filt = None
-            det = None
-            for hdu in hdul:
-                if filt is None:
-                    v = hdu.header.get('FILTER')
-                    if v and str(v).strip() not in ('N/A', 'CLEAR', 'NONE', ''):
-                        filt = str(v).strip().upper()
-                if det is None:
-                    v = hdu.header.get('DETECTOR')
-                    if v:
-                        det = str(v).strip().upper()
-            if filt:
-                if det and 'MIR' in det:
-                    return f'MIRI_{filt}'
-                if det and 'NRC' in det:
-                    return f'NIRCAM_{filt}'
-                name = p.name.lower()
-                if 'mirimage' in name:
-                    return f'MIRI_{filt}'
-                if 'nrc' in name:
-                    return f'NIRCAM_{filt}'
-                return filt
+        model = as_datamodel(p)
+        try:
+            filt = str(model.filter_name or '').strip().upper()
+        except KeyError:
+            filt = ''
+        if filt:
+            inst = str(model.instrument_name or '').strip().upper()
+            det = str(model.detector or model.keyword('DETECTOR') or '').strip().upper()
+            name = p.name.lower()
+            if 'MIR' in inst or 'MIR' in det or 'mirimage' in name:
+                return f'MIRI_{filt}'
+            if 'NRC' in inst or 'NRC' in det or 'nrc' in name:
+                return f'NIRCAM_{filt}'
+            return filt
     except Exception:
         pass
     return p.name
