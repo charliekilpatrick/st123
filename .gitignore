@@ -79,8 +79,21 @@ frb.ipynb
 .DS_STORE
 Thumbs.db
 
-# Local Cursor state (project rules stay machine-local; never push)
+# Local Cursor state (rules, hooks; never push)
 .cursor/
+
+# -----------------------------------------------------------------------------
+# Repo-root scratch — never store these next to the package
+# download/, logs/, and reduction/ are *dataset* layout dirs (created under
+# --base-dir). Tests must build them outside this repo (see tests/conftest.py)
+# under /data/ckilpatrick/st123-pytest and delete them after the run.
+# -----------------------------------------------------------------------------
+/download/
+/logs/
+/reduction/
+/examples/
+/.pytest_cache/
+/st123.egg-info/
 
 # Local analysis / scratch scripts (not part of the package).
 examples/

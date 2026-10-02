@@ -7,13 +7,13 @@ from unittest import mock
 
 import pytest
 
-from st123.photometry.dolphot import (
+from st123.stages.photometry.dolphot import (
     classify_image_kind,
     dolphot_command,
     phot_to_xyt,
     write_paramfile,
 )
-from st123.photometry.warmstart import discover_miri_jhat
+from st123.stages.photometry.warmstart import discover_miri_jhat
 from st123.utils.helpers import get_detector_chip
 
 
@@ -28,18 +28,20 @@ def test_classify_image_kind():
 
 
 def test_science_fits_paths_excludes_sky(tmp_path: Path):
-    from st123.photometry.dolphot import science_fits_paths
+    from st123.stages.photometry.dolphot import science_fits_paths
 
     (tmp_path / 'a_jhat.fits').write_text('')
     (tmp_path / 'a_jhat.sky.fits').write_text('')
     (tmp_path / 'b_jhat.fits').write_text('')
+    (tmp_path / 'phot_0_sn.phot.57.res.fits').write_text('')
+    (tmp_path / 'phot_0_sn.phot.57.psf.fits').write_text('')
     paths = science_fits_paths(tmp_path)
     names = sorted(Path(p).name for p in paths)
     assert names == ['a_jhat.fits', 'b_jhat.fits']
 
 
 def test_parse_dolphot_frame_list(tmp_path: Path):
-    from st123.photometry.dolphot import parse_dolphot_frame_list
+    from st123.stages.photometry.dolphot import parse_dolphot_frame_list
 
     manifest = tmp_path / 'dolphot_frames.txt'
     ref = tmp_path / 'coadd_i2d.fits'
@@ -60,8 +62,22 @@ def test_parse_dolphot_frame_list(tmp_path: Path):
     assert box == 2
 
 
+def test_parse_dolphot_frame_list_string_box(tmp_path: Path):
+    from st123.stages.photometry.dolphot import parse_dolphot_frame_list
+
+    manifest = tmp_path / 'dolphot_frames.txt'
+    ref = tmp_path / 'coadd_i2d.fits'
+    f1 = tmp_path / 'a_jhat.fits'
+    for p in (ref, f1):
+        p.write_text('')
+    manifest.write_text(f'# group=0 box=sn\n# ref {ref}\n{f1}\n')
+    _, _, group, box = parse_dolphot_frame_list(manifest)
+    assert group == 0
+    assert box == 'sn'
+
+
 def test_parse_param_image_list(tmp_path: Path):
-    from st123.photometry.dolphot import parse_param_image_list
+    from st123.stages.photometry.dolphot import parse_param_image_list
 
     param = tmp_path / 'dolphot.param'
     param.write_text(
@@ -76,12 +92,23 @@ def test_parse_param_image_list(tmp_path: Path):
 
 
 def test_per_image_params_kinds():
-    from st123.photometry.dolphot import per_image_params
-    from st123.utils import settings
+    from st123.datamodels import (
+        MIRIDataModel,
+        NIRCamDataModel,
+        WFC3IRDataModel,
+        WFC3UVISDataModel,
+        ACSDataModel,
+        WFPC2DataModel,
+    )
+    from st123.stages.photometry.dolphot import per_image_params
 
-    assert per_image_params('short') is settings.short_params
-    assert per_image_params('long') is settings.long_params
-    assert per_image_params('miri') is settings.miri_params
+    assert per_image_params('short') is NIRCamDataModel.DOLPHOT_SHORT_PARAMS
+    assert per_image_params('long') is NIRCamDataModel.DOLPHOT_LONG_PARAMS
+    assert per_image_params('miri') is MIRIDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('acs') is ACSDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfc3') is WFC3UVISDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfc3_ir') is WFC3IRDataModel.DOLPHOT_IMAGE_PARAMS
+    assert per_image_params('wfpc2') is WFPC2DataModel.DOLPHOT_IMAGE_PARAMS
     with pytest.raises(ValueError):
         per_image_params('unknown')
 
@@ -157,7 +184,7 @@ def test_phot_to_xyt_max_radius(tmp_path: Path):
 
 
 def test_remap_xyt_extension(tmp_path: Path):
-    from st123.photometry.dolphot import remap_xyt_extension
+    from st123.stages.photometry.dolphot import remap_xyt_extension
 
     xyt = tmp_path / 'warmstart.xyt'
     xyt.write_text(
@@ -175,7 +202,7 @@ def test_ensure_dolphot_cd_matrix(tmp_path: Path):
     from astropy.io import fits
     import numpy as np
 
-    from st123.photometry.dolphot import ensure_dolphot_cd_matrix
+    from st123.stages.photometry.dolphot import ensure_dolphot_cd_matrix
 
     path = tmp_path / 'coadd_i2d.fits'
     hdr = fits.Header(
@@ -269,7 +296,7 @@ def test_flatten_dolphot_fits_coadd_like(tmp_path: Path):
     from astropy.io import fits
     import numpy as np
 
-    from st123.photometry.dolphot import flatten_dolphot_fits
+    from st123.stages.photometry.dolphot import flatten_dolphot_fits
 
     path = tmp_path / 'coadd_wfc3_f625w_drc.fits'
     primary = fits.PrimaryHDU(header=fits.Header({'INSTRUME': 'WFC3', 'EXPTIME': 360.0}))
@@ -290,13 +317,45 @@ def test_flatten_dolphot_fits_coadd_like(tmp_path: Path):
     assert flatten_dolphot_fits(path) is False
 
 
+def test_flatten_dolphot_fits_wfc3mask_missing_pcount(tmp_path: Path):
+    """wfc3mask can leave SCI without PCOUNT; flatten must still rewrite img0."""
+    from astropy.io import fits
+    import numpy as np
+
+    from st123.stages.photometry.dolphot import flatten_dolphot_fits
+
+    path = tmp_path / 'coadd_wfc3_f555w_drc.fits'
+    primary = fits.PrimaryHDU(header=fits.Header({'INSTRUME': 'WFC3'}))
+    sci_hdr = fits.Header()
+    sci_hdr['XTENSION'] = 'IMAGE'
+    sci_hdr['BITPIX'] = -32
+    sci_hdr['NAXIS'] = 2
+    sci_hdr['NAXIS1'] = 8
+    sci_hdr['NAXIS2'] = 8
+    sci_hdr['GCOUNT'] = 1
+    sci_hdr['EXTNAME'] = 'SCI'
+    sci = fits.ImageHDU(data=np.ones((8, 8), dtype=np.float32), header=sci_hdr)
+    fits.HDUList([primary, sci]).writeto(path, output_verify='ignore')
+    with fits.open(path, mode='update') as hdul:
+        if 'PCOUNT' in hdul[1].header:
+            del hdul[1].header['PCOUNT']
+        hdul.flush()
+
+    assert flatten_dolphot_fits(path) is True
+    with fits.open(path) as hdul:
+        assert len(hdul) == 1
+        assert hdul[0].data.shape == (8, 8)
+        assert 'XTENSION' not in hdul[0].header
+        assert hdul[0].header['INSTRUME'] == 'WFC3'
+
+
 def test_flatten_dolphot_fits_breaks_hardlink(tmp_path: Path):
     """Warmstart hardlinks must not mutate the shared source inode."""
     from astropy.io import fits
     import numpy as np
     import os
 
-    from st123.photometry.dolphot import flatten_dolphot_fits
+    from st123.stages.photometry.dolphot import flatten_dolphot_fits
 
     src = tmp_path / 'coadd_i2d.fits'
     dst = tmp_path / 'staged_i2d.fits'
@@ -315,7 +374,7 @@ def test_flatten_dolphot_fits_breaks_hardlink(tmp_path: Path):
 
 
 def test_filter_frames_and_resolve_coadd_ref(tmp_path: Path):
-    from st123.photometry.dolphot import (
+    from st123.stages.photometry.dolphot import (
         filter_frames_for_instrument,
         resolve_coadd_ref,
     )
@@ -344,7 +403,7 @@ def test_filter_frames_and_resolve_coadd_ref(tmp_path: Path):
 def test_discover_mosaic_phot_jobs_hst_boxed_fallback(tmp_path: Path):
     from astropy.io import fits
 
-    from st123.photometry.dolphot import discover_mosaic_phot_jobs
+    from st123.stages.photometry.dolphot import discover_mosaic_phot_jobs
 
     reduction = tmp_path / 'reduction'
     box = reduction / 'reference' / 'group_0' / 'ref_5'
@@ -388,7 +447,7 @@ def test_pick_hst_reference_prefers_boxed(tmp_path: Path):
 
 
 def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
-    from st123.photometry.dolphot import resolve_dolphot_bin
+    from st123.stages.photometry.dolphot import resolve_dolphot_bin
 
     fake_bin = tmp_path / 'bin'
     fake_bin.mkdir()
@@ -402,10 +461,10 @@ def test_resolve_dolphot_bin_from_which(tmp_path: Path, monkeypatch):
 def test_resolve_dolphot_bin_missing_warns_and_required_raises(monkeypatch, caplog):
     import logging
 
-    from st123.photometry.dolphot import resolve_dolphot_bin
+    from st123.stages.photometry.dolphot import resolve_dolphot_bin
 
     monkeypatch.setenv('PATH', '')
-    with caplog.at_level(logging.WARNING, logger='st123.photometry.dolphot'):
+    with caplog.at_level(logging.WARNING, logger='st123.stages.photometry.dolphot'):
         assert resolve_dolphot_bin(required=False) is None
     assert 'DOLPHOT not found on PATH' in caplog.text
     with pytest.raises(FileNotFoundError, match='DOLPHOT not found'):
@@ -428,9 +487,9 @@ def test_discover_miri_jhat_from_summary(tmp_path: Path):
     assert len(found) == 1
 
 
-@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
 def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
-    from st123.photometry.dolphot import prepare_frames
+    from st123.stages.photometry.dolphot import prepare_frames
 
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -449,10 +508,10 @@ def test_prepare_frames_miri_flags(mock_run, tmp_path: Path):
     assert mock_run.call_args_list[1].kwargs.get('cwd') == fits.resolve().parent
 
 
-@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
 def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
     """Installed nircammask has no -etctime; ETC time is the default."""
-    from st123.photometry.dolphot import apply_nircammask
+    from st123.stages.photometry.dolphot import apply_nircammask
 
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -467,11 +526,11 @@ def test_apply_nircammask_default_flags(mock_run, tmp_path: Path):
 
 
 def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
-    from st123.photometry.dolphot import (
+    from st123.stages.photometry.dolphot import (
         discover_mosaic_phot_jobs,
         parse_dolphot_frame_list,
     )
-    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.stages.mosaic.mosaic import write_dolphot_frame_list
 
     reduction = tmp_path / 'reduction'
     box = reduction / 'reference' / 'group_0' / 'ref_0'
@@ -504,8 +563,8 @@ def test_parse_and_discover_mosaic_phot_jobs(tmp_path: Path):
 
 
 def test_discover_mosaic_phot_jobs_ref_full(tmp_path: Path):
-    from st123.mosaic.mosaic import FULL_GROUP_LABEL, write_dolphot_frame_list
-    from st123.photometry.dolphot import (
+    from st123.stages.mosaic.mosaic import FULL_GROUP_LABEL, write_dolphot_frame_list
+    from st123.stages.photometry.dolphot import (
         discover_mosaic_phot_jobs,
         parse_dolphot_frame_list,
     )
@@ -537,8 +596,8 @@ def test_discover_mosaic_phot_jobs_ref_full(tmp_path: Path):
 
 
 def test_discover_mosaic_phot_jobs_miri_only(tmp_path: Path):
-    from st123.photometry.dolphot import discover_mosaic_phot_jobs
-    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.stages.photometry.dolphot import discover_mosaic_phot_jobs
+    from st123.stages.mosaic.mosaic import write_dolphot_frame_list
 
     project = tmp_path / 'NGC3310'
     reduction = project / 'reduction'
@@ -573,7 +632,7 @@ def test_discover_mosaic_phot_jobs_miri_only(tmp_path: Path):
 
 
 def test_dolphot_from_mosaic_cli(tmp_path: Path):
-    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.stages.mosaic.mosaic import write_dolphot_frame_list
     from st123.scripts import dolphot as prep_script
 
     reduction = tmp_path / 'NGC3310' / 'reduction'
@@ -591,7 +650,7 @@ def test_dolphot_from_mosaic_cli(tmp_path: Path):
     )
 
     with mock.patch(
-        'st123.photometry.dolphot.prepare_mosaic_phot_job',
+        'st123.stages.photometry.dolphot.prepare_mosaic_phot_job',
         return_value=reduction / 'phot_0_0' / 'dolphot.param',
     ) as prep:
         # Mosaic discovery is the default; --from-mosaic is optional/legacy.
@@ -610,13 +669,13 @@ def test_dolphot_from_mosaic_cli(tmp_path: Path):
     assert job.refimage.resolve() == ref.resolve()
 
 
-@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
 def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
     mock_run, tmp_path: Path
 ):
     """MIRI mosaic prep must stage frames and write dolphotMIRI defaults."""
-    from st123.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
-    from st123.utils import settings
+    from st123.stages.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
+    from st123.datamodels import MIRIDataModel
 
     outdir = tmp_path / 'dolphot' / 'miri_0_0'
     ref = tmp_path / 'coadd_0_0_f560w_i2d.fits'
@@ -639,7 +698,7 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
     text = param.read_text()
     assert 'img0_file = coadd_0_0_f560w_i2d' in text
     assert 'img1_file = x_mirimage_jhat' in text
-    assert f"img1_raper = {settings.miri_params['raper']}" in text
+    assert f"img1_raper = {MIRIDataModel.DOLPHOT_IMAGE_PARAMS['raper']}" in text
     assert 'UseWCS = 2' in text
     assert 'MIRIvega = 0' in text
     assert 'RCentroid = 1' in text
@@ -647,6 +706,49 @@ def test_prepare_mosaic_phot_job_miri_writes_recommended_params(
     assert (outdir / frame.name).is_file()
     # mirimask + calcsky for ref and science frame
     assert mock_run.call_count >= 2
+
+
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
+def test_prepare_mosaic_phot_job_clears_leftover_phot_products(
+    mock_run, tmp_path: Path
+):
+    """Restaging must not nircammask leftover residuals or a legacy coadd."""
+    from st123.stages.photometry.dolphot import MosaicPhotJob, prepare_mosaic_phot_job
+
+    outdir = tmp_path / 'phot_0_sn'
+    outdir.mkdir()
+    leftover_coadd = outdir / 'coadd_0_sn_f150w2_i2d.fits'
+    leftover_res = outdir / 'phot_0_sn.phot.57.res.fits'
+    leftover_coadd.write_bytes(b'old')
+    leftover_res.write_bytes(b'old')
+    ref = tmp_path / 'coadd_0_sn_nircam_f150w2_i2d.fits'
+    frame = tmp_path / 'jw_nrcb1_jhat.fits'
+    ref.write_bytes(b'new')
+    frame.write_bytes(b'new')
+    job = MosaicPhotJob(
+        group=0,
+        box='sn',
+        refimage=ref,
+        frames=(frame,),
+        phot_outdir=outdir,
+        frame_list=tmp_path / 'dolphot_frames.txt',
+    )
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    prepare_mosaic_phot_job(job, instrument='nircam', dolphot_bin=bin_dir)
+    assert not leftover_coadd.is_file()
+    assert not leftover_res.is_file()
+    assert (outdir / ref.name).is_file()
+    assert (outdir / frame.name).is_file()
+    masked = []
+    for call in mock_run.call_args_list:
+        cmd = call.args[0]
+        if cmd and str(cmd[0]).endswith('nircammask'):
+            masked.extend(str(tok) for tok in cmd[1:])
+    assert 'coadd_0_sn_f150w2_i2d.fits' not in masked
+    assert 'phot_0_sn.phot.57.res.fits' not in masked
+    assert 'coadd_0_sn_nircam_f150w2_i2d.fits' in masked
+    assert 'jw_nrcb1_jhat.fits' in masked
 
 
 def test_dolphot_prep_parser_miri_defaults():
@@ -663,7 +765,32 @@ def test_dolphot_prep_parser_miri_defaults():
     assert prep_script.use_mosaic_discovery(args) is True
     assert args.ncores == 32
     assert args.ref_filter is None  # runtime default F560W applied in main
+    assert args.group is None
+    assert args.box is None
 
+
+def test_dolphot_prep_parser_group_box():
+    from st123.scripts import dolphot as prep_script
+
+    parser = prep_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--base-dir',
+            '/tmp/x',
+            '--instruments',
+            'nircam',
+            '--from-mosaic',
+            '--group',
+            '0',
+            '--box',
+            'sn',
+            '--ref-filter',
+            'F200W',
+        ]
+    )
+    assert args.group == 0
+    assert args.box == 'sn'
+    assert args.ref_filter == 'F200W'
 
 def test_use_mosaic_discovery_opt_out_with_refimage_or_files():
     from st123.scripts import dolphot as prep_script
@@ -706,7 +833,7 @@ def test_dolphot_prep_instrument_case_insensitive():
 
 
 def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
-    from st123.mosaic.mosaic import write_dolphot_frame_list
+    from st123.stages.mosaic.mosaic import write_dolphot_frame_list
     from st123.scripts import dolphot as prep_script
 
     project = tmp_path / 'NGC3310'
@@ -730,7 +857,7 @@ def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
     )
 
     with mock.patch(
-        'st123.photometry.dolphot.prepare_mosaic_phot_job',
+        'st123.stages.photometry.dolphot.prepare_mosaic_phot_job',
         return_value=project / 'dolphot' / 'miri_0_0' / 'dolphot.param',
     ) as prep:
         rc = prep_script.main(
@@ -753,9 +880,9 @@ def test_dolphot_from_mosaic_cli_miri(tmp_path: Path):
     assert prep.call_args.kwargs['ncores'] == 32
 
 
-@mock.patch('st123.photometry.dolphot.run_logged_subprocess')
+@mock.patch('st123.stages.photometry.dolphot.run_logged_subprocess')
 def test_calc_sky_parallel_invokes_all_frames(mock_run, tmp_path: Path):
-    from st123.photometry.dolphot import calc_sky
+    from st123.stages.photometry.dolphot import calc_sky
 
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -775,7 +902,7 @@ def test_parallel_map_preserves_order_and_fanout():
     import threading
     import time
 
-    from st123.photometry.dolphot import _parallel_map
+    from st123.stages.photometry.dolphot import _parallel_map
 
     active = 0
     peak = 0
@@ -796,11 +923,11 @@ def test_parallel_map_preserves_order_and_fanout():
     assert peak >= 2
 
 
-@mock.patch('st123.photometry.dolphot.sanitize_dolphot_wcs')
-@mock.patch('st123.photometry.dolphot.apply_hst_mask')
-@mock.patch('st123.photometry.dolphot.apply_splitgroups')
-@mock.patch('st123.photometry.dolphot.prepare_frames')
-@mock.patch('st123.photometry.dolphot.setup_paramfile')
+@mock.patch('st123.stages.photometry.dolphot.sanitize_dolphot_wcs')
+@mock.patch('st123.stages.photometry.dolphot.apply_hst_mask')
+@mock.patch('st123.stages.photometry.dolphot.apply_splitgroups')
+@mock.patch('st123.stages.photometry.dolphot.prepare_frames')
+@mock.patch('st123.stages.photometry.dolphot.setup_paramfile')
 def test_prepare_hst_frames_passes_ncores_and_stage_order(
     mock_setup,
     mock_prepare,
@@ -809,8 +936,8 @@ def test_prepare_hst_frames_passes_ncores_and_stage_order(
     mock_sanitize,
     tmp_path: Path,
 ):
-    """WFPC2 MEF mask → splitgroups → chip prepare_frames, all with ncores."""
-    from st123.photometry.dolphot import prepare_hst_frames
+    """WFPC2 MEF mask -> splitgroups -> chip prepare_frames, all with ncores."""
+    from st123.stages.photometry.dolphot import prepare_hst_frames
 
     src = tmp_path / 'src'
     out = tmp_path / 'dolphot' / 'hst_0_0'
@@ -844,7 +971,7 @@ def test_prepare_hst_frames_passes_ncores_and_stage_order(
     mock_prepare.side_effect = _prepare_side_effect
 
     with mock.patch(
-        'st123.photometry.dolphot._classify_hst_science',
+        'st123.stages.photometry.dolphot._classify_hst_science',
         return_value='wfpc2',
     ):
         prepare_hst_frames(
@@ -865,7 +992,7 @@ def test_prepare_hst_frames_passes_ncores_and_stage_order(
 
 
 def test_chunk_images_equal_and_grouped():
-    from st123.photometry.dolphot_split import chunk_images
+    from st123.stages.photometry.dolphot_split import chunk_images
 
     imgs = [Path(f'f{i}.fits') for i in range(10)]
     chunks = chunk_images(imgs, max_nimg=4)
@@ -886,7 +1013,7 @@ def test_chunk_images_equal_and_grouped():
 
 
 def test_write_split_paramfiles_and_merge(tmp_path: Path):
-    from st123.photometry.dolphot_split import (
+    from st123.stages.photometry.dolphot_split import (
         SPLIT_MANIFEST_NAME,
         finalize_split_outdir,
         merge_dolphot_phot_catalogs,
@@ -986,7 +1113,7 @@ def test_write_split_paramfiles_and_merge(tmp_path: Path):
     cols = (tmp_path / 'run_nircam_miri.phot.columns').read_text()
     assert 'NIRCAM_F115W' in cols and 'MIRI_F770W' in cols
 
-    # finalize_split_outdir should no-op once merged exists with size>0… rewrite empty
+    # finalize_split_outdir should no-op once merged exists with size>0... rewrite empty
     (tmp_path / 'run_nircam_miri.phot').unlink()
     out = finalize_split_outdir(tmp_path)
     assert out is not None
@@ -994,8 +1121,8 @@ def test_write_split_paramfiles_and_merge(tmp_path: Path):
 
 
 def test_setup_paramfile_respects_max_nimg(tmp_path: Path):
-    from st123.photometry.dolphot import setup_paramfile
-    from st123.photometry.dolphot_split import SPLIT_MANIFEST_NAME
+    from st123.stages.photometry.dolphot import setup_paramfile
+    from st123.stages.photometry.dolphot_split import SPLIT_MANIFEST_NAME
 
     ref = tmp_path / 'coadd.fits'
     ref.write_text('')
@@ -1023,7 +1150,7 @@ def test_sanitize_dolphot_wcs_strips_lookup_and_keeps_sip(tmp_path: Path):
     from astropy.io import fits
     from astropy.wcs import WCS
 
-    from st123.photometry.dolphot import sanitize_dolphot_wcs
+    from st123.stages.photometry.dolphot import sanitize_dolphot_wcs
 
     data = np.zeros((64, 64), dtype=np.float32)
     hdr = fits.Header()
@@ -1073,7 +1200,7 @@ def test_sanitize_dolphot_wcs_strips_lookup_and_keeps_sip(tmp_path: Path):
 def test_is_jwst_dolphot_reference_by_name_and_header(tmp_path: Path):
     from astropy.io import fits
 
-    from st123.photometry.dolphot import _is_jwst_dolphot_reference
+    from st123.stages.photometry.dolphot import _is_jwst_dolphot_reference
 
     i2d = tmp_path / 'coadd_0_0_f200w_i2d.fits'
     i2d.write_bytes(b'')
@@ -1091,12 +1218,12 @@ def test_is_jwst_dolphot_reference_by_name_and_header(tmp_path: Path):
     assert _is_jwst_dolphot_reference(nircam) is True
 
 
-@mock.patch('st123.photometry.dolphot.sanitize_dolphot_wcs')
-@mock.patch('st123.photometry.dolphot.apply_hst_mask')
-@mock.patch('st123.photometry.dolphot.apply_splitgroups')
-@mock.patch('st123.photometry.dolphot.prepare_frames')
-@mock.patch('st123.photometry.dolphot.calc_sky')
-@mock.patch('st123.photometry.dolphot.setup_paramfile')
+@mock.patch('st123.stages.photometry.dolphot.sanitize_dolphot_wcs')
+@mock.patch('st123.stages.photometry.dolphot.apply_hst_mask')
+@mock.patch('st123.stages.photometry.dolphot.apply_splitgroups')
+@mock.patch('st123.stages.photometry.dolphot.prepare_frames')
+@mock.patch('st123.stages.photometry.dolphot.calc_sky')
+@mock.patch('st123.stages.photometry.dolphot.setup_paramfile')
 def test_prepare_hst_frames_jwst_ref_skips_hst_mask_and_passes_xyt(
     mock_setup,
     mock_calc_sky,
@@ -1107,7 +1234,7 @@ def test_prepare_hst_frames_jwst_ref_skips_hst_mask_and_passes_xyt(
     tmp_path: Path,
 ):
     """NIRCam img0 must not be HST-masked; xytfile forwarded to setup_paramfile."""
-    from st123.photometry.dolphot import prepare_hst_frames
+    from st123.stages.photometry.dolphot import prepare_hst_frames
 
     src = tmp_path / 'src'
     out = tmp_path / 'dolphot' / 'nircam_hst_0_0'
@@ -1131,7 +1258,7 @@ def test_prepare_hst_frames_jwst_ref_skips_hst_mask_and_passes_xyt(
     mock_split.side_effect = _split_side_effect
 
     with mock.patch(
-        'st123.photometry.dolphot._classify_hst_science',
+        'st123.stages.photometry.dolphot._classify_hst_science',
         return_value='wfpc2',
     ):
         prepare_hst_frames(
@@ -1157,8 +1284,8 @@ def test_prepare_hst_frames_jwst_ref_skips_hst_mask_and_passes_xyt(
 def test_setup_hst_warmstart_writes_xyt_and_hst_globals(tmp_path: Path):
     from astropy.io import fits
 
-    from st123.photometry.warmstart import setup_hst_warmstart
-    from st123.utils.settings import hst_base_params
+    from st123.stages.photometry.warmstart import setup_hst_warmstart
+    from st123.datamodels import HSTDataModel
 
     nircam = tmp_path / 'phot_0_0'
     nircam.mkdir()
@@ -1194,7 +1321,7 @@ def test_setup_hst_warmstart_writes_xyt_and_hst_globals(tmp_path: Path):
     out = tmp_path / 'nircam_hst_0_0'
 
     with mock.patch(
-        'st123.photometry.warmstart.prepare_hst_frames'
+        'st123.stages.photometry.warmstart.prepare_hst_frames'
     ) as mock_prep:
         param = out / 'dolphot.param'
         param.parent.mkdir(parents=True, exist_ok=True)
@@ -1205,10 +1332,10 @@ def test_setup_hst_warmstart_writes_xyt_and_hst_globals(tmp_path: Path):
                 'Nimg = 1\n'
                 'img0_file = coadd_0_0_f200w_i2d\n'
                 'img1_file = u_test_jhat.chip1\n'
-                f'UseWCS = {hst_base_params["UseWCS"]}\n'
-                f'Align = {hst_base_params["Align"]}\n'
-                f'Force1 = {hst_base_params["Force1"]}\n'
-                f'PSFres = {hst_base_params["PSFres"]}\n'
+                f'UseWCS = {HSTDataModel.DOLPHOT_BASE_PARAMS["UseWCS"]}\n'
+                f'Align = {HSTDataModel.DOLPHOT_BASE_PARAMS["Align"]}\n'
+                f'Force1 = {HSTDataModel.DOLPHOT_BASE_PARAMS["Force1"]}\n'
+                f'PSFres = {HSTDataModel.DOLPHOT_BASE_PARAMS["PSFres"]}\n'
                 'xytfile = warmstart.xyt\n'
             )
             param.write_text(text)
@@ -1240,7 +1367,7 @@ def test_discover_hst_jhat(tmp_path: Path):
     from astropy.io import fits
     import numpy as np
 
-    from st123.photometry.warmstart import discover_hst_jhat
+    from st123.stages.photometry.warmstart import discover_hst_jhat
 
     jhat_dir = tmp_path / 'reduction' / 'jhat_hst'
     jhat_dir.mkdir(parents=True)

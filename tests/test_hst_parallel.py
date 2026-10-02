@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 from astropy.io import fits
 
-from st123.alignment.hst_jhat import align_hst_raw_dir, _parallel_worker_budget
-from st123.mosaic.hst_drizzle import (
+from st123.stages.alignment.hst_jhat import align_hst_raw_dir, _parallel_worker_budget
+from st123.stages.mosaic.hst_drizzle import (
     _frame_sets_disjoint,
     _parallel_drizzle_budget,
     _run_filter_drizzle_jobs,
@@ -58,10 +58,10 @@ def test_align_hst_raw_dir_parallel_workers(tmp_path: Path):
     # Serial path (workers=1) must still work with patches.
     with (
         patch(
-            'st123.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
+            'st123.stages.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
         ),
         patch(
-            'st123.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
+            'st123.stages.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
         ),
     ):
         results = align_hst_raw_dir(
@@ -102,10 +102,10 @@ def test_align_hst_raw_dir_parallel_workers(tmp_path: Path):
 
     with (
         patch(
-            'st123.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
+            'st123.stages.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
         ),
         patch(
-            'st123.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
+            'st123.stages.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
         ),
         patch(
             'concurrent.futures.ProcessPoolExecutor', _InlinePool
@@ -141,7 +141,7 @@ def test_run_filter_drizzle_jobs_serial_and_parallel():
         {'record': {'status': 'ready', 'instrument': 'wfc3', 'filter': 'f814w'}},
     ]
     with patch(
-        'st123.mosaic.hst_drizzle._filter_drizzle_worker', side_effect=_worker
+        'st123.stages.mosaic.hst_drizzle._filter_drizzle_worker', side_effect=_worker
     ):
         out = _run_filter_drizzle_jobs(jobs, num_cores=8, parallel=False)
     assert len(out) == 2
@@ -166,7 +166,7 @@ def test_run_filter_drizzle_jobs_serial_and_parallel():
 
     with (
         patch(
-            'st123.mosaic.hst_drizzle._filter_drizzle_worker',
+            'st123.stages.mosaic.hst_drizzle._filter_drizzle_worker',
             side_effect=_worker,
         ),
         patch('concurrent.futures.ProcessPoolExecutor', _InlinePool),
@@ -177,5 +177,5 @@ def test_run_filter_drizzle_jobs_serial_and_parallel():
     ):
         out = _run_filter_drizzle_jobs(jobs, num_cores=8, parallel=True)
     assert len(out) == 2
-    # 2 workers → 4 cores each
+    # 2 workers -> 4 cores each
     assert calls == [4, 4]

@@ -191,7 +191,7 @@ def test_aper_local_background_single_source_after_compat_patch():
 
 def test_generate_level3_mosaic_applies_photutils3_compat(tmp_path: Path):
     """Visit-align mosaics must install the compat patches before Image3 runs."""
-    from st123.alignment import align as align_lib
+    from st123.stages.alignment import align as align_lib
 
     table = Table(
         {

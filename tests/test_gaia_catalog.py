@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from astropy.table import Table
 
-from st123.alignment.gaia_catalog import (
+from st123.stages.alignment.gaia_catalog import (
     GAIA_MIN_CONE_RADIUS_DEG,
     VIZIER_GAIA_DR3,
     VIZIER_MIRRORS,
@@ -114,7 +114,7 @@ def test_query_gaia_uses_vizier_backend(tmp_path):
     with (
         patch('astroquery.vizier.Vizier') as mock_viz_cls,
         patch(
-            'st123.alignment.gaia_catalog.cut_gaia_sources',
+            'st123.stages.alignment.gaia_catalog.cut_gaia_sources',
             side_effect=lambda _img, tb: tb,
         ),
     ):
@@ -174,7 +174,7 @@ def test_ensure_gaia_catalog_caches_and_reuses(tmp_path):
     with (
         patch('astroquery.vizier.Vizier') as mock_viz_cls2,
         patch(
-            'st123.alignment.gaia_catalog.cut_gaia_sources',
+            'st123.stages.alignment.gaia_catalog.cut_gaia_sources',
             side_effect=lambda _img, tb: tb,
         ),
     ):

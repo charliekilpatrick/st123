@@ -1,4 +1,4 @@
-"""Tests for HST narrowband mitigation (relaxed JHAT → HST_REL → PIPELINE)."""
+"""Tests for HST narrowband mitigation (relaxed JHAT -> HST_REL -> PIPELINE)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from st123.alignment import hst_jhat as hj
+from st123.stages.alignment import hst_jhat as hj
 
 
 def _wcs_header(*, crval=(150.0, 2.0), cdelt=0.05 / 3600.0) -> fits.Header:
@@ -147,7 +147,7 @@ def test_refine_hst_narrowband_to_refcat_applies_crval(tmp_path: Path):
     xs = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 15.0, 25.0, 35.0, 45.0, 55.0])
     ys = np.array([10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 45.0, 50.0, 12.0, 18.0])
     ra, dec = w.pixel_to_world_values(xs, ys)
-    # Refcat is 0.08" east of the image WCS → image needs +dRA.
+    # Refcat is 0.08" east of the image WCS -> image needs +dRA.
     dra = 0.08 / 3600.0
     ref = pd.DataFrame({'ra': np.asarray(ra) + dra, 'dec': np.asarray(dec), 'mag': np.arange(len(xs))})
     phot = pd.DataFrame(
@@ -270,7 +270,7 @@ def test_recover_pipeline_when_relative_fails(tmp_path: Path):
             'outpath': None,
         }
     ]
-    # No broadband parents → skip HST_REL, use PIPELINE.
+    # No broadband parents -> skip HST_REL, use PIPELINE.
     hj.recover_failed_hst_narrowbands(results, tmp_path / 'jhat')
     assert results[0]['status'] == 'ok'
     assert results[0]['align_mode'] == 'PIPELINE'

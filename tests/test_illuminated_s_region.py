@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from st123.mosaic.region import (
+from st123.stages.mosaic.region import (
     SRegionPolygon,
     default_adjacency_pixels,
     illuminated_mask_from_dq,
@@ -64,7 +64,7 @@ def test_illuminated_script_main(tmp_path: Path, monkeypatch):
     path = write_illuminated_fits(tmp_path / 'science.fits')
     out = tmp_path / 'plot.png'
     monkeypatch.setattr('matplotlib.pyplot.close', lambda *a, **k: None)
-    with patch('st123.mosaic.region.save_illuminated_region_plot') as mock_plot:
+    with patch('st123.stages.mosaic.region.save_illuminated_region_plot') as mock_plot:
         rc = illum_script.main(
             [str(path), '--output', str(out), '--simplify', '1.0', '--adjacency', '5']
         )
