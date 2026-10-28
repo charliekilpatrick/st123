@@ -891,6 +891,68 @@ def add_pair_align_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     return parser
 
 
+def add_align_clinic_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach flags honored by the ``align-clinic`` stage.
+
+    Dest defaults: ``apply=False``, ``scan_known=False``, ``targets_file=None``,
+    ``mosaic_after=False``, ``clinic_outfile=None``. Stage-specific; attach
+    only from ``align-clinic``.
+    """
+    group = parser.add_argument_group('align clinic')
+    group.add_argument(
+        '--apply',
+        dest='apply',
+        action='store_true',
+        default=False,
+        help=(
+            'Write salvage headers, run catastrophic recovery, and restamp '
+            'JHAT quality. Without this flag the clinic only diagnoses.'
+        ),
+    )
+    group.add_argument(
+        '--scan-known',
+        dest='scan_known',
+        action='store_true',
+        default=False,
+        help=(
+            'Diagnose the GitHub-issue and go18338 fields that exist on '
+            'this host (in addition to --base-dir when given).'
+        ),
+    )
+    group.add_argument(
+        '--targets-file',
+        dest='targets_file',
+        type=str,
+        default=None,
+        help=(
+            'Text file of extra reduction roots to diagnose (one path per '
+            'line). Comments start with #.'
+        ),
+    )
+    group.add_argument(
+        '--mosaic',
+        dest='mosaic_after',
+        action='store_true',
+        default=False,
+        help=(
+            'After --apply recovery, remosaic HST onto existing stamps. '
+            'align-clinic honors this; other stages ignore it.'
+        ),
+    )
+    group.add_argument(
+        '--outfile',
+        dest='clinic_outfile',
+        type=str,
+        default=None,
+        help=(
+            'Write the combined clinic JSON here. Each target also gets '
+            'logs/alignment_clinic.json when that tree is writable.'
+        ),
+    )
+    return parser
+
+
 def parse_instruments(raw: Sequence[str] | None) -> list[str] | None:
     """Split ``--instruments`` values on commas and/or spaces."""
     if raw is None:

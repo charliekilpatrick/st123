@@ -856,18 +856,15 @@ def resolve_coadd_ref(
     FileNotFoundError
         If *ref_filter* is set, no match is found, and *fallback* is ``None``.
     """
+    from st123.datamodels.hst import is_usable_hst_coadd, pick_best_hst_coadd
+
     box = Path(box_dir)
     if ref_filter:
         key = ref_filter.lower().replace(' ', '')
         matches = sorted(
             p
             for p in box.glob('coadd_*.fits')
-            if f'_{key}_' in p.name.lower()
-            and (
-                p.name.endswith('_i2d.fits')
-                or p.name.endswith('_drc.fits')
-                or p.name.endswith('_drz.fits')
-            )
+            if f'_{key}_' in p.name.lower() and is_usable_hst_coadd(p)
         )
         if matches:
             # Prefer JWST i2d when both missions present for the same filter.
@@ -888,9 +885,23 @@ def resolve_coadd_ref(
             box,
             fallback,
         )
-    if fallback is None:
+    fallback_path = Path(fallback) if fallback is not None else None
+    if fallback_path is not None and is_usable_hst_coadd(fallback_path):
+        return fallback_path
+    best = pick_best_hst_coadd(list(box.glob('coadd_*.fits')))
+    if best is not None:
+        if fallback_path is not None:
+            logger.warning(
+                'Reference coadd %s is missing or rejected; using %s',
+                fallback_path.name,
+                best.name,
+            )
+        return best
+    if fallback_path is None:
         raise FileNotFoundError(f'No reference coadd under {box}')
-    return Path(fallback)
+    raise FileNotFoundError(
+        f'Reference coadd {fallback_path} is missing or rejected under {box}'
+    )
 
 
 # Preferred NIRCam free-photometry reference filters (SW first).
@@ -1049,11 +1060,15 @@ def discover_mosaic_phot_jobs(
                     logger.warning('Skipping box %s: %s', box_dir, exc)
                     continue
             else:
-                refimage = resolve_coadd_ref(
-                    box_dir,
-                    ref_filter,
-                    fallback=refimage,
-                )
+                try:
+                    refimage = resolve_coadd_ref(
+                        box_dir,
+                        ref_filter,
+                        fallback=refimage,
+                    )
+                except FileNotFoundError as exc:
+                    logger.warning('Skipping box %s: %s', box_dir, exc)
+                    continue
             if inst is not None:
                 frames = filter_frames_for_instrument(frames, inst)
             if not frames and inst == 'nircam':
@@ -1120,7 +1135,13 @@ def discover_mosaic_phot_jobs(
                     logger.warning('Skipping box %s: %s', box_dir, exc)
                     continue
             else:
-                refimage = resolve_coadd_ref(box_dir, ref_filter, fallback=coadd)
+                try:
+                    refimage = resolve_coadd_ref(
+                        box_dir, ref_filter, fallback=coadd
+                    )
+                except FileNotFoundError as exc:
+                    logger.warning('Skipping box %s: %s', box_dir, exc)
+                    continue
             if not jhat:
                 continue
             jobs.append(
@@ -1550,12 +1571,18 @@ def apply_hst_mask(
     dolphot_bin: Optional[PathLike] = None,
     check: bool = True,
     ncores: int = 1,
-) -> None:
+) -> list[Path]:
     """
     Run ``acsmask`` / ``wfc3mask`` / ``wfpc2mask`` on science frames (in-place).
 
     For WFPC2 MEFs, ``wfpc2mask`` is invoked as ``science c1m`` pairs when a
     sibling ``*_c1m.fits`` DQ file is present (required for native stacks).
+
+    Each file is masked independently. A frame that the C mask tool rejects
+    (missing ``INSTRUME``, wrong instrument, corrupt JHAT MEF) is skipped
+    with a warning so one archival WFPC2 product cannot fail the target.
+    When *check* is True and **every** frame fails, a
+    :class:`subprocess.CalledProcessError` is raised.
 
     Parameters
     ----------
@@ -1566,9 +1593,15 @@ def apply_hst_mask(
     dolphot_bin : path-like or None, optional
         DOLPHOT ``bin`` directory override.
     check : bool, optional
-        Raise on non-zero exit when True.
+        Raise when all frames fail (default True). Individual failures are
+        always skipped.
     ncores : int, optional
         Parallel workers (one mask process per frame / MEF pair when ``>1``).
+
+    Returns
+    -------
+    list of pathlib.Path
+        Frames the mask tool accepted.
     """
     inst = instrument.lower()
     if inst not in _HST_INSTRUMENTS:
@@ -1586,12 +1619,33 @@ def apply_hst_mask(
             )
 
     paths = [Path(p).resolve() for p in files]
+    if not paths:
+        return []
     env = _prepend_bin_env(None, bin_dir)
     workers = max(1, int(ncores or 1))
 
+    def _mask_one(cwd: str, args: list[str], sci: Path) -> Path | None:
+        try:
+            run_logged_subprocess(
+                [str(exe), *args],
+                check=True,
+                env=env,
+                cwd=cwd,
+                logger=logger,
+                label=f'{exe_name} {" ".join(args)}',
+            )
+            return sci
+        except Exception as exc:
+            logger.warning(
+                'Skipping unmaskable %s (%s): %s',
+                sci.name,
+                exe_name,
+                exc,
+            )
+            return None
+
+    jobs: list[tuple[str, list[str], Path]] = []
     if inst == 'wfpc2':
-        # One job per science file: [sci] or [sci, c1m].
-        jobs: list[tuple[str, list[str]]] = []
         for sci in paths:
             args = [sci.name]
             name_l = sci.name.lower()
@@ -1609,62 +1663,37 @@ def apply_hst_mask(
                     if dq.resolve() != dq_local.resolve():
                         shutil.copy2(dq, dq_local)
                     args.append(dq_local.name)
-            jobs.append((str(sci.parent), args))
+            jobs.append((str(sci.parent), args, sci))
+    else:
+        cwd, names = _run_cwd_for_files(files)
+        name_to_path = {p.name: p for p in paths}
+        for name in names:
+            sci = name_to_path.get(name) or (Path(cwd) / name if cwd else Path(name))
+            jobs.append((str(cwd or sci.parent), [name], sci))
 
-        def _wfpc2_one(job: tuple[str, list[str]]) -> str:
-            cwd, args = job
-            run_logged_subprocess(
-                [str(exe), *args],
-                check=check,
-                env=env,
-                cwd=cwd,
-                logger=logger,
-                label=f'{exe_name} {" ".join(args)}',
-            )
-            return args[0]
+    def _one(job: tuple[str, list[str], Path]) -> Path | None:
+        cwd, args, sci = job
+        return _mask_one(cwd, args, sci)
 
-        if workers <= 1 or len(jobs) <= 1:
-            # Preserve historical single-process multi-file invocation.
-            cmd: list[str] = [str(exe)]
-            cwd = str(paths[0].parent) if paths else None
-            for _cwd, args in jobs:
-                cmd.extend(args)
-            run_logged_subprocess(
-                cmd,
-                check=check,
-                env=env,
-                cwd=cwd,
-                logger=logger,
-                label=f'{exe_name} ({len(paths)} file(s), c1m-paired)',
-            )
-            return
-        _parallel_map(_wfpc2_one, jobs, ncores=workers, label=exe_name)
-        return
-
-    cwd, names = _run_cwd_for_files(files)
-
-    def _one(name: str) -> str:
-        run_logged_subprocess(
-            [str(exe), name],
-            check=check,
-            env=env,
-            cwd=cwd,
-            logger=logger,
-            label=f'{exe_name} {name}',
+    if workers <= 1 or len(jobs) <= 1:
+        results = [_one(job) for job in jobs]
+    else:
+        results = _parallel_map(_one, jobs, ncores=workers, label=exe_name)
+    kept = [p for p in results if p is not None]
+    if not kept and check:
+        raise RuntimeError(
+            f'{exe_name} failed on all {len(paths)} frame(s); '
+            'no science frames remain for DOLPHOT'
         )
-        return name
-
-    if workers <= 1 or len(names) <= 1:
-        run_logged_subprocess(
-            [str(exe), *names],
-            check=check,
-            env=env,
-            cwd=cwd,
-            logger=logger,
-            label=f'{exe_name} ({len(names)} file(s))',
+    if len(kept) < len(paths):
+        logger.warning(
+            '%s accepted %d/%d frame(s); skipped %d unmaskable product(s)',
+            exe_name,
+            len(kept),
+            len(paths),
+            len(paths) - len(kept),
         )
-        return
-    _parallel_map(_one, names, ncores=workers, label=exe_name)
+    return kept
 
 
 def apply_splitgroups(
@@ -1833,7 +1862,13 @@ def prepare_frames(
         elif inst == 'nircam':
             apply_nircammask(files, dolphot_bin=dolphot_bin, ncores=workers)
         elif inst in _HST_INSTRUMENTS:
-            apply_hst_mask(files, inst, dolphot_bin=dolphot_bin, ncores=workers)
+            kept = apply_hst_mask(
+                files, inst, dolphot_bin=dolphot_bin, ncores=workers
+            )
+            if isinstance(kept, (list, tuple)):
+                if not kept:
+                    return
+                files = kept
         else:
             raise ValueError(f'Unsupported instrument for prepare_frames: {instrument}')
     if not skip_sky:
@@ -1965,6 +2000,13 @@ def prepare_hst_frames(
         # Re-evaluate after staging in case only the staged copy is readable.
         ref_is_jwst = ref_is_jwst or _is_jwst_dolphot_reference(staged_ref)
 
+    from st123.datamodels.hst import restore_hst_identity_cards
+
+    restore_hst_identity_cards(staged_ref, source=ref_src)
+    src_by_name = {Path(s).name: Path(s) for s in src_files}
+    for mef in staged:
+        restore_hst_identity_cards(mef, source=src_by_name.get(Path(mef).name))
+
     ref_is_coadd = any(
         tok in staged_ref.name.lower()
         for tok in ('_drc', '_drz', 'coadd_', '_i2d')
@@ -2010,12 +2052,24 @@ def prepare_hst_frames(
             and '.chip' not in Path(p).name.lower()
         ]
         if wfpc2_mefs:
-            apply_hst_mask(
+            kept_wfpc2 = apply_hst_mask(
                 wfpc2_mefs,
                 'wfpc2',
                 dolphot_bin=dolphot_bin,
                 ncores=workers,
             )
+            if isinstance(kept_wfpc2, (list, tuple)):
+                kept_set = {Path(p).resolve() for p in kept_wfpc2}
+                science_mefs = [
+                    p
+                    for p in science_mefs
+                    if mef_mask_inst.get(Path(p).resolve()) != 'wfpc2'
+                    or Path(p).resolve() in kept_set
+                ]
+                if not science_mefs:
+                    raise RuntimeError(
+                        'prepare_hst_frames: all WFPC2 frames failed wfpc2mask'
+                    )
 
     if skip_split:
         work = list(science_mefs)

@@ -400,6 +400,37 @@ def test_filter_frames_and_resolve_coadd_ref(tmp_path: Path):
     assert resolve_coadd_ref(box, 'F814W', fallback=f770) == hst
 
 
+def test_discover_mosaic_phot_jobs_skips_rejected_only_box(tmp_path: Path):
+    from astropy.io import fits
+
+    from st123.stages.mosaic.mosaic import write_dolphot_frame_list
+    from st123.stages.photometry.dolphot import discover_mosaic_phot_jobs
+
+    reduction = tmp_path / 'reduction'
+    box = reduction / 'reference' / 'group_1' / 'ref_0'
+    jhat = reduction / 'jhat_hst'
+    box.mkdir(parents=True)
+    jhat.mkdir(parents=True)
+    rejected = box / 'coadd_1_0_wfc3_f300x_drc.rejected.fits'
+    missing = box / 'coadd_1_0_wfc3_f300x_drc.fits'
+    rejected.write_text('bad')
+    frame = jhat / 'id7r54fnq_jhat.fits'
+    primary = fits.PrimaryHDU()
+    primary.header['INSTRUME'] = 'WFC3'
+    fits.HDUList([primary]).writeto(frame, overwrite=True)
+    write_dolphot_frame_list(
+        str(box),
+        refimage=str(missing),
+        frames=[str(frame)],
+        group=1,
+        box=0,
+    )
+    jobs = discover_mosaic_phot_jobs(
+        reduction, instrument='wfc3', outdir_prefix='wfc3'
+    )
+    assert jobs == []
+
+
 def test_discover_mosaic_phot_jobs_hst_boxed_fallback(tmp_path: Path):
     from astropy.io import fits
 
@@ -1395,3 +1426,93 @@ def test_discover_hst_jhat(tmp_path: Path):
 
     filtered = discover_hst_jhat(tmp_path, instruments=['ACS', 'WFC3'])
     assert {p.resolve() for p in filtered} == {acs.resolve(), wfc3.resolve()}
+
+
+def test_restore_hst_identity_cards_from_source_and_ipppssot(tmp_path: Path):
+    from astropy.io import fits
+
+    from st123.datamodels.hst import restore_hst_identity_cards
+
+    raw = tmp_path / 'u6eah301m_c0m.fits'
+    jhat = tmp_path / 'u6eah301m_jhat.fits'
+    src = fits.PrimaryHDU()
+    src.header['INSTRUME'] = 'WFPC2'
+    src.header['TELESCOP'] = 'HST'
+    src.header['DETECTOR'] = 'PC'
+    fits.HDUList([src]).writeto(raw)
+    fits.HDUList([fits.PrimaryHDU()]).writeto(jhat)
+
+    applied = restore_hst_identity_cards(jhat, source=raw)
+    assert applied['INSTRUME'] == 'WFPC2'
+    assert applied['DETECTOR'] == 'PC'
+    with fits.open(jhat) as hdul:
+        assert hdul[0].header['INSTRUME'] == 'WFPC2'
+        assert hdul[0].header['TELESCOP'] == 'HST'
+
+    orphan = tmp_path / 'ic0b04ckq_jhat.fits'
+    fits.HDUList([fits.PrimaryHDU()]).writeto(orphan)
+    inferred = restore_hst_identity_cards(orphan)
+    assert inferred['INSTRUME'] == 'WFC3'
+    with fits.open(orphan) as hdul:
+        assert hdul[0].header['INSTRUME'] == 'WFC3'
+        assert hdul[0].header['TELESCOP'] == 'HST'
+
+
+def test_resolve_coadd_ref_skips_rejected_and_prefers_optical(tmp_path: Path):
+    from st123.stages.photometry.dolphot import resolve_coadd_ref
+
+    box = tmp_path / 'ref_0'
+    box.mkdir()
+    rejected = box / 'coadd_0_0_wfc3_f225w_drc.rejected.fits'
+    missing = box / 'coadd_0_0_wfc3_f225w_drc.fits'
+    acs = box / 'coadd_0_0_acs_f330w_drc.fits'
+    wfc3 = box / 'coadd_0_0_wfc3_f814w_drc.fits'
+    rejected.write_text('bad')
+    acs.write_text('acs')
+    wfc3.write_text('wfc3')
+
+    picked = resolve_coadd_ref(box, fallback=missing)
+    assert picked == wfc3
+    assert resolve_coadd_ref(box, 'F330W', fallback=missing) == acs
+
+
+def test_pick_hst_reference_skips_rejected_uv(tmp_path: Path):
+    from st123.scripts.dolphot import _pick_hst_reference
+
+    reduction = tmp_path / 'reduction'
+    box = reduction / 'reference' / 'group_0' / 'ref_0'
+    box.mkdir(parents=True)
+    rejected = box / 'coadd_0_0_wfc3_f225w_drc.rejected.fits'
+    optical = box / 'coadd_0_0_wfc3_f814w_drc.fits'
+    wfpc2 = box / 'coadd_0_0_wfpc2_f255w_drz.fits'
+    rejected.write_text('bad')
+    optical.write_text('opt')
+    wfpc2.write_text('uv')
+    picked = _pick_hst_reference(reduction, [], instrument='hst')
+    assert picked == optical
+
+
+def test_apply_hst_mask_skips_unmaskable_frames(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from st123.stages.photometry import dolphot as dolphot_mod
+
+    good = tmp_path / 'good_jhat.fits'
+    bad = tmp_path / 'bad_jhat.fits'
+    good.write_bytes(b'g')
+    bad.write_bytes(b'b')
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    (fake_bin / 'wfpc2mask').write_text('#!/bin/sh\n')
+    (fake_bin / 'wfpc2mask').chmod(0o755)
+
+    def _fake_run(cmd, **kwargs):
+        name = ' '.join(str(c) for c in cmd)
+        if 'bad_jhat.fits' in name:
+            raise subprocess.CalledProcessError(1, cmd, stderr='INSTRUME not found')
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+
+    monkeypatch.setattr(dolphot_mod, 'dolphot_bin_dir', lambda *_a, **_k: fake_bin)
+    monkeypatch.setattr(dolphot_mod, 'run_logged_subprocess', _fake_run)
+    kept = dolphot_mod.apply_hst_mask([good, bad], 'wfpc2', ncores=1)
+    assert kept == [good.resolve()]

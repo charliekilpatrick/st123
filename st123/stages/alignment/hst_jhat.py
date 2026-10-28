@@ -33,14 +33,17 @@ from st123.stages.alignment.frame_qa import (
     FRAME_INTERNAL_TOL_ARCSEC,
     FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC,
     FRAME_L3_NO_MATCH_MAX,
+    FRAME_IMAGE_XCORR_MIN_INNER,
     FRAME_L3_SOFT_TOL_ARCSEC,
     FRAME_MIN_MATCH_HEALTHY,
     FRAME_SPARSE_TOL_ARCSEC,
+    L3_PAIRWISE_SOFT_LIMIT,
     build_frame_qa,
     coherent_tol_arcsec,
     is_catastrophic_alignment,
     median_healthy_n_calibrators,
     stamp_quality_headers,
+    trusted_abs_residual_arcsec,
     warn_if_frame_qa_soft,
     write_alignment_summary_table,
     write_frame_qa,
@@ -1572,6 +1575,143 @@ def recover_failed_hst_narrowbands(
                     str(refcat_path) if refcat_path is not None else entry.get('aligned_to')
                 )
     return results
+
+
+def recover_failed_hst_visit_relative(
+    results: list[dict],
+    outdir: str | Path,
+    *,
+    pipeline_fallback: bool = True,
+) -> list[dict]:
+    """
+    Recover remaining JHAT failures via sibling / pipeline WCS.
+
+    Used for ``Only 0 objects pass the initial cut`` and other soft JHAT
+    failures after narrowband recovery (clinic visit_relative path). Picks a
+    same-visit OK JHAT donor when available, else any OK donor, else a pure
+    pipeline-WCS copy when *pipeline_fallback* is True.
+    """
+    out = Path(outdir).expanduser().resolve()
+    ok_jhats: list[Path] = []
+    for entry in results:
+        if entry.get('status') != 'ok' or not entry.get('outpath'):
+            continue
+        p = Path(entry['outpath'])
+        if p.is_file():
+            ok_jhats.append(p.resolve())
+
+    for entry in results:
+        if entry.get('status') == 'ok' and entry.get('outpath'):
+            continue
+        raw = Path(entry.get('path') or '')
+        if not raw.is_file():
+            continue
+        # Bad EXPFLAG frames must never enter recovery.
+        from st123.datamodels.hst import is_good_hst_expflag
+
+        if not is_good_hst_expflag(raw, missing_ok=True):
+            entry['status'] = 'failed'
+            entry['error'] = (
+                f'EXPFLAG={read_expflag_safe(raw)}; excluded from align'
+            )
+            entry['outpath'] = None
+            entry['align_mode'] = 'REJECTED_EXPFLAG'
+            continue
+
+        donor: Path | None = None
+        visit = _hst_visit_key(raw)
+        for cand in ok_jhats:
+            if _hst_visit_key(cand) == visit:
+                donor = cand
+                break
+        if donor is None and ok_jhats:
+            donor = ok_jhats[0]
+
+        dra_deg = 0.0
+        ddec_deg = 0.0
+        method = 'pipeline_wcs'
+        if donor is not None:
+            donor_raw = _raw_sibling_for_jhat(donor)
+            if donor_raw is not None:
+                try:
+                    dra_deg, ddec_deg = _jhat_minus_raw_sky_shift(donor, donor_raw)
+                    method = 'copy_sibling_wcs'
+                except Exception as exc:
+                    log.warning(
+                        'visit_relative: donor shift failed for %s (%s); '
+                        'pipeline WCS',
+                        donor.name,
+                        exc,
+                    )
+                    method = 'pipeline_wcs'
+                    dra_deg = 0.0
+                    ddec_deg = 0.0
+            else:
+                method = 'pipeline_wcs'
+
+        if method == 'pipeline_wcs' and not pipeline_fallback and donor is None:
+            continue
+
+        try:
+            dest = write_hst_jhat_from_raw(raw, out)
+        except Exception as exc:
+            entry['error'] = (
+                f'{entry.get("error") or "JHAT failed"}; '
+                f'visit_relative write failed: {exc}'
+            )
+            continue
+
+        restore_pipeline_relative_wcs_with_common_shift(
+            [dest], dra_deg=float(dra_deg), ddec_deg=float(ddec_deg)
+        )
+        align_mode = 'HST_REL' if method == 'copy_sibling_wcs' else 'PIPELINE'
+        try:
+            write_hst_narrowband_provenance(
+                dest,
+                align_mode=align_mode,
+                aligned_to=str(donor) if donor is not None else 'NA',
+            )
+            stamp_quality_headers(
+                dest,
+                align_mode=align_mode,
+                catastrophic=False,
+                quality_flag='JHAT_NO_SOURCES',
+            )
+        except Exception as exc:
+            log.warning(
+                'visit_relative: could not stamp %s: %s', dest.name, exc
+            )
+
+        prior = entry.get('error')
+        entry['status'] = 'ok'
+        entry['outpath'] = str(dest)
+        entry['error'] = None
+        entry['align_mode'] = align_mode
+        entry['aligned_to'] = str(donor) if donor is not None else 'NA'
+        entry['recover'] = {
+            'method': method,
+            'donor': None if donor is None else str(donor),
+            'prior_error': prior,
+        }
+        ok_jhats.append(dest.resolve())
+        log.info(
+            'HST visit_relative recovered %s method=%s donor=%s',
+            raw.name,
+            method,
+            None if donor is None else donor.name,
+        )
+    return results
+
+
+def read_expflag_safe(path: str | Path) -> str:
+    """Return EXPFLAG text for logging, or ``UNKNOWN``."""
+    try:
+        from st123.datamodels.hst import read_expflag
+
+        flag = read_expflag(path)
+        return str(flag or 'UNKNOWN')
+    except Exception:
+        return 'UNKNOWN'
 
 
 def install_jhat_pandas_read_table_compat() -> None:
@@ -3614,6 +3754,71 @@ def validate_hst_group_internal_alignment(
     return report
 
 
+def _l3_qa_pair_indices(n: int) -> list[tuple[int, int]]:
+    """
+    Pair indices for L3 coadd QA.
+
+    Full pairwise when ``n`` is small; hub-vs-each (hub=0 after optical
+    sort) when large so 16-18 filter mosaics do not hang (sn2016bkv /
+    sn2020zbv).
+    """
+    if n < 2:
+        return []
+    if n <= int(L3_PAIRWISE_SOFT_LIMIT):
+        return [(i, j) for i in range(n) for j in range(i + 1, n)]
+    return [(0, j) for j in range(1, n)]
+
+
+def _optical_hub_score(path: Path) -> tuple[int, int]:
+    """Higher is better optical L3 hub (demote UV/blue)."""
+    name = path.name.lower()
+    pref = 0
+    if 'f814w' in name:
+        pref = 400
+    elif 'f625w' in name:
+        pref = 380
+    elif 'f606w' in name:
+        pref = 360
+    elif 'f555w' in name:
+        pref = 300
+    elif 'f775w' in name:
+        pref = 280
+    for uv in (
+        'f225w',
+        'f275w',
+        'f300x',
+        'f336w',
+        'f218w',
+        'f280n',
+        'f450w',
+        'f439w',
+        'f438w',
+        'f435w',
+    ):
+        if uv in name:
+            pref -= 300
+            break
+    if 'acs' in name:
+        pref += 20
+    elif 'wfc3' in name:
+        pref += 10
+    try:
+        size = int(path.stat().st_size)
+    except OSError:
+        size = 0
+    return (pref, size)
+
+
+def _sort_coadds_optical_hub_first(paths: list[Path]) -> list[Path]:
+    """Put preferred optical abs_ref first for hub-vs-each L3 QA."""
+    if not paths:
+        return []
+    ranked = sorted(paths, key=_optical_hub_score, reverse=True)
+    hub = ranked[0]
+    rest = [p for p in paths if p.resolve() != hub.resolve()]
+    return [hub] + rest
+
+
 def validate_hst_coadds_alignment(
     coadds: list[str | Path],
     *,
@@ -3623,11 +3828,15 @@ def validate_hst_coadds_alignment(
     refcat: str | Path | None = None,
 ) -> dict[str, Any]:
     """
-    Pairwise relative-alignment QA among level-3 coadds (SCI,1).
+    Relative-alignment QA among level-3 coadds (SCI,1).
 
-    Prefers a shared *refcat* (L3 phot) when provided.
+    Prefers a shared *refcat* (L3 phot) when provided. Large multi-filter
+    boxes use hub-vs-each against an optical abs_ref instead of full
+    pairwise (clinic ``L3_PAIRWISE_SOFT_LIMIT``).
     """
     paths = [Path(p).expanduser().resolve() for p in coadds if Path(p).is_file()]
+    paths = _sort_coadds_optical_hub_first(paths)
+    pair_idx = _l3_qa_pair_indices(len(paths))
     report: dict[str, Any] = {
         'ok': True,
         'n_coadds': len(paths),
@@ -3636,109 +3845,114 @@ def validate_hst_coadds_alignment(
         'pairs': [],
         'failed_pairs': [],
         'refcat': str(refcat) if refcat else None,
+        'qa_mode': (
+            'hub_vs_each'
+            if len(paths) > 2 and len(pair_idx) == max(0, len(paths) - 1)
+            else 'pairwise'
+        ),
+        'hub': paths[0].name if paths else None,
     }
     if len(paths) < 2:
         return report
     worst = 0.0
     image_tol = float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
-    for i in range(len(paths)):
-        for j in range(i + 1, len(paths)):
-            peak = measure_hst_sky_offset_smooth_peak(
-                paths[i],
-                paths[j],
-                max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
-            )
-            if peak.get('ok') and float(peak.get('abs_arcsec') or 0.0) > image_tol:
-                pair = {
-                    'a': paths[i].name,
-                    'b': paths[j].name,
-                    'ok': False,
-                    'abs_arcsec': float(peak.get('abs_arcsec') or 0.0),
-                    'dra_arcsec': float(peak.get('dra_arcsec') or 0.0),
-                    'ddec_arcsec': float(peak.get('ddec_arcsec') or 0.0),
-                    'n_match': int(peak.get('n_match') or 1),
-                    'method': 'smooth_peak',
-                    'reason': 'image_offset',
-                }
-                report['pairs'].append(pair)
-                report['failed_pairs'].append(pair)
-                report['ok'] = False
-                worst = max(worst, float(pair['abs_arcsec']))
-                log.warning(
-                    'L3 QA: galaxy-peak offset %s vs %s is %.3f" '
-                    '(limit %.1f"; SN 2014cx F606W-class WCS)',
-                    paths[i].name,
-                    paths[j].name,
-                    pair['abs_arcsec'],
-                    image_tol,
-                )
-                continue
-            # 2-D histogram recovers arcsecond-scale systematics that small-radius
-            # NN matching false-locks near zero.
-            st = measure_hst_sky_offset_2dhist(
-                paths[i],
-                paths[j],
-                max_offset_arcsec=HST_ABS_OFFSET_MAX_ARCSEC,
-            )
-            if not st.get('ok'):
-                st = measure_hst_frame_relative_offset_pixel(
-                    paths[i],
-                    paths[j],
-                    sci_order=0,
-                    max_match_pix=12.0,
-                    min_matches=min_matches,
-                    nbright=400,
-                )
-            if not st.get('ok'):
-                st = _measure_offset_one_sci(
-                    paths[i],
-                    paths[j],
-                    sci_order=0,
-                    refcat=refcat,
-                    match_radius_arcsec=match_radius_arcsec,
-                    min_matches=min_matches,
-                )
-            if (
-                not st.get('ok')
-                and peak.get('ok')
-                and float(peak.get('abs_arcsec') or 0.0) <= image_tol
-            ):
-                # Crowded galaxy: catalog methods find no stars, but the
-                # nucleus is already on the shared stamp.
-                st = peak
+    for i, j in pair_idx:
+        peak = measure_hst_sky_offset_smooth_peak(
+            paths[i],
+            paths[j],
+            max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+        )
+        if peak.get('ok') and float(peak.get('abs_arcsec') or 0.0) > image_tol:
             pair = {
                 'a': paths[i].name,
                 'b': paths[j].name,
-                'ok': bool(st.get('ok')),
-                'abs_arcsec': float(st.get('abs_arcsec') or 0.0),
-                'dra_arcsec': float(st.get('dra_arcsec') or 0.0),
-                'ddec_arcsec': float(st.get('ddec_arcsec') or 0.0),
-                'n_match': int(st.get('n_match') or st.get('peak_count') or 0),
-                'method': st.get('method', 'dao'),
+                'ok': False,
+                'abs_arcsec': float(peak.get('abs_arcsec') or 0.0),
+                'dra_arcsec': float(peak.get('dra_arcsec') or 0.0),
+                'ddec_arcsec': float(peak.get('ddec_arcsec') or 0.0),
+                'n_match': int(peak.get('n_match') or 1),
+                'method': 'smooth_peak',
+                'reason': 'image_offset',
             }
             report['pairs'].append(pair)
-            if not st.get('ok'):
-                log.warning(
-                    'L3 QA: could not measure %s vs %s (n=%d)',
-                    paths[i].name,
-                    paths[j].name,
-                    pair['n_match'],
-                )
-                # Overlapping box coadds with 0-1 common sources are a wrong
-                # WCS, not an unmeasurable pair (SN 2014cx F606W vs F814W).
-                if int(pair['n_match']) <= int(FRAME_L3_NO_MATCH_MAX):
-                    pair['ok'] = False
-                    pair['reason'] = 'no_common_sources'
-                    report['failed_pairs'].append(pair)
-                    report['ok'] = False
-                continue
-            if st.get('method') == 'smooth_peak':
-                # Nucleus color (~0.16") is not a 50 mas catalog residual.
-                continue
-            worst = max(worst, float(st['abs_arcsec']))
-            if float(st['abs_arcsec']) > float(max_coherent_arcsec):
+            report['failed_pairs'].append(pair)
+            report['ok'] = False
+            worst = max(worst, float(pair['abs_arcsec']))
+            log.warning(
+                'L3 QA: galaxy-peak offset %s vs %s is %.3f" '
+                '(limit %.1f"; SN 2014cx F606W-class WCS)',
+                paths[i].name,
+                paths[j].name,
+                pair['abs_arcsec'],
+                image_tol,
+            )
+            continue
+        # 2-D histogram recovers arcsecond-scale systematics that small-radius
+        # NN matching false-locks near zero.
+        st = measure_hst_sky_offset_2dhist(
+            paths[i],
+            paths[j],
+            max_offset_arcsec=HST_ABS_OFFSET_MAX_ARCSEC,
+        )
+        if not st.get('ok'):
+            st = measure_hst_frame_relative_offset_pixel(
+                paths[i],
+                paths[j],
+                sci_order=0,
+                max_match_pix=12.0,
+                min_matches=min_matches,
+                nbright=400,
+            )
+        if not st.get('ok'):
+            st = _measure_offset_one_sci(
+                paths[i],
+                paths[j],
+                sci_order=0,
+                refcat=refcat,
+                match_radius_arcsec=match_radius_arcsec,
+                min_matches=min_matches,
+            )
+        if (
+            not st.get('ok')
+            and peak.get('ok')
+            and float(peak.get('abs_arcsec') or 0.0) <= image_tol
+        ):
+            # Crowded galaxy: catalog methods find no stars, but the
+            # nucleus is already on the shared stamp.
+            st = peak
+        pair = {
+            'a': paths[i].name,
+            'b': paths[j].name,
+            'ok': bool(st.get('ok')),
+            'abs_arcsec': float(st.get('abs_arcsec') or 0.0),
+            'dra_arcsec': float(st.get('dra_arcsec') or 0.0),
+            'ddec_arcsec': float(st.get('ddec_arcsec') or 0.0),
+            'n_match': int(st.get('n_match') or st.get('peak_count') or 0),
+            'method': st.get('method', 'dao'),
+        }
+        report['pairs'].append(pair)
+        if not st.get('ok'):
+            log.warning(
+                'L3 QA: could not measure %s vs %s (n=%d)',
+                paths[i].name,
+                paths[j].name,
+                pair['n_match'],
+            )
+            # Overlapping box coadds with 0-1 common sources are a wrong
+            # WCS, not an unmeasurable pair (SN 2014cx F606W vs F814W).
+            if int(pair['n_match']) <= int(FRAME_L3_NO_MATCH_MAX):
+                pair['ok'] = False
+                pair['reason'] = 'no_common_sources'
                 report['failed_pairs'].append(pair)
                 report['ok'] = False
+            continue
+        if st.get('method') == 'smooth_peak':
+            # Nucleus color (~0.16") is not a 50 mas catalog residual.
+            continue
+        worst = max(worst, float(st['abs_arcsec']))
+        if float(st['abs_arcsec']) > float(max_coherent_arcsec):
+            report['failed_pairs'].append(pair)
+            report['ok'] = False
     report['max_abs_arcsec'] = float(worst)
     return report
 
@@ -4349,6 +4563,12 @@ def restore_pipeline_relative_wcs_with_common_shift(
             jhat_idxs = _sci_hdu_indices(jhat_hdul)
             n = min(len(raw_idxs), len(jhat_idxs))
             row['n_sci'] = n
+            if n <= 0:
+                log.warning(
+                    'No SCI HDUs to restore relative WCS on %s', path.name
+                )
+                rows.append(row)
+                continue
             for k in range(n):
                 src = raw_hdul[raw_idxs[k]].header
                 dst = jhat_hdul[jhat_idxs[k]].header
@@ -5889,6 +6109,16 @@ def align_hst_image(
                     recovered.name,
                     exc,
                 )
+        try:
+            from st123.datamodels.hst import restore_hst_identity_cards
+
+            restore_hst_identity_cards(recovered, source=image_path)
+        except Exception as exc:
+            log.warning(
+                'HST identity-card restore failed for %s: %s',
+                recovered.name,
+                exc,
+            )
         _post_jhat_refcat_refine(
             recovered,
             photfilename,
@@ -6166,9 +6396,54 @@ def align_hst_raw_dir(
         )
         frames = kept
 
-    from st123.datamodels.hst import filter_paths_for_stage
+    from st123.datamodels.hst import (
+        filter_good_hst_frames,
+        is_good_hst_expflag,
+        log_rejected_hst_frames,
+        read_expflag,
+    )
 
-    frames = filter_paths_for_stage(frames, stage='align')
+    # Hard-reject non-NORMAL EXPFLAG before JHAT (TDF-DOWN, INDETERMINATE, ...).
+    frames, expflag_rejected = filter_good_hst_frames(
+        frames, require_expflag=True, missing_ok=True
+    )
+    skipped_expflag: list[dict] = []
+    if expflag_rejected:
+        log_rejected_hst_frames(expflag_rejected, stage='align')
+        log.warning(
+            'align: dropped %d bad-EXPFLAG HST frame(s); %d remain',
+            len(expflag_rejected),
+            len(frames),
+        )
+        for bad in expflag_rejected:
+            skipped_expflag.append(
+                {
+                    'path': str(bad),
+                    'status': 'failed',
+                    'error': (
+                        f'EXPFLAG={read_expflag(bad) or "UNKNOWN"}; '
+                        'excluded from align and downstream'
+                    ),
+                    'outpath': None,
+                    'align_mode': 'REJECTED_EXPFLAG',
+                }
+            )
+            # Remove any stale JHAT product so mosaic/dolphot cannot pick it up.
+            stale = _jhat_hst_output_path(bad, out)
+            if stale.is_file():
+                try:
+                    if not is_good_hst_expflag(stale, missing_ok=True):
+                        stale.unlink()
+                        log.info(
+                            'align: removed stale bad-EXPFLAG JHAT %s',
+                            stale.name,
+                        )
+                except OSError as exc:
+                    log.warning(
+                        'align: could not remove stale JHAT %s: %s',
+                        stale,
+                        exc,
+                    )
 
     n_frames = len(frames)
     ref_desc = (
@@ -6325,6 +6600,26 @@ def align_hst_raw_dir(
             refcat=nb_refcat,
             abs_ref=nb_abs,
         )
+
+    # Visit-relative / pipeline recovery for remaining JHAT failures
+    # (0-object cuts, Vizier outages, broadband no-source; issues #11-13, #16).
+    n_fail_left = sum(
+        1
+        for r in results
+        if r.get('status') != 'ok' or not r.get('outpath')
+    )
+    if n_fail_left:
+        log.info(
+            'HST visit_relative recovery: %d failed frame(s) after JHAT/'
+            'narrowband',
+            n_fail_left,
+        )
+        recover_failed_hst_visit_relative(
+            results, out, pipeline_fallback=True
+        )
+
+    if skipped_expflag:
+        results.extend(skipped_expflag)
 
     # Relative harmonize within each filter group so coadds are not ghosted
     # by inconsistent per-exposure JHAT solutions.
@@ -6558,12 +6853,24 @@ def stamp_hst_jhat_quality(
                 1000.0 * p_as,
                 peak.get('sci_ext'),
             )
-            if p_as > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+            if p_as <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+                report['catastrophic'] = False
+            else:
                 report['catastrophic'] = True
         xcorr = measure_hst_sky_offset_image_xcorr(
             jhat,
             hub,
             max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
+        )
+        n_inner = int(xcorr.get('n_inner') or 0) if xcorr.get('ok') else 0
+        peak_as = report.get('image_peak_arcsec')
+        peak_good = (
+            peak_as is not None
+            and float(peak_as) <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
+        )
+        peak_bad = (
+            peak_as is not None
+            and float(peak_as) > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
         )
         if xcorr.get('ok'):
             x_as = float(xcorr.get('abs_arcsec') or 0.0)
@@ -6571,23 +6878,27 @@ def stamp_hst_jhat_quality(
             report['image_xcorr'] = {
                 'abs_arcsec': x_as,
                 'sci_ext': xcorr.get('sci_ext'),
-                'n_inner': xcorr.get('n_inner'),
+                'n_inner': n_inner,
             }
             log.info(
                 'Image xcorr residual %s: %.1f mas (sci=%s n_inner=%s)',
                 jhat.name,
                 1000.0 * x_as,
                 xcorr.get('sci_ext'),
-                xcorr.get('n_inner'),
+                n_inner,
             )
-            peak_as = report.get('image_peak_arcsec')
-            peak_bad = (
-                peak_as is not None
-                and float(peak_as) > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
-            )
-            if x_as <= float(FRAME_CATASTROPHIC_TOL_ARCSEC) and not peak_bad:
+            xcorr_real = n_inner >= int(FRAME_IMAGE_XCORR_MIN_INNER)
+            if peak_good:
                 report['catastrophic'] = False
-            else:
+            elif (
+                xcorr_real
+                and x_as <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+            ):
+                # WFPC2 PC galaxy-peak can sit a few arcsec off the WF
+                # xcorr lock (ngc1350: peak 2.88" on SCI1, xcorr 0" on
+                # a well-sampled WF chip). Trust the xcorr leftover.
+                report['catastrophic'] = False
+            elif xcorr_real or peak_bad:
                 report['catastrophic'] = True
                 visit = _hst_visit_key(jhat)
                 for sib in sorted(jhat.parent.glob('*_jhat.fits')):
@@ -6602,6 +6913,10 @@ def stamp_hst_jhat_quality(
                     )
                     if not rel.get('ok'):
                         continue
+                    if int(rel.get('n_inner') or 0) < int(
+                        FRAME_IMAGE_XCORR_MIN_INNER
+                    ):
+                        continue
                     rel_as = rel.get('abs_arcsec')
                     if rel_as is None or float(rel_as) > float(FRAME_CATASTROPHIC_TOL_ARCSEC):
                         continue
@@ -6614,14 +6929,16 @@ def stamp_hst_jhat_quality(
                     sib_ok = False
                     for cand in sib_hub.get('candidates') or [sib_hub]:
                         a = cand.get('abs_arcsec')
-                        if cand.get('ok') and a is not None and float(a) <= float(
-                            FRAME_CATASTROPHIC_TOL_ARCSEC
+                        if (
+                            cand.get('ok')
+                            and a is not None
+                            and float(a) <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+                            and int(cand.get('n_inner') or 0)
+                            >= int(FRAME_IMAGE_XCORR_MIN_INNER)
                         ):
                             sib_ok = True
                             break
                     if not sib_ok:
-                        continue
-                    if peak_bad:
                         continue
                     report['catastrophic'] = False
                     report['image_residual_arcsec'] = rel_as
@@ -6633,9 +6950,18 @@ def stamp_hst_jhat_quality(
                         1000.0 * rel_as,
                     )
                     break
+        elif peak_good:
+            report['catastrophic'] = False
     report['algnref'] = original_ref
     report['aligned_to'] = aligned_to
     report['residual'] = residual
+    trusted = trusted_abs_residual_arcsec(report)
+    report['abs_method'] = trusted.get('method')
+    report['ok'] = abs_ok_local(
+        trusted.get('residual_arcsec'),
+        n_calibrators=trusted.get('n_calibrators'),
+        method=trusted.get('method'),
+    )
 
     stamp_quality_headers(
         jhat,
@@ -6649,6 +6975,13 @@ def stamp_hst_jhat_quality(
         internal_max_arcsec=internal_max_arcsec,
         catalog_basename=ref_path.name if ref_path else None,
         catastrophic=bool(report['catastrophic']),
+        image_peak_arcsec=report.get('image_peak_arcsec'),
+        image_xcorr_arcsec=report.get('image_residual_arcsec'),
+        image_xcorr_n_inner=(
+            int((report.get('image_xcorr') or {}).get('n_inner') or 0)
+            if isinstance(report.get('image_xcorr'), dict)
+            else None
+        ),
     )
     if med_as is not None:
         log.info(
@@ -6664,12 +6997,17 @@ def stamp_hst_jhat_quality(
 
 
 def abs_ok_local(
-    residual_arcsec: float | None, *, n_calibrators: int | None = None
+    residual_arcsec: float | None,
+    *,
+    n_calibrators: int | None = None,
+    method: str | None = None,
 ) -> bool:
     """Local wrapper so stamp helpers need not import frame_qa.abs_ok by name."""
     from st123.stages.alignment.frame_qa import abs_ok as _abs_ok
 
-    return _abs_ok(residual_arcsec, n_calibrators=n_calibrators)
+    return _abs_ok(
+        residual_arcsec, n_calibrators=n_calibrators, method=method
+    )
 
 
 def polish_hst_jhat_abs_residual(
@@ -6876,7 +7214,9 @@ def recover_catastrophic_hst_jhat(
                 if left.get('ok') and left.get('abs_arcsec') is not None:
                     leftover = float(left['abs_arcsec'])
                     n_inner_left = int(left.get('n_inner') or 0)
-                if leftover <= 0.25 and n_inner_left >= 200:
+                if leftover <= 0.25 and n_inner_left >= int(
+                    FRAME_IMAGE_XCORR_MIN_INNER
+                ):
                     off = cand
                     already_applied = True
                     report['method'] = 'image_xcorr'
@@ -6933,6 +7273,37 @@ def recover_catastrophic_hst_jhat(
             float(max_offset_arcsec),
         )
         return report
+    # A prelim L3 hub built from the same visit yields a tautological
+    # 0" xcorr leftover while pipeline WCS is still arcseconds off Gaia
+    # (ngc1350 WFPC2/F606W ~17"). Prefer the Gaia visit shift.
+    if (
+        report.get('method') in ('image_xcorr', 'smooth_peak')
+        and float(off.get('abs_arcsec') or 0.0)
+        <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+    ):
+        gaia = measure_hst_sky_offset_vs_gaia(
+            anchor,
+            max_offset_arcsec=float(max_offset_arcsec),
+            min_matches=max(int(min_peak), 12),
+        )
+        if gaia.get('ok') and float(gaia.get('abs_arcsec') or 0.0) > 1.0:
+            restore_pipeline_relative_wcs_with_common_shift(
+                live, dra_deg=0.0, ddec_deg=0.0
+            )
+            off = gaia
+            already_applied = False
+            report['method'] = 'gaia_after_self_lock'
+            report['probe'] = {
+                'abs_arcsec': gaia.get('abs_arcsec'),
+                'n_match': gaia.get('n_match'),
+                'peak_count': gaia.get('peak_count'),
+                'peak_mode': gaia.get('peak_mode'),
+            }
+            log.info(
+                'Self-hub image lock; applying Gaia visit shift %.3f" (%s)',
+                float(gaia.get('abs_arcsec') or 0.0),
+                anchor.name,
+            )
     abs_as = float(off.get('abs_arcsec') or 0.0)
     report['abs_arcsec'] = abs_as
     report['dra_arcsec'] = float(off.get('dra_arcsec') or 0.0)
@@ -7002,7 +7373,23 @@ def _quality_is_catastrophic(
     if peak_as is not None and float(peak_as) <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
         return False
     x_as = q.get('image_residual_arcsec')
-    if x_as is not None and float(x_as) <= float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+    n_inner = 0
+    xc = q.get('image_xcorr')
+    if isinstance(xc, dict):
+        try:
+            n_inner = int(xc.get('n_inner') or 0)
+        except (TypeError, ValueError):
+            n_inner = 0
+    if n_inner <= 0:
+        try:
+            n_inner = int(q.get('image_xcorr_n_inner') or 0)
+        except (TypeError, ValueError):
+            n_inner = 0
+    if (
+        x_as is not None
+        and float(x_as) <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+        and n_inner >= int(FRAME_IMAGE_XCORR_MIN_INNER)
+    ):
         return False
     if q.get('catastrophic'):
         return True
@@ -7079,12 +7466,14 @@ def finalize_hst_jhat_dir_quality(
                     'path': str(r.get('path') or p),
                     'filter': 'NA',
                     'status': str(r.get('status') or 'failed'),
-                    'n_calibrators': 'NA',
-                    'dispersion_mas': 'NA',
-                    'internal_max_delta_mas': 'NA',
+                    # Use None (not 'NA') so build_frame_qa / peer medians
+                    # never hit int('NA') -- issue #16 finalize crash.
+                    'n_calibrators': None,
+                    'dispersion_mas': None,
+                    'internal_max_delta_mas': None,
                     'align_mode': 'FAILED',
-                    'algnref': 'NA',
-                    'aligned_to': 'NA',
+                    'algnref': None,
+                    'aligned_to': None,
                     'mission': 'hst',
                 }
             )
@@ -7114,6 +7503,9 @@ def finalize_hst_jhat_dir_quality(
                 'algnref': stamped.get('algnref'),
                 'aligned_to': stamped.get('aligned_to'),
                 'mission': 'hst',
+                'image_peak_arcsec': stamped.get('image_peak_arcsec'),
+                'image_residual_arcsec': stamped.get('image_residual_arcsec'),
+                'image_xcorr': stamped.get('image_xcorr'),
             }
         )
 
@@ -7177,6 +7569,11 @@ def finalize_hst_jhat_dir_quality(
                     row['n_calibrators'] = stamped.get('n_calibrators')
                     row['dispersion_mas'] = stamped.get('dispersion_mas')
                     row['align_mode'] = 'VISIT_ABS'
+                    row['image_peak_arcsec'] = stamped.get('image_peak_arcsec')
+                    row['image_residual_arcsec'] = stamped.get(
+                        'image_residual_arcsec'
+                    )
+                    row['image_xcorr'] = stamped.get('image_xcorr')
         peer_n = median_healthy_n_calibrators(
             r.get('n_calibrators')
             if isinstance(r.get('n_calibrators'), int)

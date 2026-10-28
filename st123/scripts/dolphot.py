@@ -217,18 +217,16 @@ def _pick_hst_reference(
     prefer WFC3 -> ACS -> WFPC2, then
     :attr:`HSTDataModel.BEST_REFERENCE_FILTERS`.
     """
+    from st123.datamodels.hst import is_usable_hst_coadd, rank_hst_coadd
+
     ref_dir = reduction / 'reference'
     coadds: list[Path] = []
     if ref_dir.is_dir():
         boxed = sorted(ref_dir.glob('group_*/ref_*/coadd_*.fits'))
         flat = sorted(ref_dir.glob('coadd_*.fits'))
         for p in boxed + flat:
-            name = p.name.lower()
-            if not (
-                name.endswith('_drc.fits') or name.endswith('_drz.fits')
-            ):
-                continue
-            coadds.append(p)
+            if is_usable_hst_coadd(p):
+                coadds.append(p)
     if coadds:
         inst = (instrument or '').lower()
         mixed = inst in ('', _HST_MIXED)
@@ -238,32 +236,10 @@ def _pick_hst_reference(
             # Prefer boxed layout over legacy flat products.
             layout_rank = 0 if 'group_' in path.as_posix() else 1
             if mixed:
-                if 'wfc3' in name:
-                    inst_rank = 0
-                elif 'acs' in name:
-                    inst_rank = 1
-                elif 'wfpc2' in name:
-                    inst_rank = 2
-                else:
-                    inst_rank = 3
+                inst_rank, filt_rank, _name = rank_hst_coadd(path)
             else:
                 inst_rank = 0 if (inst and inst in name) else 1
-            filt_rank = len(HSTDataModel.BEST_REFERENCE_FILTERS)
-            for i, filt in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
-                if f'_{filt}_' in name:
-                    filt_rank = i
-                    break
-            else:
-                try:
-                    from st123.utils.helpers import get_filter
-
-                    filt = get_filter(path)
-                    for i, pref in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
-                        if filt == pref:
-                            filt_rank = i
-                            break
-                except Exception:
-                    pass
+                _, filt_rank, _name = rank_hst_coadd(path)
             return (layout_rank, inst_rank, filt_rank, name)
 
         return sorted(coadds, key=_rank)[0]

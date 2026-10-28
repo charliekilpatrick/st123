@@ -10,6 +10,7 @@ import pytest
 EXPECTED_SCRIPTS = {
     'download': 'st123.scripts.download:main',
     'align': 'st123.scripts.align:main',
+    'align-clinic': 'st123.scripts.align_clinic:main',
     'mosaic': 'st123.scripts.mosaic:main',
     'link-raw': 'st123.scripts.link_raw:main',
     'image-overlap': 'st123.scripts.image_overlap:main',
@@ -26,6 +27,7 @@ EXPECTED_SCRIPTS = {
 SCRIPT_MODULES = [
     'st123.scripts.download',
     'st123.scripts.align',
+    'st123.scripts.align_clinic',
     'st123.scripts.mosaic',
     'st123.scripts.link_raw',
     'st123.scripts.image_overlap',

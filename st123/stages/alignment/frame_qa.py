@@ -26,8 +26,12 @@ FRAME_SPARSE_TOL_ARCSEC = 0.080
 # Legacy L3 pairwise soft ceiling (warn, do not hard-fail mosaic).
 FRAME_L3_SOFT_TOL_ARCSEC = 0.120
 # Hard fail: residual this large is a wrong solution, not a 50-80 mas miss.
-# Frames at or above this must not enter a coadd (SN 2014cx F606W was 245-316 mas).
+# Crowded-galaxy catalog NN (NGC 337 F606W ~316 mas) is not this residual;
+# use trusted_abs_residual_arcsec (galaxy peak / xcorr) first.
 FRAME_CATASTROPHIC_TOL_ARCSEC = 0.200
+# FFT xcorr on an empty cutout can report a 0" leftover; require this many
+# finite inner pixels before treating the lock as real.
+FRAME_IMAGE_XCORR_MIN_INNER = 200
 # Wide recovery search / apply cap when a frame is already catastrophic.
 # Shared-stamp galaxy peaks can sit tens of arcsec apart (SN 2014cx F606W is
 # 25" west and 6" north of F555W after a false ~69" FFT lock; pipeline WCS
@@ -41,7 +45,34 @@ FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC = 1.0
 # L3 coadds of the same box that share <= this many sources are treated as
 # a failed WCS, not "unmeasurable".
 FRAME_L3_NO_MATCH_MAX = 1
+# Image-lock pair methods: n_match can be 1 (galaxy peak) and still be a
+# locked WCS. Catalog n_match<=1 without an image lock is a failed WCS.
+FRAME_IMAGE_LOCK_METHODS = frozenset(
+    {'image_peak', 'image_xcorr', 'smooth_peak'}
+)
+# Header / clinic quality flags (ST123QF). Comma-separated when several apply.
+QF_OK = 'OK'
+QF_RECOVERED_GAIA = 'RECOVERED_GAIA'
+QF_RECOVERED_IMAGE = 'RECOVERED_IMAGE'
+QF_UV_SPARSE = 'UV_SPARSE'
+QF_L3_UNTIED = 'L3_UNTIED'
+QF_CATASTROPHIC = 'CATASTROPHIC'
+QF_EXPFLAG = 'EXPFLAG'
+QF_NO_GUIDE = 'NO_GUIDE'
+QF_JHAT_NO_SOURCES = 'JHAT_NO_SOURCES'
+QF_UNSALVAGEABLE = 'UNSALVAGEABLE'
+UNSALVAGEABLE_EXPFLAGS = frozenset(
+    {
+        'LOSS OF LOCK',
+        'EXCESSIVE DOWNTIME',
+        'INTERRUPTED',
+        'PREMATURE EXPOSURE',
+        'GUIDE STAR ACQUISITION FAILED',
+    }
+)
 FRAME_MIN_MATCH_HEALTHY = 12
+# Soft cap on full pairwise L3 coadd QA; above this use hub-vs-each.
+L3_PAIRWISE_SOFT_LIMIT = 10
 # Peer-sparse: n_cal this far below healthy peers plus a residual above the
 # sparse gate is a false JHAT lock, even when the residual is < 200 mas.
 FRAME_PEER_CAL_FRACTION = 0.25
@@ -54,6 +85,26 @@ FRAME_ABS_RETIE_MAX_APPLY_ARCSEC = 0.40
 FRAME_ABS_RETIE_MIN_PEAK = 8
 
 PathLike = str | Path
+
+
+def _safe_int_calibrator(value: Any) -> int | None:
+    """Parse ``n_calibrators``; treat ``'NA'`` / blank as missing (issue #16)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    try:
+        text = str(value).strip()
+    except Exception:
+        return None
+    if not text or text.upper() == 'NA':
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
 
 
 def coherent_tol_arcsec(n_match: int | None) -> float:
@@ -73,11 +124,92 @@ def abs_ok(
     residual_arcsec: float | None,
     *,
     n_calibrators: int | None = None,
+    method: str | None = None,
 ) -> bool:
     """True when absolute residual is within the adaptive tolerance."""
     if residual_arcsec is None:
         return False
+    # Galaxy-peak / image xcorr on a resolved nucleus is quantized at ~1
+    # ACS pixel (~50 mas) and can sit a bit above the 50-80 mas catalog
+    # gates. FRAME_L3_SOFT_TOL is still a locked WCS, not a wrong lock.
+    if str(method or '') in ('image_peak', 'image_xcorr'):
+        return float(residual_arcsec) <= float(FRAME_L3_SOFT_TOL_ARCSEC)
     return float(residual_arcsec) <= coherent_tol_arcsec(n_calibrators)
+
+
+def trusted_abs_residual_arcsec(
+    quality: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Absolute residual to gate on, preferring a verified image lock.
+
+    Crowded fields (NGC 337) yield catalog / Gaia NN residuals of several
+    arcseconds even after the galaxy nucleus is locked to the hub at
+    ~60-80 mas. A peak within ``FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC`` or an
+    xcorr leftover within ``FRAME_CATASTROPHIC_TOL_ARCSEC`` with enough
+    inner pixels is the WCS quality, not the photometry NN.
+    """
+    q = quality or {}
+    peak = q.get('image_peak_arcsec')
+    if peak is not None and float(peak) <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC):
+        return {
+            'residual_arcsec': float(peak),
+            'method': 'image_peak',
+            'n_calibrators': 1,
+        }
+    x_as = q.get('image_residual_arcsec')
+    n_inner = 0
+    xc = q.get('image_xcorr')
+    if isinstance(xc, Mapping):
+        try:
+            n_inner = int(xc.get('n_inner') or 0)
+        except (TypeError, ValueError):
+            n_inner = 0
+    if n_inner <= 0:
+        try:
+            n_inner = int(q.get('image_xcorr_n_inner') or 0)
+        except (TypeError, ValueError):
+            n_inner = 0
+    if (
+        x_as is not None
+        and n_inner >= int(FRAME_IMAGE_XCORR_MIN_INNER)
+        and float(x_as) <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+    ):
+        return {
+            'residual_arcsec': float(x_as),
+            'method': 'image_xcorr',
+            'n_calibrators': 1,
+        }
+    disp = q.get('dispersion_mas')
+    n_cal = q.get('n_calibrators')
+    try:
+        n_cal_i = int(n_cal) if n_cal is not None else None
+    except (TypeError, ValueError):
+        n_cal_i = None
+    if disp is not None:
+        try:
+            return {
+                'residual_arcsec': float(disp) / 1000.0,
+                'method': 'catalog_residual',
+                'n_calibrators': n_cal_i,
+            }
+        except (TypeError, ValueError):
+            pass
+    hdr_as = q.get('residual_arcsec')
+    if hdr_as is not None:
+        try:
+            return {
+                'residual_arcsec': float(hdr_as),
+                'method': 'catalog_residual',
+                'n_calibrators': n_cal_i,
+            }
+        except (TypeError, ValueError):
+            pass
+    return {
+        'residual_arcsec': None,
+        'method': None,
+        'n_calibrators': n_cal_i,
+    }
 
 
 def internal_ok(
@@ -154,6 +286,7 @@ def read_jhat_quality_headers(path: PathLike) -> dict[str, Any]:
         'residual_arcsec': None,
         'n_calibrators': None,
         'catastrophic': None,
+        'image_peak_arcsec': None,
     }
     p = Path(path).expanduser().resolve()
     if not p.is_file():
@@ -171,6 +304,22 @@ def read_jhat_quality_headers(path: PathLike) -> dict[str, Any]:
                 report['n_calibrators'] = int(ncal)
             if 'ST123CAT' in hdr:
                 report['catastrophic'] = bool(hdr['ST123CAT'])
+            peak = hdr.get('ST123PK')
+            if peak is not None:
+                report['image_peak_arcsec'] = float(peak)
+            xcorr = hdr.get('ST123XC')
+            if xcorr is not None:
+                report['image_residual_arcsec'] = float(xcorr)
+            n_inner = hdr.get('ST123XI')
+            if n_inner is not None:
+                report['image_xcorr_n_inner'] = int(n_inner)
+                report['image_xcorr'] = {
+                    'abs_arcsec': report.get('image_residual_arcsec'),
+                    'n_inner': int(n_inner),
+                }
+            qf = hdr.get('ST123QF')
+            if qf is not None:
+                report['quality_flag'] = str(qf)
     except Exception as exc:
         logger.warning('Could not read quality headers %s: %s', p.name, exc)
     return report
@@ -201,10 +350,16 @@ def filter_catastrophic_jhat_frames(
         if flagged is False:
             kept.append(path)
             continue
+        trusted = trusted_abs_residual_arcsec(qual)
+        if str(trusted.get('method') or '') in ('image_peak', 'image_xcorr'):
+            kept.append(path)
+            continue
         if flagged is not True:
+            res = trusted.get('residual_arcsec')
+            n_use = trusted.get('n_calibrators')
             flagged = is_catastrophic_alignment(
-                qual.get('residual_arcsec'),
-                qual.get('n_calibrators'),
+                res if res is not None else qual.get('residual_arcsec'),
+                n_use if n_use is not None else qual.get('n_calibrators'),
                 peer_n_calibrators=peer,
             )
         if flagged:
@@ -213,6 +368,22 @@ def filter_catastrophic_jhat_frames(
         else:
             kept.append(path)
     return kept, dropped
+
+
+def _pair_is_image_locked(pair: Mapping[str, Any]) -> bool:
+    """True when L3 QA locked the pair by galaxy peak / image xcorr."""
+    method = str(pair.get('method') or '')
+    if method not in FRAME_IMAGE_LOCK_METHODS:
+        return False
+    if not pair.get('ok'):
+        return False
+    try:
+        abs_as = float(pair.get('abs_arcsec'))
+    except (TypeError, ValueError):
+        return False
+    if method == 'image_xcorr':
+        return abs_as <= float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+    return abs_as <= float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
 
 
 def isolated_unmatched_coadds(
@@ -225,8 +396,14 @@ def isolated_unmatched_coadds(
     Return coadd basenames that share no sources with any healthy peer.
 
     A pair with ``n_match <= FRAME_L3_NO_MATCH_MAX`` is a failed WCS, not
-    an unmeasurable pair. When every coadd is unmatched, keep *abs_ref_name*
-    if given so the hub is not discarded.
+    an unmeasurable pair, unless the pair is an image lock (galaxy peak /
+    xcorr with a small leftover). UV-only boxes often have n_match=1
+    from the nucleus and are still aligned. Sparse but successful pairs
+    (``ok`` with ``n_match`` above the no-match floor and |Delta| within
+    ``FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC``) also count as matched -- otherwise
+    ACS F555W / WFPC2 F450W with 8-11 stars get sidelined while F814W peers
+    stay (sn2021abkm, sn2017bzb). When every coadd is unmatched, keep
+    *abs_ref_name* if given so the hub is not discarded.
     """
     pairs = list(report.get('pairs') or [])
     involved: set[str] = set()
@@ -240,19 +417,56 @@ def isolated_unmatched_coadds(
         if b:
             involved.add(b)
         n_match = int(pair.get('n_match') or 0)
-        if pair.get('ok') and n_match >= int(min_matches):
+        image_lock = _pair_is_image_locked(pair)
+        sparse_ok = False
+        if (
+            pair.get('ok')
+            and n_match > int(FRAME_L3_NO_MATCH_MAX)
+            and n_match < int(min_matches)
+        ):
+            try:
+                abs_as = float(pair.get('abs_arcsec'))
+            except (TypeError, ValueError):
+                abs_as = None
+            if abs_as is None or abs_as <= float(
+                FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC
+            ):
+                sparse_ok = True
+        if (
+            image_lock
+            or (pair.get('ok') and n_match >= int(min_matches))
+            or sparse_ok
+        ):
             if a:
                 matched.add(a)
             if b:
                 matched.add(b)
-        elif n_match <= int(FRAME_L3_NO_MATCH_MAX):
+            continue
+        # Measurable galaxy-peak offset is a unify/recover target, not a
+        # sideline (sn2020zbv ~47" multi-cluster vs optical hub).
+        if str(pair.get('reason') or '') == 'image_offset':
+            continue
+        if str(pair.get('method') or '') in FRAME_IMAGE_LOCK_METHODS:
+            try:
+                abs_as = float(pair.get('abs_arcsec'))
+            except (TypeError, ValueError):
+                abs_as = None
+            if abs_as is not None and abs_as > float(
+                FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC
+            ):
+                continue
+        # Weak dao fails (n_match 2..min_matches-1, ok=False) are soft, not
+        # catastrophic -- do not isolate (sn2020zbv WFC3 F814W n=3-5).
+        if n_match <= int(FRAME_L3_NO_MATCH_MAX):
             if a:
                 unmatched.add(a)
             if b:
                 unmatched.add(b)
     if not involved:
         return []
-    isolated = sorted(involved - matched)
+    # Only drop coadds that appear in true no-source pairs and never matched.
+    # Do not use (involved - matched): that falsely sidelines soft dao fails.
+    isolated = sorted(unmatched - matched)
     if not isolated:
         return []
     if matched:
@@ -279,19 +493,22 @@ def frame_qa_is_catastrophic(report: Mapping[str, Any] | None) -> bool:
         n_cal_i = int(n_cal) if n_cal is not None else None
     except (TypeError, ValueError):
         n_cal_i = None
-    peer = median_healthy_n_calibrators(
-        (
-            int(fr['n_calibrators'])
-            if fr.get('n_calibrators') is not None
-            else None
+    method = str(abs_sec.get('method') or '')
+    if method in ('image_peak', 'image_xcorr'):
+        if residual_as is not None and residual_as > float(
+            FRAME_CATASTROPHIC_TOL_ARCSEC
+        ):
+            return True
+    else:
+        peer = median_healthy_n_calibrators(
+            _safe_int_calibrator(fr.get('n_calibrators'))
+            for fr in (report.get('frames') or [])
+            if isinstance(fr, Mapping)
         )
-        for fr in (report.get('frames') or [])
-        if isinstance(fr, Mapping)
-    )
-    if is_catastrophic_alignment(
-        residual_as, n_cal_i, peer_n_calibrators=peer
-    ):
-        return True
+        if is_catastrophic_alignment(
+            residual_as, n_cal_i, peer_n_calibrators=peer
+        ):
+            return True
     extra = report.get('mosaic_coadd_qa') or {}
     if isolated_unmatched_coadds(extra):
         return True
@@ -314,6 +531,10 @@ def stamp_quality_headers(
     internal_max_arcsec: float | None = None,
     catalog_basename: str | None = None,
     catastrophic: bool | None = None,
+    image_peak_arcsec: float | None = None,
+    image_xcorr_arcsec: float | None = None,
+    image_xcorr_n_inner: int | None = None,
+    quality_flag: str | None = None,
 ) -> None:
     """
     Write unified JWST-style quality keywords onto a JHAT primary header.
@@ -338,6 +559,14 @@ def stamp_quality_headers(
         Stored in ``JWCAT`` when provided.
     catastrophic : bool, optional
         When set, writes ``ST123CAT`` so mosaic can refuse the frame.
+    image_peak_arcsec : float, optional
+        Smoothed galaxy-peak offset vs the hub (``ST123PK``).
+    image_xcorr_arcsec : float, optional
+        FFT xcorr leftover vs the hub (``ST123XC``).
+    image_xcorr_n_inner : int, optional
+        Finite inner pixels in the xcorr cutout (``ST123XI``).
+    quality_flag : str, optional
+        Clinic / salvage code (``ST123QF``).
     """
     path = Path(jhat_path).expanduser().resolve()
     if not path.is_file():
@@ -384,6 +613,26 @@ def stamp_quality_headers(
                 bool(catastrophic),
                 'st123: catastrophic alignment; do not mosaic',
             )
+        if image_peak_arcsec is not None:
+            hdr['ST123PK'] = (
+                float(image_peak_arcsec),
+                '[arcsec] galaxy-peak |Delta| vs hub',
+            )
+        if image_xcorr_arcsec is not None:
+            hdr['ST123XC'] = (
+                float(image_xcorr_arcsec),
+                '[arcsec] image-xcorr leftover vs hub',
+            )
+        if image_xcorr_n_inner is not None:
+            hdr['ST123XI'] = (
+                int(image_xcorr_n_inner),
+                'finite inner pixels in xcorr cutout',
+            )
+        if quality_flag:
+            hdr['ST123QF'] = (
+                str(quality_flag)[:68],
+                'st123 alignment quality flag',
+            )
         hdul.flush()
 
 
@@ -402,12 +651,39 @@ def build_frame_qa(
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a unified ``frame_qa`` payload (abs + internal sections)."""
-    n_cal = int(n_calibrators) if n_calibrators is not None else None
+    n_cal = _safe_int_calibrator(n_calibrators)
     residual_as = (
         float(residual_mas) / 1000.0 if residual_mas is not None else None
     )
+    method = abs_method
+    trusted_rows: list[dict[str, Any]] = []
+    for fr in frames or []:
+        if not isinstance(fr, Mapping):
+            continue
+        if fr.get('image_peak_arcsec') is None and fr.get(
+            'image_residual_arcsec'
+        ) is None:
+            continue
+        t = trusted_abs_residual_arcsec(fr)
+        if t.get('residual_arcsec') is not None:
+            trusted_rows.append(t)
+    if trusted_rows:
+        worst = max(trusted_rows, key=lambda t: float(t['residual_arcsec']))
+        residual_as = float(worst['residual_arcsec'])
+        residual_mas = 1000.0 * residual_as
+        method = str(worst.get('method') or method)
+        n_cal = worst.get('n_calibrators')
+        try:
+            n_cal = int(n_cal) if n_cal is not None else None
+        except (TypeError, ValueError):
+            n_cal = None
     max_delta_as = (
         float(max_delta_mas) / 1000.0 if max_delta_mas is not None else None
+    )
+    abs_tol = (
+        float(FRAME_L3_SOFT_TOL_ARCSEC)
+        if str(method or '') in ('image_peak', 'image_xcorr')
+        else coherent_tol_arcsec(n_cal)
     )
     report: dict[str, Any] = {
         'mission': str(mission).lower(),
@@ -419,14 +695,14 @@ def build_frame_qa(
                 float(residual_mas) if residual_mas is not None else None
             ),
             'n_calibrators': n_cal,
-            'method': abs_method,
+            'method': method,
             # Missing residual is unknown, not a soft-fail.
             'ok': (
                 True
                 if residual_as is None
-                else abs_ok(residual_as, n_calibrators=n_cal)
+                else abs_ok(residual_as, n_calibrators=n_cal, method=method)
             ),
-            'tol_arcsec': coherent_tol_arcsec(n_cal),
+            'tol_arcsec': abs_tol,
         },
         'internal': {
             'max_delta_mas': (
@@ -449,16 +725,18 @@ def build_frame_qa(
         report.update(dict(extra))
     report['ok'] = bool(report['abs']['ok']) and bool(report['internal']['ok'])
     peer = median_healthy_n_calibrators(
-        (
-            int(fr['n_calibrators'])
-            if isinstance(fr, Mapping) and fr.get('n_calibrators') is not None
-            else None
-        )
+        _safe_int_calibrator(fr.get('n_calibrators'))
         for fr in (frames or [])
+        if isinstance(fr, Mapping)
     )
-    cat_ok = not is_catastrophic_alignment(
-        residual_as, n_cal, peer_n_calibrators=peer
-    )
+    if str(method or '') in ('image_peak', 'image_xcorr'):
+        cat_ok = residual_as is None or residual_as <= float(
+            FRAME_CATASTROPHIC_TOL_ARCSEC
+        )
+    else:
+        cat_ok = not is_catastrophic_alignment(
+            residual_as, n_cal, peer_n_calibrators=peer
+        )
     extra_qa = extra or {}
     mosaic_qa = extra_qa.get('mosaic_coadd_qa') if isinstance(extra_qa, Mapping) else None
     if mosaic_qa and isolated_unmatched_coadds(mosaic_qa):

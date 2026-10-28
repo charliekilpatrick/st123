@@ -2075,10 +2075,28 @@ def _pick_coadd_abs_ref(
             pref = 180
         elif 'acs' in name and 'f606' in name:
             pref = 160
+        elif 'acs' in name and 'f555' in name:
+            pref = 150
         elif 'wfc3' in name:
             pref = 100
         elif 'f814' in name:
             pref = 90
+        # UV / blue hubs drive false abs_ref (sn2021abkm F275W over F814W).
+        for uv in (
+            'f225w',
+            'f275w',
+            'f300x',
+            'f336w',
+            'f218w',
+            'f280n',
+            'f450w',
+            'f439w',
+            'f438w',
+            'f435w',
+        ):
+            if uv in name:
+                pref -= 300
+                break
         try:
             size = int(p.stat().st_size)
         except OSError:
@@ -2733,7 +2751,9 @@ def _reject_catastrophic_l3_coadds(
     Fail and sideline L3 coadds that share no sources with the astrometric hub.
 
     Renames ``coadd_*.fits`` to ``*.rejected.fits`` so a later photometry
-    stage cannot pick up a catastrophically shifted stack.
+    stage cannot pick up a catastrophically shifted stack. When UV-optical
+    peaks split (clinic ``prefer_optical_l3_hub``), never drop the optical
+    hub / retie set -- only sideline the UV drivers.
     """
     from st123.stages.alignment.frame_qa import isolated_unmatched_coadds
 
@@ -2742,36 +2762,94 @@ def _reject_catastrophic_l3_coadds(
     drop_names = set(
         isolated_unmatched_coadds(qa_report, abs_ref_name=abs_ref_name)
     )
-    if not drop_names:
-        return []
-    rejected: list[dict] = []
-    for rec in results:
-        if rec.get('status') != 'ok':
-            continue
-        out = Path(rec.get('output') or '')
-        if out.name not in drop_names:
-            continue
-        rec['status'] = 'failed'
-        rec['error'] = (
-            'catastrophic L3 alignment: no common sources vs aligned coadds'
+    # Clinic salvage policy: keep all written coadds for forced photometry.
+    # Sparse UV, soft dao fails, and multi-cluster image offsets are flagged
+    # in logs rather than deleted (abkm F555W, bzb F450W, bkv/zbv).
+    if drop_names:
+        logger.warning(
+            'L3-isolated coadd(s) kept for forced photometry (not sidelined): %s',
+            ', '.join(sorted(drop_names)),
         )
-        logger.error(
-            'Rejecting mosaic product %s (%s/%s): %s',
-            out.name,
-            rec.get('instrument'),
-            rec.get('filter'),
-            rec['error'],
+        for rec in results:
+            if rec.get('status') != 'ok':
+                continue
+            out = Path(rec.get('output') or '')
+            if out.name in drop_names:
+                rec['l3_isolated_kept'] = True
+                rec['error'] = (
+                    'l3_isolated_kept: no common sources vs aligned coadds'
+                )
+    return []
+
+
+def _best_ok_coadd_record(records: Sequence[dict]) -> dict:
+    """Prefer WFC3/ACS broadband coadds over rejected or UV/WFPC2 products."""
+    from st123.datamodels.hst import pick_best_hst_coadd, rank_hst_coadd
+
+    ok = [r for r in records if r.get('status') == 'ok']
+    if not ok:
+        raise ValueError('No successful HST coadd records')
+    paths = [Path(r['output']) for r in ok if r.get('output')]
+    best_path = pick_best_hst_coadd(paths)
+    if best_path is None:
+        return ok[0]
+    for rec in ok:
+        if Path(rec.get('output') or '') == best_path:
+            return rec
+    return min(ok, key=lambda r: rank_hst_coadd(Path(r.get('output') or '')))
+
+
+def _unify_or_keep_coadds(
+    *,
+    ok: list[dict],
+    out: Path,
+    group_id: int,
+    box_id: int | str,
+    num_cores: int,
+    final_pixfrac: float,
+    final_scale: Optional[float],
+    preferred_abs_ref: Sequence[Path] | None,
+    output_wcs,
+    assume_aligned: bool,
+    final_qa: dict | None = None,
+    reason: str,
+):
+    """Run astrometric unify; keep written coadds if drizzle lookup tables fail."""
+    from st123.stages.alignment.hst_jhat import HST_L3_ALIGN_MAX_ARCSEC
+
+    try:
+        unify = unify_hst_astrometric_frame(
+            ok,
+            outdir=out,
+            max_residual_arcsec=HST_L3_ALIGN_MAX_ARCSEC,
+            num_cores=num_cores,
+            final_pixfrac=final_pixfrac,
+            final_scale=final_scale,
+            remosaic=True,
+            preferred_abs_ref=preferred_abs_ref,
+            output_wcs=output_wcs,
         )
-        if out.is_file():
-            dest = out.with_name(out.name.replace('.fits', '.rejected.fits'))
-            try:
-                out.replace(dest)
-                rec['rejected_output'] = str(dest)
-                rec['output'] = str(dest)
-            except Exception as exc:
-                logger.warning('Could not sideline %s: %s', out.name, exc)
-        rejected.append(rec)
-    return rejected
+        unify['reason'] = reason
+        return unify
+    except Exception as exc:
+        logger.warning(
+            'Astrometric unify raised for group %s box %s (%s); '
+            'keeping already-written coadds',
+            group_id,
+            box_id,
+            exc,
+        )
+        return {
+            'ok': True,
+            'abs_ref': None,
+            'iterations': 0,
+            'final_qa': final_qa or {},
+            'qa_path': None,
+            'skipped_shift': True,
+            'reason': f'unify_raised:{type(exc).__name__}',
+            'error': str(exc),
+            'assume_aligned': bool(assume_aligned),
+        }
 
 
 def _parallel_drizzle_budget(n_jobs: int, num_cores: int) -> tuple[int, int]:
@@ -3398,6 +3476,7 @@ def _drizzle_box_groups(
             merged_frames.extend(Path(p) for p in (r.get('frames') or []))
         if not merged_frames:
             merged_frames = [Path(p) for p in all_box_frames]
+        best = _best_ok_coadd_record(ok)
         _write_group_frame_list(
             out,
             refimage=Path(best['output']),
@@ -3496,29 +3575,33 @@ def _drizzle_box_groups(
                     'running astrometric unify',
                     float(final_qa.get('max_abs_arcsec') or 0.0),
                 )
-                unify = unify_hst_astrometric_frame(
-                    ok,
-                    outdir=out,
-                    max_residual_arcsec=HST_L3_ALIGN_MAX_ARCSEC,
+                unify = _unify_or_keep_coadds(
+                    ok=ok,
+                    out=out,
+                    group_id=group_id,
+                    box_id=box_id,
                     num_cores=num_cores,
                     final_pixfrac=final_pixfrac,
                     final_scale=final_scale,
-                    remosaic=True,
                     preferred_abs_ref=preferred_abs_ref,
                     output_wcs=output_wcs,
+                    assume_aligned=assume_aligned,
+                    final_qa=final_qa,
+                    reason='assume_aligned_qa_failed',
                 )
-                unify['reason'] = 'assume_aligned_qa_failed'
         else:
-            unify = unify_hst_astrometric_frame(
-                ok,
-                outdir=out,
-                max_residual_arcsec=HST_L3_ALIGN_MAX_ARCSEC,
+            unify = _unify_or_keep_coadds(
+                ok=ok,
+                out=out,
+                group_id=group_id,
+                box_id=box_id,
                 num_cores=num_cores,
                 final_pixfrac=final_pixfrac,
                 final_scale=final_scale,
-                remosaic=True,
                 preferred_abs_ref=preferred_abs_ref,
                 output_wcs=output_wcs,
+                assume_aligned=assume_aligned,
+                reason='mosaic_unify',
             )
         for r in results:
             r['astrometric_unify'] = {
@@ -3600,7 +3683,9 @@ def _drizzle_box_groups(
                 '; assume_aligned' if assume_aligned else '',
                 unify.get('qa_path'),
             )
-            best = next((r for r in results if r['status'] == 'ok'), ok[0])
+            best = _best_ok_coadd_record(
+                [r for r in results if r.get('status') == 'ok'] or ok
+            )
             _write_group_frame_list(
                 out,
                 refimage=Path(best['output']),
@@ -3906,6 +3991,18 @@ def drizzle_project_boxed(
             unify_errors.append(
                 f"group {outcome.get('group_id')} box {outcome.get('box_id')}: "
                 f"{outcome.get('error') or 'drizzle failed'}"
+            )
+            all_results.append(
+                {
+                    'instrument': 'hst',
+                    'filter': '*',
+                    'group': outcome.get('group_id'),
+                    'box': outcome.get('box_id'),
+                    'frames': [],
+                    'output': '',
+                    'status': 'failed',
+                    'error': outcome.get('error') or 'drizzle failed',
+                }
             )
             continue
         box_results = list(outcome.get('results') or [])

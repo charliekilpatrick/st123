@@ -338,6 +338,10 @@ def test_align_hst_raw_dir_uses_narrowband_recovery(tmp_path: Path):
         ),
         patch.object(hj, 'find_hst_l3_refcat', return_value=None),
         patch.object(hj, 'find_hst_abs_ref_image', return_value=None),
+        # Unit test only the narrowband wire-up; skip post-align Gaia/finalize
+        # (Vizier outages) and visit_relative (separate clinic path).
+        patch.object(hj, 'finalize_hst_jhat_dir_quality', return_value={}),
+        patch.object(hj, 'recover_failed_hst_visit_relative', side_effect=lambda *a, **k: a[0]),
     ):
         results = hj.align_hst_raw_dir(
             raw,

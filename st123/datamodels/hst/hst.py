@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Sequence
 
@@ -55,10 +56,147 @@ __all__ = [
     'is_good_hst_alignment',
     'is_good_hst_expflag',
     'is_hst_science_path',
+    'is_rejected_coadd',
+    'is_usable_hst_coadd',
     'log_rejected_hst_frames',
+    'pick_best_hst_coadd',
     'prune_bad_hst_expflag',
+    'rank_hst_coadd',
     'read_expflag',
+    'restore_hst_identity_cards',
 ]
+
+
+# Cards DOLPHOT mask tools and drizzle need on the primary header after JHAT.
+_HST_IDENTITY_CARDS = (
+    'INSTRUME',
+    'TELESCOP',
+    'DETECTOR',
+    'FILTER',
+    'FILTNAM1',
+    'PHOTMODE',
+)
+# Classic IPPPSSOOT roots: u=WFPC2, j=ACS, i=WFC3.
+_IPPPSSOOT_INST = {
+    'u': 'WFPC2',
+    'j': 'ACS',
+    'i': 'WFC3',
+}
+_IPPPSSOOT_RE = re.compile(r'^([uji])[a-z0-9]{8}', re.I)
+
+
+def infer_hst_instrument_from_name(path: PathLike) -> str | None:
+    """Guess ``ACS`` / ``WFC3`` / ``WFPC2`` from a filename when headers are empty."""
+    name = Path(path).name.lower()
+    if 'wfpc2' in name:
+        return 'WFPC2'
+    if 'acs' in name:
+        return 'ACS'
+    if 'wfc3' in name:
+        return 'WFC3'
+    match = _IPPPSSOOT_RE.match(name)
+    if match:
+        return _IPPPSSOOT_INST[match.group(1).lower()]
+    return None
+
+
+def is_rejected_coadd(path: PathLike) -> bool:
+    """True when a mosaic product was sidelined as ``*.rejected.fits``."""
+    return 'rejected' in Path(path).name.lower()
+
+
+def is_usable_hst_coadd(path: PathLike) -> bool:
+    """True for an on-disk HST/JWST coadd that photometry may use as img0."""
+    p = Path(path)
+    name = p.name.lower()
+    if is_rejected_coadd(p) or not p.is_file():
+        return False
+    return name.endswith(('_drc.fits', '_drz.fits', '_i2d.fits'))
+
+
+def rank_hst_coadd(path: PathLike) -> tuple[int, int, str]:
+    """Sort key: WFC3 then ACS then WFPC2, then :attr:`HSTDataModel.BEST_REFERENCE_FILTERS`."""
+    name = Path(path).name.lower()
+    if 'wfc3' in name:
+        inst_rank = 0
+    elif 'acs' in name:
+        inst_rank = 1
+    elif 'wfpc2' in name:
+        inst_rank = 2
+    else:
+        inst_rank = 3
+    filt_rank = len(HSTDataModel.BEST_REFERENCE_FILTERS)
+    for i, filt in enumerate(HSTDataModel.BEST_REFERENCE_FILTERS):
+        if f'_{filt}_' in name:
+            filt_rank = i
+            break
+    return (inst_rank, filt_rank, name)
+
+
+def pick_best_hst_coadd(paths: Sequence[PathLike]) -> Path | None:
+    """Return the preferred non-rejected coadd, or ``None`` when none are usable."""
+    usable = [Path(p) for p in paths if is_usable_hst_coadd(p)]
+    if not usable:
+        return None
+    return sorted(usable, key=rank_hst_coadd)[0]
+
+
+def _identity_cards_from(path: PathLike) -> dict[str, object]:
+    cards: dict[str, object] = {}
+    try:
+        with as_datamodel(path).open(memmap=True) as hdul:
+            hdr = hdul[0].header
+            for key in _HST_IDENTITY_CARDS:
+                val = hdr.get(key)
+                if val is not None and str(val).strip():
+                    cards[key] = val
+    except Exception:
+        pass
+    return cards
+
+
+def restore_hst_identity_cards(
+    path: PathLike,
+    source: PathLike | None = None,
+) -> dict[str, object]:
+    """
+    Copy missing ``INSTRUME`` / ``TELESCOP`` / ``DETECTOR`` (and filter) cards.
+
+    JHAT / tweakreg products often drop the primary identity cards that
+    ``wfpc2mask`` / ``wfc3mask`` / ``acsmask`` require. *source* is typically
+    the calibrated raw that JHAT aligned. When cards are still missing,
+    ``INSTRUME`` is inferred from the IPPPSSOOT / filename and ``TELESCOP``
+    defaults to ``HST``.
+    """
+    dest = Path(path)
+    src_cards = _identity_cards_from(source) if source is not None else {}
+    inferred = infer_hst_instrument_from_name(source if source is not None else dest)
+    if inferred is None:
+        inferred = infer_hst_instrument_from_name(dest)
+    applied: dict[str, object] = {}
+    try:
+        with as_datamodel(dest).open(mode='update', memmap=False) as hdul:
+            hdr = hdul[0].header
+            for key in _HST_IDENTITY_CARDS:
+                if str(hdr.get(key) or '').strip():
+                    continue
+                if key in src_cards:
+                    hdr[key] = src_cards[key]
+                    applied[key] = src_cards[key]
+            if not str(hdr.get('INSTRUME') or '').strip() and inferred:
+                hdr['INSTRUME'] = inferred
+                applied['INSTRUME'] = inferred
+            if not str(hdr.get('TELESCOP') or '').strip():
+                hdr['TELESCOP'] = 'HST'
+                applied['TELESCOP'] = 'HST'
+            if applied:
+                hdul.flush()
+    except Exception as exc:
+        logger.warning('Could not restore HST identity cards on %s: %s', dest.name, exc)
+        return {}
+    if applied:
+        logger.info('Restored HST identity cards on %s: %s', dest.name, applied)
+    return applied
 
 
 def _float_keyword_arcsec(model: InstrumentDataModel, key: str) -> float | None:

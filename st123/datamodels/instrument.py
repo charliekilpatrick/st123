@@ -279,12 +279,16 @@ def _select_class(path: PathLike, ident: FileIdentity) -> type[InstrumentDataMod
     if name.endswith('.asdf') and (name.startswith('r') or 'wfi' in name):
         return RomanWFIDataModel
 
-    if EuclidVISDataModel.matches(inst) or EuclidVISDataModel.matches(path):
+    # Prefer explicit TELESCOP/INSTRUME before filename heuristics so HST
+    # paths under dirs named ``*visit*`` are not claimed by Euclid VIS.
+    if tele == 'EUCLID' or EuclidVISDataModel.matches(inst) or EuclidNIRDataModel.matches(inst):
+        if 'NISP' in inst or 'NIR' in inst or EuclidNIRDataModel.matches(inst):
+            return EuclidNIRDataModel
         return EuclidVISDataModel
-    if EuclidNIRDataModel.matches(inst) or EuclidNIRDataModel.matches(path):
-        return EuclidNIRDataModel
-    if tele == 'EUCLID':
-        if 'NISP' in inst or 'NIR' in inst:
+    if tele not in ('HST', 'JWST', 'ROMAN', 'RST') and (
+        EuclidVISDataModel.matches(path) or EuclidNIRDataModel.matches(path)
+    ):
+        if EuclidNIRDataModel.matches(path):
             return EuclidNIRDataModel
         return EuclidVISDataModel
 

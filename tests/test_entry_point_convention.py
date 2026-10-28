@@ -101,6 +101,7 @@ def test_no_main_blocks_outside_st123_scripts():
 def test_required_cli_modules_exist():
     """Preserve packaged CLI modules under st123/scripts/."""
     assert (REPO_ROOT / 'st123' / 'scripts' / 'align.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'scripts' / 'align_clinic.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'download.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'coadd_phot.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'utils' / 'options.py').is_file()

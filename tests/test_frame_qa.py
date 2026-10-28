@@ -15,8 +15,10 @@ from st123.stages.alignment.frame_qa import (
     FRAME_CATASTROPHIC_TOL_ARCSEC,
     FRAME_INTERNAL_TOL_ARCSEC,
     FRAME_L3_NO_MATCH_MAX,
+    FRAME_L3_SOFT_TOL_ARCSEC,
     FRAME_MIN_MATCH_HEALTHY,
     FRAME_SPARSE_TOL_ARCSEC,
+    _safe_int_calibrator,
     abs_ok,
     build_frame_qa,
     coherent_tol_arcsec,
@@ -28,6 +30,7 @@ from st123.stages.alignment.frame_qa import (
     median_healthy_n_calibrators,
     read_frame_qa,
     stamp_quality_headers,
+    trusted_abs_residual_arcsec,
     warn_if_frame_qa_soft,
     write_alignment_summary_table,
     write_frame_qa,
@@ -57,6 +60,39 @@ def test_coherent_tol_healthy_vs_sparse():
     assert not abs_ok(0.090, n_calibrators=5)
     assert internal_ok(0.040, n_match=20)
     assert not internal_ok(0.070, n_match=20)
+
+
+def test_safe_int_calibrator_rejects_na_strings():
+    """Issue #16: failed rows used n_calibrators='NA' and crashed finalize."""
+    assert _safe_int_calibrator(None) is None
+    assert _safe_int_calibrator('NA') is None
+    assert _safe_int_calibrator('na') is None
+    assert _safe_int_calibrator('') is None
+    assert _safe_int_calibrator(12) == 12
+    assert _safe_int_calibrator('18') == 18
+    report = build_frame_qa(
+        mission='hst',
+        residual_mas=40.0,
+        n_calibrators='NA',
+        frames=[
+            {
+                'path': 'fail_jhat.fits',
+                'status': 'failed',
+                'n_calibrators': 'NA',
+                'dispersion_mas': 'NA',
+            },
+            {
+                'path': 'ok_jhat.fits',
+                'status': 'ok',
+                'n_calibrators': 20,
+                'dispersion_mas': 40.0,
+            },
+        ],
+    )
+    assert report['abs']['n_calibrators'] is None or isinstance(
+        report['abs']['n_calibrators'], int
+    )
+    assert 'ok' in report
 
 
 def test_frame_qa_schema_roundtrip(tmp_path: Path):
@@ -118,6 +154,65 @@ def test_frame_qa_catastrophic_at_250_mas():
     assert report['mosaic_ok'] is False
     assert frame_qa_is_catastrophic(report) is True
     assert warn_if_frame_qa_soft(report) is False
+
+
+def test_trusted_abs_residual_prefers_image_peak():
+    t = trusted_abs_residual_arcsec(
+        {
+            'dispersion_mas': 316.5,
+            'n_calibrators': 14,
+            'image_peak_arcsec': 0.081,
+            'image_residual_arcsec': 0.0,
+            'image_xcorr': {'n_inner': 0},
+        }
+    )
+    assert t['method'] == 'image_peak'
+    assert t['residual_arcsec'] == pytest.approx(0.081)
+    assert abs_ok(0.081, method='image_peak')
+    assert not abs_ok(0.15, method='image_peak')
+    empty_xcorr = trusted_abs_residual_arcsec(
+        {
+            'dispersion_mas': 316.5,
+            'n_calibrators': 14,
+            'image_residual_arcsec': 0.0,
+            'image_xcorr': {'n_inner': 0},
+        }
+    )
+    assert empty_xcorr['method'] == 'catalog_residual'
+    assert empty_xcorr['residual_arcsec'] == pytest.approx(0.3165)
+
+
+def test_frame_qa_image_peak_clears_crowded_catalog():
+    """NGC 337 F606W: 316 mas phot NN after a ~80 mas galaxy-peak lock."""
+    report = build_frame_qa(
+        mission='hst',
+        residual_mas=316.5,
+        n_calibrators=14,
+        abs_method='catalog_residual',
+        max_delta_mas=2.8,
+        frames=[
+            {
+                'path': 'j9np06y0q_jhat.fits',
+                'n_calibrators': 14,
+                'dispersion_mas': 316.5,
+                'image_peak_arcsec': 0.081,
+            },
+            {
+                'path': 'jey342bkq_jhat.fits',
+                'n_calibrators': 380,
+                'dispersion_mas': 25.0,
+            },
+        ],
+    )
+    assert report['abs']['method'] == 'image_peak'
+    assert report['abs']['residual_mas'] == pytest.approx(81.0)
+    assert report['abs']['ok'] is True
+    assert report['abs']['tol_arcsec'] == pytest.approx(FRAME_L3_SOFT_TOL_ARCSEC)
+    assert report['catastrophic']['ok'] is True
+    assert report['ok'] is True
+    assert report['mosaic_ok'] is True
+    assert frame_qa_is_catastrophic(report) is False
+    assert warn_if_frame_qa_soft(report) is True
 
 
 def test_peer_sparse_false_lock_is_catastrophic():
@@ -207,6 +302,133 @@ def test_isolated_unmatched_coadds_drops_bad_filter():
     assert FRAME_L3_NO_MATCH_MAX == 1
 
 
+def test_isolated_unmatched_keeps_uv_image_lock():
+    """WFC3 F300X vs F475X n_match=1 galaxy peak at 0\" is aligned, not failed."""
+    report = {
+        'ok': True,
+        'pairs': [
+            {
+                'a': 'coadd_1_0_wfc3_f300x_drc.fits',
+                'b': 'coadd_1_0_wfc3_f475x_drc.fits',
+                'ok': True,
+                'abs_arcsec': 0.0,
+                'n_match': 1,
+                'method': 'smooth_peak',
+            }
+        ],
+    }
+    assert isolated_unmatched_coadds(report) == []
+
+
+def test_isolated_unmatched_keeps_sparse_ok_optical_pairs():
+    """sn2021abkm F555W / sn2017bzb F450W: ok with 8-11 stars must not isolate."""
+    abkm = {
+        'pairs': [
+            {
+                'a': 'coadd_0_0_wfc3_f275w_drc.fits',
+                'b': 'coadd_0_0_acs_f814w_drc.fits',
+                'ok': True,
+                'abs_arcsec': 0.01,
+                'n_match': 24,
+                'method': '2dhist',
+            },
+            {
+                'a': 'coadd_0_0_wfc3_f275w_drc.fits',
+                'b': 'coadd_0_0_acs_f555w_drc.fits',
+                'ok': True,
+                'abs_arcsec': 0.28,
+                'n_match': 9,
+                'method': 'sky_match',
+            },
+            {
+                'a': 'coadd_0_0_acs_f814w_drc.fits',
+                'b': 'coadd_0_0_acs_f555w_drc.fits',
+                'ok': True,
+                'abs_arcsec': 0.17,
+                'n_match': 9,
+                'method': 'sky_match',
+            },
+        ]
+    }
+    assert isolated_unmatched_coadds(abkm) == []
+    bzb = {
+        'pairs': [
+            {
+                'a': 'coadd_0_0_wfpc2_f814w_drz.fits',
+                'b': 'coadd_0_0_wfpc2_f450w_drz.fits',
+                'ok': True,
+                'abs_arcsec': 0.097,
+                'n_match': 11,
+                'method': 'dao',
+            },
+            {
+                'a': 'coadd_0_0_wfpc2_f814w_drz.fits',
+                'b': 'coadd_0_0_wfpc2_f606w_drz.fits',
+                'ok': True,
+                'abs_arcsec': 0.018,
+                'n_match': 99,
+                'method': '2dhist',
+            },
+            {
+                'a': 'coadd_0_0_wfpc2_f450w_drz.fits',
+                'b': 'coadd_0_0_wfpc2_f606w_drz.fits',
+                'ok': True,
+                'abs_arcsec': 0.053,
+                'n_match': 8,
+                'method': 'sky_match',
+            },
+        ]
+    }
+    assert isolated_unmatched_coadds(bzb) == []
+
+
+def test_isolated_unmatched_keeps_soft_dao_and_image_offset():
+    """sn2020zbv: soft dao n=3-5 and 47\" peak are not catastrophic sidelines."""
+    report = {
+        'pairs': [
+            {
+                'a': 'coadd_0_0_acs_f814w_drc.fits',
+                'b': 'coadd_0_0_acs_f555w_drc.fits',
+                'ok': True,
+                'abs_arcsec': 0.48,
+                'n_match': 82,
+                'method': '2dhist',
+            },
+            {
+                'a': 'coadd_0_0_acs_f814w_drc.fits',
+                'b': 'coadd_0_0_wfc3_f814w_drc.fits',
+                'ok': False,
+                'abs_arcsec': 0.0,
+                'n_match': 3,
+                'method': 'dao',
+            },
+            {
+                'a': 'coadd_0_0_acs_f814w_drc.fits',
+                'b': 'coadd_0_0_wfc3_f160w_drz.fits',
+                'ok': False,
+                'abs_arcsec': 47.14,
+                'n_match': 1,
+                'method': 'smooth_peak',
+                'reason': 'image_offset',
+            },
+            {
+                'a': 'coadd_0_0_acs_f814w_drc.fits',
+                'b': 'coadd_0_0_wfc3_f110w_drz.fits',
+                'ok': False,
+                'abs_arcsec': 0.0,
+                'n_match': 0,
+                'method': 'dao',
+                'reason': 'no_common_sources',
+            },
+        ]
+    }
+    isolated = isolated_unmatched_coadds(report)
+    assert 'coadd_0_0_acs_f555w_drc.fits' not in isolated
+    assert 'coadd_0_0_wfc3_f814w_drc.fits' not in isolated
+    assert 'coadd_0_0_wfc3_f160w_drz.fits' not in isolated
+    assert isolated == ['coadd_0_0_wfc3_f110w_drz.fits']
+
+
 def test_filter_catastrophic_jhat_frames(tmp_path: Path):
     good = tmp_path / 'good_jhat.fits'
     bad = tmp_path / 'bad_jhat.fits'
@@ -235,6 +457,36 @@ def test_filter_keeps_st123cat_false_despite_crowded_phot(tmp_path: Path):
         hdul[0].header['JWDISPD'] = 0.315
         hdul[0].header['JWNCAL'] = 24
         hdul[0].header['ST123CAT'] = False
+        hdul.flush()
+    kept, dropped = filter_catastrophic_jhat_frames([recovered])
+    assert kept == [recovered.resolve()]
+    assert dropped == []
+
+
+def test_filter_keeps_st123xc_despite_catalog_rms(tmp_path: Path):
+    """WFPC2 catalog RMS 350 mas with 0\" xcorr leftover is mosaic-safe."""
+    path = tmp_path / 'u29r5201t_jhat.fits'
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(path)
+    with fits.open(path, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.350
+        hdul[0].header['JWNCAL'] = 25
+        hdul[0].header['ST123CAT'] = True
+        hdul[0].header['ST123PK'] = 2.88
+        hdul[0].header['ST123XC'] = 0.0
+        hdul[0].header['ST123XI'] = 2386
+        hdul.flush()
+    kept, dropped = filter_catastrophic_jhat_frames([path])
+    assert kept == [path.resolve()]
+    assert dropped == []
+
+
+def test_filter_keeps_st123pk_despite_crowded_phot(tmp_path: Path):
+    recovered = tmp_path / 'j9np06y0q_jhat.fits'
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(recovered)
+    with fits.open(recovered, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.316
+        hdul[0].header['JWNCAL'] = 14
+        hdul[0].header['ST123PK'] = 0.081
         hdul.flush()
     kept, dropped = filter_catastrophic_jhat_frames([recovered])
     assert kept == [recovered.resolve()]
@@ -288,6 +540,7 @@ def test_stamp_quality_headers(tmp_path: Path):
         n_calibrators=22,
         internal_max_arcsec=0.033,
         catalog_basename='hub.phot.txt',
+        image_peak_arcsec=0.081,
     )
     with fits.open(path) as hdul:
         hdr = hdul[0].header
@@ -299,6 +552,7 @@ def test_stamp_quality_headers(tmp_path: Path):
         assert hdr['JWNCAL'] == 22
         assert hdr['ST123INT'] == pytest.approx(0.033)
         assert 'JWCAT' in hdr
+        assert hdr['ST123PK'] == pytest.approx(0.081)
 
 
 def test_write_alignment_summary_table(tmp_path: Path):

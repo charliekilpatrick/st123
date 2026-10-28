@@ -49,49 +49,101 @@ from st123.utils.logging import capture_output
 logger = logging.getLogger(__name__)
 
 
+def _sci_wcs_from_hdu(hdu, hdul) -> wcs.WCS:
+    """Build a 2-D celestial WCS for one SCI HDU, stripping bad distortion keys."""
+    try:
+        return wcs.WCS(hdu.header, fobj=hdul, naxis=2)
+    except Exception:
+        hdr = hdu.header.copy()
+        for key in list(hdr.keys()):
+            ku = str(key).upper()
+            if ku.startswith(('CPDIS', 'DP', 'CPERR', 'DTOD')):
+                del hdr[key]
+        return wcs.WCS(hdr, naxis=2, relax=True)
+
+
+def _sci_shape(hdu) -> tuple[int, int]:
+    if hdu.data is not None:
+        return tuple(int(x) for x in hdu.data.shape[-2:])
+    return (int(hdu.header['NAXIS2']), int(hdu.header['NAXIS1']))
+
+
+def _iter_sci_shape_wcs(path: str | Path) -> list[tuple[tuple[int, int], wcs.WCS]]:
+    """
+    Return ``(ny, nx), WCS`` for every SCI extension in a MEF.
+
+    ACS/WFC (and similar) store one chip per SCI; planning must include all
+    chips so mosaic stamps cover the full camera footprint, not only SCI[1].
+    """
+    out: list[tuple[tuple[int, int], wcs.WCS]] = []
+    with as_datamodel(path).open() as hdul:
+        for hdu in hdul:
+            if getattr(hdu, 'name', '') != 'SCI':
+                continue
+            if hdu.data is None and 'NAXIS1' not in hdu.header:
+                continue
+            out.append((_sci_shape(hdu), _sci_wcs_from_hdu(hdu, hdul)))
+        if not out:
+            sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
+            out.append((_sci_shape(sci), _sci_wcs_from_hdu(sci, hdul)))
+    return out
+
+
 def _shape_and_wcs_for_mosaic(path: str | Path) -> tuple[tuple[int, int], wcs.WCS]:
     """
     Return ``(ny, nx)`` and a celestial WCS for mosaic footprint planning.
 
-    Uses the SCI extension when present. Distortion lookup-table keywords
-    (``CPDIS``) are resolved via the open HDUList, or stripped on failure so
-    ``find_optimal_celestial_wcs`` can accept ``(shape, wcs)`` pairs for HST.
+    Uses the first SCI extension. Prefer :func:`_iter_sci_shape_wcs` when the
+    full multi-chip footprint must enter ``find_optimal_celestial_wcs``.
     """
-    with as_datamodel(path).open() as hdul:
-        sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
-        try:
-            w = wcs.WCS(sci.header, fobj=hdul, naxis=2)
-        except Exception:
-            hdr = sci.header.copy()
-            for key in list(hdr.keys()):
-                ku = str(key).upper()
-                if ku.startswith(('CPDIS', 'DP', 'CPERR', 'DTOD')):
-                    del hdr[key]
-            w = wcs.WCS(hdr, naxis=2, relax=True)
-        if sci.data is not None:
-            shape = tuple(int(x) for x in sci.data.shape[-2:])
-        else:
-            shape = (int(sci.header['NAXIS2']), int(sci.header['NAXIS1']))
-        return shape, w
+    return _iter_sci_shape_wcs(path)[0]
 
 
 def _sky_footprint_coords(path: str | Path) -> np.ndarray:
-    """Return ``(N, 2)`` RA/Dec vertices from ``S_REGION`` or WCS footprint."""
+    """
+    Return ``(N, 2)`` RA/Dec vertices covering every SCI chip.
+
+    Unions per-SCI ``S_REGION`` polygons when available (ACS/WFC, WFC3/UVIS),
+    otherwise falls back to the WCS footprint of each SCI and takes the
+    convex hull so dual-chip MEFs are not truncated to a single CCD.
+    """
+    from st123.stages.mosaic.footprints import sky_polygons_from_fits
+
+    pgons = sky_polygons_from_fits(path)
+    if len(pgons) >= 1:
+        union = shapely.ops.unary_union(pgons)
+        if union.geom_type == 'MultiPolygon':
+            union = union.convex_hull
+        if hasattr(union, 'exterior') and union.exterior is not None:
+            return np.asarray(union.exterior.coords[:-1], dtype=float)
+
+    corners: list[np.ndarray] = []
     with as_datamodel(path).open() as hdul:
-        sci = hdul['SCI'] if 'SCI' in hdul else hdul[1]
-        region = sci.header.get('S_REGION')
-        if not region:
-            for hdu in hdul:
-                if hdu.header.get('S_REGION'):
-                    region = hdu.header['S_REGION']
-                    break
-        if region:
-            return np.asarray(parse_s_region(region).exterior.coords[:-1])
-        try:
-            w = wcs.WCS(sci.header, fobj=hdul, naxis=2)
-        except Exception:
-            w = wcs.WCS(sci.header, naxis=2, relax=True)
-        return np.asarray(w.calc_footprint(center=False), dtype=float)
+        scis = [hdu for hdu in hdul if getattr(hdu, 'name', '') == 'SCI']
+        if not scis:
+            scis = [hdul['SCI'] if 'SCI' in hdul else hdul[1]]
+        for sci in scis:
+            try:
+                w = _sci_wcs_from_hdu(sci, hdul)
+                corners.append(np.asarray(w.calc_footprint(center=False), dtype=float))
+            except Exception:
+                continue
+    if not corners:
+        raise ValueError(f'No sky footprint for {path}')
+    if len(corners) == 1:
+        return corners[0]
+    hull = shapely.MultiPoint(
+        [(float(ra), float(dec)) for arr in corners for ra, dec in arr]
+    ).convex_hull
+    return np.asarray(hull.exterior.coords[:-1], dtype=float)
+
+
+def _optimal_wcs_inputs(images: Sequence[str | Path]) -> list[tuple[tuple[int, int], wcs.WCS]]:
+    """Flatten multi-SCI MEFs into ``find_optimal_celestial_wcs`` inputs."""
+    inputs: list[tuple[tuple[int, int], wcs.WCS]] = []
+    for path in images:
+        inputs.extend(_iter_sci_shape_wcs(path))
+    return inputs
 
 
 # JWST imaging native / recommended mosaic pixel scales (arcsec / pixel).
@@ -872,7 +924,7 @@ class split_observations(object):
         return self
 
     def get_pgons(self, table):
-        inputs = [_shape_and_wcs_for_mosaic(i) for i in table['image']]
+        inputs = _optimal_wcs_inputs(table['image'])
         wcs_out, shape_out = find_optimal_celestial_wcs(inputs, auto_rotate=True)
 
         wcs_header = wcs_out.to_header()
@@ -1095,7 +1147,7 @@ def get_pgons(
     centroids : numpy.ndarray
         Polygon centroids in pixel coordinates.
     """
-    inputs = [_shape_and_wcs_for_mosaic(i) for i in table['image']]
+    inputs = _optimal_wcs_inputs(table['image'])
     wcs_out, shape_out = find_optimal_celestial_wcs(inputs, auto_rotate=True)
 
     wcs_header = wcs_out.to_header()
@@ -1547,7 +1599,7 @@ def find_optimal_wcs(
         ``(NAXIS2, NAXIS1)`` shape for the mosaic grid.
     """
     images = np.hstack([filter_table[i]['image'].value for i in filter_table.keys()])
-    inputs = [_shape_and_wcs_for_mosaic(i) for i in images]
+    inputs = _optimal_wcs_inputs(images)
     wcs_out, shape_out = find_optimal_celestial_wcs(inputs, auto_rotate=True)
 
     return wcs_out, shape_out

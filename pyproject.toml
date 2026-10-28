@@ -69,6 +69,7 @@ Documentation = "https://charliekilpatrick.github.io/st123/"
 [project.scripts]
 download = "st123.scripts.download:main"
 align = "st123.scripts.align:main"
+align-clinic = "st123.scripts.align_clinic:main"
 mosaic = "st123.scripts.mosaic:main"
 link-raw = "st123.scripts.link_raw:main"
 image-overlap = "st123.scripts.image_overlap:main"

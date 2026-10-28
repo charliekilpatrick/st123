@@ -760,8 +760,78 @@ def test_reject_catastrophic_l3_coadds(tmp_path: Path):
     dropped = _reject_catastrophic_l3_coadds(
         results, qa, abs_ref_name=good.name
     )
-    assert len(dropped) == 1
-    assert results[1]['status'] == 'failed'
+    # Keep-all clinic policy: flag isolated coadds, do not sideline.
+    assert dropped == []
     assert results[0]['status'] == 'ok'
-    assert not bad.is_file()
-    assert Path(str(bad).replace('.fits', '.rejected.fits')).is_file()
+    assert results[1]['status'] == 'ok'
+    assert results[1].get('l3_isolated_kept') is True
+    assert bad.is_file()
+    assert not Path(str(bad).replace('.fits', '.rejected.fits')).is_file()
+
+
+def test_best_ok_coadd_record_prefers_wfc3_over_wfpc2_uv(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import _best_ok_coadd_record
+
+    records = [
+        {
+            'status': 'ok',
+            'instrument': 'wfpc2',
+            'filter': 'f255w',
+            'output': str(tmp_path / 'coadd_0_0_wfpc2_f255w_drz.fits'),
+        },
+        {
+            'status': 'ok',
+            'instrument': 'wfc3',
+            'filter': 'f814w',
+            'output': str(tmp_path / 'coadd_0_0_wfc3_f814w_drc.fits'),
+        },
+        {
+            'status': 'failed',
+            'instrument': 'wfc3',
+            'filter': 'f225w',
+            'output': str(tmp_path / 'coadd_0_0_wfc3_f225w_drc.rejected.fits'),
+        },
+    ]
+    for rec in records:
+        Path(rec['output']).write_text(rec['filter'])
+    best = _best_ok_coadd_record(records)
+    assert best['filter'] == 'f814w'
+
+
+def test_unify_or_keep_coadds_survives_lookup_error():
+    from st123.stages.mosaic import hst_drizzle as drizzle
+
+    ok = [
+        {
+            'status': 'ok',
+            'instrument': 'wfc3',
+            'filter': 'f814w',
+            'output': '/tmp/coadd_0_0_wfc3_f814w_drc.fits',
+        }
+    ]
+
+    def _boom(*_args, **_kwargs):
+        raise KeyError("Extension ('D2IMARR', 2.0) not found.")
+
+    original = drizzle.unify_hst_astrometric_frame
+    drizzle.unify_hst_astrometric_frame = _boom
+    try:
+        report = drizzle._unify_or_keep_coadds(
+            ok=ok,
+            out=Path('/tmp'),
+            group_id=0,
+            box_id=0,
+            num_cores=1,
+            final_pixfrac=0.8,
+            final_scale=None,
+            preferred_abs_ref=None,
+            output_wcs=None,
+            assume_aligned=True,
+            final_qa={'ok': False},
+            reason='assume_aligned_qa_failed',
+        )
+    finally:
+        drizzle.unify_hst_astrometric_frame = original
+    assert report['ok'] is True
+    assert 'D2IMARR' in str(report.get('error') or '')
+    assert report['reason'].startswith('unify_raised')

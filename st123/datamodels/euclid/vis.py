@@ -50,8 +50,11 @@ class EuclidVISDataModel(EuclidDataModel):
         upper = text.upper()
         if 'NISP' in upper or 'NIR_' in upper:
             return False
-        if 'VIS' in upper:
-            return True
+        # Instrument / TELESCOP tokens (not filesystem paths).
+        # Do NOT use ``'VIS' in path`` -- that false-matches VISIT, REVISION,
+        # etc. in pytest tmp dirs (``test_visit_relative_...``).
+        if '/' not in text and '\\' not in text and not upper.endswith('.FITS'):
+            return upper == 'VIS' or upper.startswith('VIS')
         name = Path(text).name.upper()
         return '_VIS' in name or name.startswith('VIS')
 

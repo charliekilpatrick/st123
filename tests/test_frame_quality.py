@@ -111,3 +111,39 @@ def test_prune_bad_hst_expflag(tmp_path: Path):
     assert str(bad) in pruned
     assert good.is_file()
     assert not bad.exists()
+
+
+def test_hst_flc_under_visit_named_dir_not_euclid(tmp_path: Path):
+    """Regression: path substring VISIT must not select Euclid VIS."""
+    from st123.datamodels import as_datamodel
+    from st123.datamodels.hst.wfc3_uvis import WFC3UVISDataModel
+
+    visit_dir = tmp_path / 'test_visit_relative_recovery'
+    visit_dir.mkdir()
+    bad = _hst_flc(visit_dir / 'b_flc.fits', expflag='TDF-DOWN')
+    model = as_datamodel(bad)
+    assert isinstance(model, WFC3UVISDataModel)
+    assert not is_good_hst_expflag(bad)
+
+
+def test_visit_relative_recovery_skips_bad_expflag(tmp_path: Path):
+    """align visit_relative must not write JHAT for TDF-DOWN frames."""
+    from st123.stages.alignment.hst_jhat import recover_failed_hst_visit_relative
+
+    out = tmp_path / 'jhat_hst'
+    out.mkdir()
+    bad = _hst_flc(tmp_path / 'b_flc.fits', expflag='TDF-DOWN')
+    assert not is_good_hst_expflag(bad)
+    results = [
+        {
+            'path': str(bad),
+            'status': 'failed',
+            'outpath': None,
+            'error': 'Only 0 objects pass the initial cut',
+        }
+    ]
+    recover_failed_hst_visit_relative(results, out, pipeline_fallback=True)
+    assert results[0]['status'] == 'failed'
+    assert results[0]['align_mode'] == 'REJECTED_EXPFLAG'
+    assert results[0]['outpath'] is None
+    assert not list(out.glob('*_jhat.fits'))
