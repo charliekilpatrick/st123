@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'image-overlap')
     try:
-        from st123.mosaic.image_overlap import find_best_refs
+        from st123.stages.mosaic.image_overlap import find_best_refs
 
         science_images = list(args.image)
         refs = list(args.ref)

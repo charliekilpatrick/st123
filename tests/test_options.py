@@ -81,7 +81,7 @@ def test_configure_logging_exits_on_permission_error(tmp_path: Path, monkeypatch
     args = argparse.Namespace(base_dir=str(tmp_path / 'obj'), verbose=False)
 
     def _boom(*_a, **_k):
-        raise PermissionError('Cannot create project directory …')
+        raise PermissionError('Cannot create project directory ...')
 
     monkeypatch.setattr(
         'st123.scripts.utils.options.ensure_project_layout', _boom
@@ -246,7 +246,7 @@ def test_dolphot_warmstart_prep_cli_shape(tmp_path: Path):
             'MIRI',
             '--base-dir',
             str(tmp_path),
-            '--dolphot-dir',
+            '--ref-dir',
             str(phot),
             '--prune-xyt',
             '--ncores',
@@ -255,13 +255,42 @@ def test_dolphot_warmstart_prep_cli_shape(tmp_path: Path):
         ]
     )
     assert args.instruments == ['MIRI']
-    assert args.dolphot_dir == str(phot)
+    assert args.ref_dir == str(phot)
     assert args.prune_xyt is True
     assert args.ncores == 8
     assert ws_script.resolve_warmstart_targets(args.instruments) == ['miri']
     seed, outdir, _, _ = ws_script._resolve_warmstart_paths(args, target='miri')
     assert Path(seed) == phot
     assert Path(outdir) == (tmp_path / 'dolphot' / 'nircam_miri_0_0')
+
+
+def test_dolphot_warmstart_ref_dir_inherits_group_box(tmp_path: Path):
+    from st123.scripts import dolphot_warmstart as ws_script
+
+    root = tmp_path / 'Target'
+    (root / 'JWST').mkdir(parents=True)
+    phot = root / 'reduction' / 'phot_0_sn'
+    phot.mkdir(parents=True)
+    parser = ws_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--instruments',
+            'MIRI',
+            'HST',
+            '--base-dir',
+            str(root),
+            '--ref-dir',
+            str(phot),
+        ]
+    )
+    assert args.ref_dir == str(phot)
+    assert ws_script.group_box_from_seed_dirname(phot.name) == (0, 'sn')
+    seed_m, out_m, _, _ = ws_script._resolve_warmstart_paths(args, target='miri')
+    seed_h, out_h, _, _ = ws_script._resolve_warmstart_paths(args, target='hst')
+    assert Path(seed_m) == phot
+    assert Path(seed_h) == phot
+    assert Path(out_m) == (root / 'dolphot' / 'nircam_miri_0_sn').resolve()
+    assert Path(out_h) == (root / 'dolphot' / 'nircam_hst_0_sn').resolve()
 
 
 def test_dolphot_warmstart_acs_wfc3_plan():
@@ -309,7 +338,24 @@ def test_link_raw_base_dir_instrument():
     parser = link_raw.create_parser()
     args = parser.parse_args(['--base-dir', '/data/proj', '--instrument', 'NIRCAM'])
     assert args.base_dir == '/data/proj'
-    assert args.instrument == 'NIRCAM'
+    assert args.instruments == ['NIRCAM']
+
+
+def test_link_raw_accepts_instruments_list():
+    parser = link_raw.create_parser()
+    args = parser.parse_args(
+        ['--base-dir', '/data/proj', '--instruments', 'ACS', 'WFC3', 'WFPC2']
+    )
+    assert args.instruments == ['ACS', 'WFC3', 'WFPC2']
+    assert link_raw.resolve_cli_instruments(args) == ['ACS', 'WFC3', 'WFPC2']
+
+    hst = parser.parse_args(['--base-dir', '/data/proj', '--instruments', 'hst'])
+    assert link_raw.resolve_cli_instruments(hst) == ['ACS', 'WFC3', 'WFPC2']
+
+    all_tel = parser.parse_args(
+        ['--base-dir', '/data/proj', '--telescope', 'hst', '--instruments', 'ALL']
+    )
+    assert link_raw.resolve_cli_instruments(all_tel) == ['ALL']
 
 
 def test_link_raw_legacy_datadir_symlinkdir():
@@ -379,3 +425,39 @@ def test_pipeline_parsers_accept_shared_instruments_hst_and_sky():
     run = run_dolphot_script.create_parser().parse_args(shared)
     assert run.instruments == ['hst']
     assert run.ra == '196.296329'
+
+
+def test_create_parser_attaches_stamp_box_args():
+    """Stamp/box identity lives on the shared stage primitive, not per CLI."""
+    parser = create_parser('demo')
+    args = parser.parse_args(
+        ['--existing-box', 'group_0/ref_sn', '--stamp-id', 'core']
+    )
+    assert args.existing_box == 'group_0/ref_sn'
+    assert args.stamp_id == 'core'
+    assert args.center_ra is None
+    assert args.center_dec is None
+    assert args.stamp_size is None
+    assert args.stamp_ref is None
+
+
+def test_all_stage_parsers_accept_existing_box():
+    """Pipeline stages parse --existing-box from the shared primitive dest."""
+    from st123.scripts import dolphot as dolphot_script
+    from st123.scripts import run_dolphot as run_dolphot_script
+
+    box = ['--existing-box', 'group_0/ref_sn']
+    al = align_script.create_parser().parse_args(['--base-dir', '/t', *box])
+    assert al.existing_box == 'group_0/ref_sn'
+    mo = mosaic_script.create_parser().parse_args(['--base-dir', '/t', *box])
+    assert mo.existing_box == 'group_0/ref_sn'
+    dl = download_script.create_parser().parse_args(
+        ['--ra', '10', '--dec', '20', '--base-dir', '/t', *box]
+    )
+    assert dl.existing_box == 'group_0/ref_sn'
+    prep = dolphot_script.create_parser().parse_args(['--base-dir', '/t', *box])
+    assert prep.existing_box == 'group_0/ref_sn'
+    run = run_dolphot_script.create_parser().parse_args(['--base-dir', '/t', *box])
+    assert run.existing_box == 'group_0/ref_sn'
+    lr = link_raw.create_parser().parse_args(['--base-dir', '/t', *box])
+    assert lr.existing_box == 'group_0/ref_sn'

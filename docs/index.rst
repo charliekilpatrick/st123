@@ -8,9 +8,9 @@ coadds, prepare DOLPHOT runs, and scrape photometry catalogs. Designed for
 **HST, JWST, and Roman**, with current workflows strongest for JWST (and HST
 reference / MAST helpers).
 
-* :doc:`installation` — Python 3.11–3.12, Conda, optional DOLPHOT / JWST.
-* :doc:`user_guide` — Work-directory layout, CLI overview, outputs.
-* :doc:`api` — package modules (MAST, alignment, mosaic, photometry, utils).
+* :doc:`installation` - Python 3.11-3.12, Conda, optional DOLPHOT / JWST.
+* :doc:`user_guide` - Work-directory layout, CLI overview, outputs.
+* :doc:`api` - package modules (MAST, alignment, mosaic, photometry, utils).
 
 Quick install
 =============
@@ -37,11 +37,13 @@ publishes to `GitHub Pages <https://charliekilpatrick.github.io/st123/>`__.
 Repository layout
 =================
 
-- **st123/** — installable package: ``scripts/`` (CLIs), ``mast/``,
-  ``alignment/``, ``mosaic/``, ``photometry/``, ``utils/``, ``notebooks/``.
-- **extdeps/jhat/** — custom JHAT tree used by editable installs.
-- **tests/** — ``pytest`` suite.
-- **docs/** — Sphinx (reStructuredText + MyST Markdown): this site and changelog.
+- **st123/** - installable package: ``stages/`` (download, alignment, mosaic,
+  photometry + ``stage.py`` primitive), ``datamodels/`` (HST/JWST FITS
+  product types), ``pipelines/`` (``Pipeline``
+  stub), ``scripts/`` (CLI wrappers), ``utils/``, ``notebooks/``.
+- **extdeps/jhat/** - custom JHAT tree used by editable installs.
+- **tests/** - ``pytest`` suite.
+- **docs/** - Sphinx (reStructuredText + MyST Markdown): this site and changelog.
 
 .. toctree::
    :maxdepth: 2

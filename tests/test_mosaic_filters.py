@@ -12,7 +12,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
 
-from st123.mosaic.mosaic import (
+from st123.stages.mosaic.mosaic import (
     MIRI_PIXEL_SCALE,
     NIRCAM_LW_PIXEL_SCALE,
     NIRCAM_SW_PIXEL_SCALE,
@@ -86,11 +86,13 @@ def test_rescale_wcs_preserves_crval_and_changes_scale():
     assert hdr['CRVAL1'] == pytest.approx(159.7)
     assert hdr['CRVAL2'] == pytest.approx(53.5)
     assert 'PC1_1' in hdr and 'CDELT1' in hdr
+    for key in ('PC1_1', 'PC1_2', 'PC2_1', 'PC2_2', 'CDELT1', 'CDELT2'):
+        assert key in hdr, key
     new = WCS(hdr)
     new.pixel_shape = (int(hdr['NAXIS1']), int(hdr['NAXIS2']))
     new_scale = float(new.proj_plane_pixel_scales()[0].to(u.arcsec).value)
     assert new_scale == pytest.approx(MIRI_PIXEL_SCALE, rel=0.02)
-    # Coarser pixels → fewer pixels for the same sky footprint.
+    # Coarser pixels -> fewer pixels for the same sky footprint.
     assert int(hdr['NAXIS1']) < 200
     assert int(hdr['NAXIS2']) < 200
 
@@ -123,7 +125,7 @@ def test_forced_filter_tables_skips_missing(caplog):
 
 def _jwst_plan_fixture(tmp_path: Path):
     """Minimal project + plan for JWST mosaic dispatch tests."""
-    from st123.mosaic.mosaic import MosaicBox, MosaicPlan
+    from st123.stages.mosaic.mosaic import MosaicBox, MosaicPlan
 
     project = tmp_path / 'NGC3310'
     reduction = project / 'reduction'
@@ -174,13 +176,13 @@ def _jwst_plan_fixture(tmp_path: Path):
 
 def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
     """With --filters, mosaic uses forced-filter coadds (not SW PSF-match)."""
-    from st123.mosaic.mosaic import MosaicBox
+    from st123.stages.mosaic.mosaic import MosaicBox
 
     project, fake, table, plan = _jwst_plan_fixture(tmp_path)
 
     with (
         patch(
-            'st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
+            'st123.stages.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
         ),
         patch(
             'st123.scripts.mosaic._collect_mission_jhat',
@@ -221,13 +223,13 @@ def test_mosaic_main_forced_filters_calls_per_filter_path(tmp_path: Path):
 
 def test_mosaic_main_default_uses_shared_stamp_per_filter_path(tmp_path: Path):
     """Default mosaic (no --filters) uses shared-stamp per-filter coadds."""
-    from st123.mosaic.mosaic import MosaicBox
+    from st123.stages.mosaic.mosaic import MosaicBox
 
     project, fake, table, plan = _jwst_plan_fixture(tmp_path)
 
     with (
         patch(
-            'st123.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
+            'st123.stages.mosaic.mosaic.plan_mosaic_boxes', return_value=plan
         ),
         patch(
             'st123.scripts.mosaic._collect_mission_jhat',

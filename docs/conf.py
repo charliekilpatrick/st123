@@ -62,7 +62,7 @@ source_suffix = {
 
 master_doc = 'index'
 project = 'st123'
-copyright = '2025–2026, C. D. Kilpatrick & A. Suresh'
+copyright = '2025-2026, C. D. Kilpatrick & A. Suresh'
 author = 'C. D. Kilpatrick & A. Suresh'
 version = '.'.join(st123_version.split('.')[:2]) if st123_version else '0.0'
 release = st123_version
@@ -89,7 +89,7 @@ autodoc_mock_imports = [
     'photutils',
     'photutils.detection',
     'photutils.psf',
-    'photutils.psf.matching',
+    'photutils.psf_matching',
     'reproject',
     'reproject.mosaicking',
     'shapely',

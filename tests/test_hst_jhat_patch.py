@@ -1,4 +1,4 @@
-"""Tests for :mod:`st123.alignment.hst_jhat` WFPC2 / filter helpers."""
+"""Tests for :mod:`st123.stages.alignment.hst_jhat` WFPC2 / filter helpers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from astropy.io import fits
 from astropy.wcs import WCS
 
-from st123.alignment.hst_jhat import (
+from st123.stages.alignment.hst_jhat import (
     _post_jhat_refcat_refine,
     ensure_wfpc2_jhat_patch,
     propagate_jhat_wcs_to_all_sci,
@@ -123,11 +123,11 @@ def test_post_jhat_skips_global_when_per_chip_updates(tmp_path):
 
     with (
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
             return_value={'n_updated': 2},
         ) as mock_chip,
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_from_refcat',
             return_value={'applied': True},
         ) as mock_global,
     ):
@@ -149,11 +149,11 @@ def test_post_jhat_global_fallback_when_per_chip_updates_none(tmp_path):
 
     with (
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
             return_value={'n_updated': 0},
         ) as mock_chip,
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_from_refcat',
             return_value={'applied': True},
         ) as mock_global,
     ):
@@ -175,10 +175,10 @@ def test_post_jhat_global_when_per_chip_disabled(tmp_path):
 
     with (
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_per_chip_from_refcat',
         ) as mock_chip,
         patch(
-            'st123.alignment.hst_jhat.refine_hst_wcs_from_refcat',
+            'st123.stages.alignment.hst_jhat.refine_hst_wcs_from_refcat',
             return_value={'applied': False},
         ) as mock_global,
     ):

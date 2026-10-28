@@ -10,6 +10,7 @@ import pytest
 EXPECTED_SCRIPTS = {
     'download': 'st123.scripts.download:main',
     'align': 'st123.scripts.align:main',
+    'align-clinic': 'st123.scripts.align_clinic:main',
     'mosaic': 'st123.scripts.mosaic:main',
     'link-raw': 'st123.scripts.link_raw:main',
     'image-overlap': 'st123.scripts.image_overlap:main',
@@ -26,6 +27,7 @@ EXPECTED_SCRIPTS = {
 SCRIPT_MODULES = [
     'st123.scripts.download',
     'st123.scripts.align',
+    'st123.scripts.align_clinic',
     'st123.scripts.mosaic',
     'st123.scripts.link_raw',
     'st123.scripts.image_overlap',
@@ -50,6 +52,17 @@ def test_console_scripts_registered():
         assert by_name[name] == value
 
 
+# Shared stamp / mosaic-box identity from create_parser (not per-command flags).
+STAMP_BOX_FLAGS = (
+    '--existing-box',
+    '--center-ra',
+    '--center-dec',
+    '--stamp-size',
+    '--stamp-ref',
+    '--stamp-id',
+)
+
+
 @pytest.mark.parametrize('module_name', SCRIPT_MODULES)
 def test_script_modules_expose_main_and_parser(module_name):
     mod = importlib.import_module(module_name)
@@ -60,3 +73,13 @@ def test_script_modules_expose_main_and_parser(module_name):
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(['--help'])
     assert exc.value.code == 0
+
+
+@pytest.mark.parametrize('module_name', SCRIPT_MODULES)
+def test_script_parsers_accept_shared_stamp_box_options(module_name):
+    """Every stage parser comes from the same primitive, so stamp flags are shared."""
+    mod = importlib.import_module(module_name)
+    parser = mod.create_parser()
+    opts = {opt for action in parser._actions for opt in action.option_strings}
+    missing = [flag for flag in STAMP_BOX_FLAGS if flag not in opts]
+    assert not missing, f'{module_name} missing shared stamp/box flags: {missing}'

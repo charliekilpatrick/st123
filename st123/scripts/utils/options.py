@@ -1,5 +1,15 @@
 """
-Unified CLI options for st123 console entry points.
+Unified CLI options API for st123 **stages**.
+
+Command-line units (``align``, ``mosaic``, ``download``, ``dolphot-prep``, ...)
+are stages, not pipelines. Every stage parser is built from
+:func:`create_parser` (the stage primitive's option constructor). Stage
+modules must not create a second ``ArgumentParser`` or call
+``add_argument``; they attach named ``add_*`` helpers from this module
+and read dests. Library packages never parse argv.
+
+Pipelines (sequences of stages) are a later layer and must not grow their
+own CLI parsers.
 
 Canonical path / runtime flags
 ------------------------------
@@ -9,11 +19,16 @@ Canonical path / runtime flags
 ``--ncores``
     Parallel worker count (alias: ``--workers``).
 ``--instruments`` / ``--instrument``
-    Shared instrument list. Mission aliases: ``hst`` → ACS WFC3 WFPC2,
-    ``jwst`` → NIRCAM MIRI, ``all`` → NIRCAM MIRI ACS WFC3 WFPC2.
+    Shared instrument list. Mission aliases: ``hst`` -> ACS WFC3 WFPC2,
+    ``jwst`` -> NIRCAM MIRI, ``all`` -> NIRCAM MIRI ACS WFC3 WFPC2.
 ``--ra`` / ``--dec`` / ``--radius``
     Shared sky coordinates (required by download; accepted elsewhere so
     the same argv works across pipeline stages).
+``--existing-box`` / ``--center-ra`` / ``--center-dec`` / ``--stamp-*``
+    Shared stamp / mosaic-box identity. Mosaic uses them to build or remosaic
+    a ``reference/group_*/ref_*`` grid; align uses ``--existing-box`` coadds as
+    the MIRI JHAT reference (and skips a redundant full-field mosaic). Other
+    commands accept the same flags for uniform scripting.
 ``--plot`` / ``--verbose`` / ``--version`` / ``--dry-run``
     Shared runtime switches.
 
@@ -35,12 +50,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from st123 import __version__ as ST123_VERSION
-from st123.utils.settings import (
-    ALL_PIPELINE_INSTRUMENTS,
-    DEFAULT_HST_INSTRUMENTS,
-    DEFAULT_JWST_INSTRUMENTS,
-    DOWNLOAD_DIR_NAME,
-)
+from st123.utils.settings import DOWNLOAD_DIR_NAME
 
 # ---------------------------------------------------------------------------
 # Path layout helpers (project root vs reduction workdir)
@@ -140,7 +150,7 @@ def ensure_project_layout(base_dir: Path | str) -> Path:
     ``mkdir -p``.
 
     When *base_dir* is already a legacy reduction workdir (contains
-    ``raw/`` / ``jhat/`` / … and is not named ``reduction``), only
+    ``raw/`` / ``jhat/`` / ... and is not named ``reduction``), only
     ``logs/`` is created there so we do not nest a second layout.
 
     Parameters
@@ -244,11 +254,11 @@ def resolve_jhat_dir(
     Dual-mode (JWST+HST) campaigns prefer separate trees so HST mosaic globs
     do not pick up ``jw*_jhat.fits`` (and vice versa):
 
-    * HST → ``reduction/jhat_hst`` (falls back to legacy ``reduction/jhat``)
-    * JWST → ``reduction/jhat_jwst`` (falls back to legacy ``reduction/jhat``)
+    * HST -> ``reduction/jhat_hst`` (falls back to legacy ``reduction/jhat``)
+    * JWST -> ``reduction/jhat_jwst`` (falls back to legacy ``reduction/jhat``)
 
     When *create* is True, ensure the preferred directory exists and, if legacy
-    ``jhat/`` is absent, add a ``jhat`` → preferred symlink for older tooling.
+    ``jhat/`` is absent, add a ``jhat`` -> preferred symlink for older tooling.
     """
     work = Path(work_dir).expanduser().resolve()
     tel = str(telescope).strip().lower()
@@ -358,7 +368,7 @@ def instrument_raw_dir(
     Returns
     -------
     pathlib.Path
-        Absolute ``…/<Telescope>/<Instrument>`` directory under the project.
+        Absolute ``.../<Telescope>/<Instrument>`` directory under the project.
     """
     root = resolve_project_root(base_dir)
     key = str(instrument).strip().upper()
@@ -410,7 +420,9 @@ def dataset_label(base_dir: Path | str) -> str:
     return resolve_project_root(base_dir).name
 
 
-def default_phot_dir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
+def default_phot_dir(
+    base_dir: Path, *, group: int = 0, box: int | str = 0
+) -> Path:
     """
     Return ``{reduction}/phot_{group}_{box}`` (no extra object subdirectory).
 
@@ -420,8 +432,8 @@ def default_phot_dir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
         Project root or reduction workdir from ``--base-dir``.
     group : int, optional
         Mosaic overlap group index.
-    box : int, optional
-        Mosaic box index within the group.
+    box : int or str, optional
+        Mosaic box index or stamp id within the group (e.g. ``0`` or ``sn``).
 
     Returns
     -------
@@ -431,7 +443,9 @@ def default_phot_dir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
     return resolve_reduction_dir(base_dir) / f'phot_{group}_{box}'
 
 
-def default_warmstart_outdir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
+def default_warmstart_outdir(
+    base_dir: Path, *, group: int = 0, box: int | str = 0
+) -> Path:
     """
     Return ``{project}/dolphot/nircam_miri_{group}_{box}``.
 
@@ -441,19 +455,19 @@ def default_warmstart_outdir(base_dir: Path, *, group: int = 0, box: int = 0) ->
         Project root or reduction workdir from ``--base-dir``.
     group : int, optional
         Mosaic overlap group index.
-    box : int, optional
-        Mosaic box index within the group.
+    box : int or str, optional
+        Mosaic box index or stamp id within the group (e.g. ``0`` or ``sn``).
 
     Returns
     -------
     pathlib.Path
-        Default NIRCam→MIRI warm-start DOLPHOT output directory.
+        Default NIRCam->MIRI warm-start DOLPHOT output directory.
     """
     return resolve_project_root(base_dir) / 'dolphot' / f'nircam_miri_{group}_{box}'
 
 
 def default_hst_warmstart_outdir(
-    base_dir: Path, *, group: int = 0, box: int = 0
+    base_dir: Path, *, group: int = 0, box: int | str = 0
 ) -> Path:
     """
     Return ``{project}/dolphot/nircam_hst_{group}_{box}``.
@@ -464,18 +478,20 @@ def default_hst_warmstart_outdir(
         Project root or reduction workdir from ``--base-dir``.
     group : int, optional
         Mosaic overlap group index.
-    box : int, optional
-        Mosaic box index within the group.
+    box : int or str, optional
+        Mosaic box index or stamp id within the group (e.g. ``0`` or ``sn``).
 
     Returns
     -------
     pathlib.Path
-        Default NIRCam→HST warm-start DOLPHOT output directory.
+        Default NIRCam->HST warm-start DOLPHOT output directory.
     """
     return resolve_project_root(base_dir) / 'dolphot' / f'nircam_hst_{group}_{box}'
 
 
-def default_miri_outdir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path:
+def default_miri_outdir(
+    base_dir: Path, *, group: int = 0, box: int | str = 0
+) -> Path:
     """
     Return ``{project}/dolphot/miri_{group}_{box}``.
 
@@ -485,8 +501,8 @@ def default_miri_outdir(base_dir: Path, *, group: int = 0, box: int = 0) -> Path
         Project root or reduction workdir from ``--base-dir``.
     group : int, optional
         Mosaic overlap group index.
-    box : int, optional
-        Mosaic box index within the group.
+    box : int or str, optional
+        Mosaic box index or stamp id within the group (e.g. ``0`` or ``sn``).
 
     Returns
     -------
@@ -529,7 +545,14 @@ def create_parser(
     prog: str | None = None,
     epilog: str | None = None,
 ) -> argparse.ArgumentParser:
-    """Create a parser with ``--version`` pre-attached."""
+    """Create a parser with the uniform stage option set.
+
+    Every stage starts from this primitive. Shared identity flags
+    (``--existing-box``, ``--center-ra``, ``--stamp-id``, ...) are attached
+    here so the same argv works across stages. Path, instrument, sky, and
+    runtime groups use the ``add_*`` helpers (same dest names). Stage
+    modules must not construct a second parser.
+    """
     parser = argparse.ArgumentParser(
         prog=prog,
         description=description,
@@ -540,6 +563,78 @@ def create_parser(
         '--version',
         action='version',
         version=st123_version_string(),
+    )
+    add_stamp_box_args(parser)
+    return parser
+
+
+def add_stamp_box_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach stamp / mosaic-box identity flags.
+
+    Always available on every entry point (via :func:`create_parser`) so a
+    pipeline can pass ``--existing-box group_0/ref_sn`` (or ``--center-ra`` /
+    ``--stamp-id``) uniformly. Stages that do not mosaic or reference-align
+    accept the flags and ignore them.
+    """
+    group = parser.add_argument_group('stamp / mosaic box')
+    group.add_argument(
+        '--existing-box',
+        type=str,
+        default=None,
+        help=(
+            'Existing reference/group_*/ref_* stamp directory. Accepts '
+            'group_0/ref_sn, reference/group_0/ref_sn, or an absolute path. '
+            'mosaic remosaics onto that stamp WCS (frames outside the FoV '
+            'or not covering its center are dropped). align --instruments '
+            'MIRI uses that stamp\'s coadd*i2d.fits as the JHAT reference '
+            'and skips a redundant full-field NIRCam mosaic when those '
+            'coadds already exist.'
+        ),
+    )
+    group.add_argument(
+        '--center-ra',
+        type=float,
+        default=None,
+        help=(
+            'Custom stamp center RA (deg), with --center-dec. mosaic builds '
+            'one stamp of --stamp-size (directory ref_<stamp-id>). Other '
+            'commands accept the flag for uniform scripting.'
+        ),
+    )
+    group.add_argument(
+        '--center-dec',
+        type=float,
+        default=None,
+        help='Custom stamp center declination (deg), with --center-ra.',
+    )
+    group.add_argument(
+        '--stamp-size',
+        type=str,
+        default=None,
+        help=(
+            'Custom stamp size in arcsec: S (square) or W,H. Default ~68x51 '
+            'or the size of --stamp-ref when given. Used by mosaic; accepted '
+            'elsewhere for uniform scripting.'
+        ),
+    )
+    group.add_argument(
+        '--stamp-ref',
+        type=str,
+        default=None,
+        help=(
+            'Optional coadd/i2d or stamp_wcs.fits whose orientation and pixel '
+            'scale are copied into the --center-ra/dec stamp.'
+        ),
+    )
+    group.add_argument(
+        '--stamp-id',
+        type=str,
+        default='sn',
+        help=(
+            'Box id for a --center-ra/dec stamp (directory ref_<id>; '
+            'default sn).'
+        ),
     )
     return parser
 
@@ -554,7 +649,7 @@ def add_common_runtime(
     dry_run: bool = False,
 ) -> argparse.ArgumentParser:
     """
-    Attach shared runtime flags (``--ncores``, ``--plot``, ``--verbose``, …).
+    Attach shared runtime flags (``--ncores``, ``--plot``, ``--verbose``, ...).
 
     ``--ncores`` is always accepted so pipelines can pass a uniform
     ``--ncores "$NCORES"`` across entry points, even when a command is not
@@ -573,10 +668,11 @@ def add_common_runtime(
         help=(
             'Number of parallel workers / CPU cores (alias: --workers). '
             'Accepted by all entry points for uniform scripting; unused '
-            'when a command is not parallelized. For dolphot-prep: pool '
-            'size for independent splitgroups / *mask / calcsky '
-            'subprocesses (stages stay ordered). For DOLPHOT launch '
-            'commands this sets MaxThreads.'
+            'when a command is not parallelized. For mosaic JWST: concurrent '
+            'per-filter Image3Pipeline runs. For mosaic HST: AstroDrizzle '
+            'cores / filter pool. For dolphot-prep: pool size for independent '
+            'splitgroups / *mask / calcsky subprocesses (stages stay ordered). '
+            'For DOLPHOT launch commands this sets MaxThreads.'
         ),
     )
     if plot:
@@ -659,6 +755,61 @@ def add_mast_token(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
+def add_catalog_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach catalog / light-curve options.
+
+    Honored by the ``catalog`` stage. ``--photfile`` plus ``--index`` or
+    ``--ra``/``--dec`` writes a visit-binned AB light curve. ``--outfile``
+    is also used by the legacy combined-CSV path.
+    """
+    group = parser.add_argument_group('catalog')
+    group.add_argument(
+        '--photfile',
+        type=str,
+        default=None,
+        help=(
+            'DOLPHOT ``.phot`` catalog. With --index or --ra/--dec, write a '
+            'visit-binned AB light curve (same filter, images within '
+            '--max-gap-days).'
+        ),
+    )
+    group.add_argument(
+        '--outfile',
+        type=str,
+        default=None,
+        help='Output table path (ECSV / CSV / FITS from the suffix).',
+    )
+    group.add_argument(
+        '--index',
+        dest='source_index',
+        type=int,
+        default=None,
+        help='Zero-based DOLPHOT catalog row to extract (light-curve mode).',
+    )
+    group.add_argument(
+        '--max-gap-days',
+        dest='max_gap_days',
+        type=float,
+        default=1.0,
+        help=(
+            'Maximum MJD span (days) for combining frames of one filter '
+            '(default: 1).'
+        ),
+    )
+    group.add_argument(
+        '--max-flag',
+        dest='max_flag',
+        type=int,
+        default=7,
+        help=(
+            'Reject per-image DOLPHOT quality flags above this value '
+            '(default: 7).'
+        ),
+    )
+    return parser
+
+
 def add_filters(parser: argparse.ArgumentParser, *, help: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         '--filters',
@@ -684,7 +835,7 @@ def add_image_arg(
     Attach canonical ``--image`` for science / target FITS path(s).
 
     Prefer this over instrument- or verb-specific flags (``--miri``,
-    ``--align``, …) whenever a CLI needs a target image path.
+    ``--align``, ...) whenever a CLI needs a target image path.
     """
     target = group if group is not None else parser
     kwargs: dict = {
@@ -740,6 +891,68 @@ def add_pair_align_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     return parser
 
 
+def add_align_clinic_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach flags honored by the ``align-clinic`` stage.
+
+    Dest defaults: ``apply=False``, ``scan_known=False``, ``targets_file=None``,
+    ``mosaic_after=False``, ``clinic_outfile=None``. Stage-specific; attach
+    only from ``align-clinic``.
+    """
+    group = parser.add_argument_group('align clinic')
+    group.add_argument(
+        '--apply',
+        dest='apply',
+        action='store_true',
+        default=False,
+        help=(
+            'Write salvage headers, run catastrophic recovery, and restamp '
+            'JHAT quality. Without this flag the clinic only diagnoses.'
+        ),
+    )
+    group.add_argument(
+        '--scan-known',
+        dest='scan_known',
+        action='store_true',
+        default=False,
+        help=(
+            'Diagnose the GitHub-issue and go18338 fields that exist on '
+            'this host (in addition to --base-dir when given).'
+        ),
+    )
+    group.add_argument(
+        '--targets-file',
+        dest='targets_file',
+        type=str,
+        default=None,
+        help=(
+            'Text file of extra reduction roots to diagnose (one path per '
+            'line). Comments start with #.'
+        ),
+    )
+    group.add_argument(
+        '--mosaic',
+        dest='mosaic_after',
+        action='store_true',
+        default=False,
+        help=(
+            'After --apply recovery, remosaic HST onto existing stamps. '
+            'align-clinic honors this; other stages ignore it.'
+        ),
+    )
+    group.add_argument(
+        '--outfile',
+        dest='clinic_outfile',
+        type=str,
+        default=None,
+        help=(
+            'Write the combined clinic JSON here. Each target also gets '
+            'logs/alignment_clinic.json when that tree is writable.'
+        ),
+    )
+    return parser
+
+
 def parse_instruments(raw: Sequence[str] | None) -> list[str] | None:
     """Split ``--instruments`` values on commas and/or spaces."""
     if raw is None:
@@ -759,13 +972,15 @@ def expand_mission_instruments(
     """
     Expand mission aliases in an instrument token list.
 
-    * ``hst`` → ACS, WFC3, WFPC2
-    * ``jwst`` → NIRCAM, MIRI
-    * ``all`` → NIRCAM, MIRI, ACS, WFC3, WFPC2
-    * ``nrc`` → NIRCAM
+    * ``hst`` -> ACS, WFC3, WFPC2
+    * ``jwst`` -> NIRCAM, MIRI
+    * ``all`` -> NIRCAM, MIRI, ACS, WFC3, WFPC2
+    * ``nrc`` -> NIRCAM
 
     Other tokens are upper-cased and de-duplicated (order preserved).
     """
+    from st123.datamodels import HSTDataModel, JWSTDataModel
+
     if tokens is None:
         return None
     out: list[str] = []
@@ -775,20 +990,21 @@ def expand_mission_instruments(
         if key and key not in out:
             out.append(key)
 
+    all_instruments = JWSTDataModel.INSTRUMENTS + HSTDataModel.INSTRUMENTS
     for token in tokens:
         key = str(token).strip().upper()
         if not key:
             continue
         if key == 'HST':
-            for name in DEFAULT_HST_INSTRUMENTS:
+            for name in HSTDataModel.INSTRUMENTS:
                 _add(name)
             continue
         if key == 'JWST':
-            for name in DEFAULT_JWST_INSTRUMENTS:
+            for name in JWSTDataModel.INSTRUMENTS:
                 _add(name)
             continue
         if key == 'ALL':
-            for name in ALL_PIPELINE_INSTRUMENTS:
+            for name in all_instruments:
                 _add(name)
             continue
         if key == 'NRC':
@@ -862,7 +1078,7 @@ def add_instruments_arg(
         or (
             'Instruments or mission aliases: hst (= ACS WFC3 WFPC2), '
             'jwst (= NIRCAM MIRI), all (= NIRCAM MIRI ACS WFC3 WFPC2), '
-            'or explicit names (ACS, WFC3, NIRCAM, …). '
+            'or explicit names (ACS, WFC3, NIRCAM, ...). '
             'Alias: --instrument. Space- or comma-separated.'
         ),
     )
@@ -919,8 +1135,8 @@ def default_instruments_for_telescope(
 
     These are treated as identical to the matching ``--instruments`` lists:
 
-    * ``hst`` → ACS, WFC3, WFPC2 (:data:`DEFAULT_HST_INSTRUMENTS`)
-    * ``jwst`` → NIRCAM, MIRI (:data:`DEFAULT_JWST_INSTRUMENTS`)
+    * ``hst`` -> ACS, WFC3, WFPC2 (:attr:`HSTDataModel.INSTRUMENTS`)
+    * ``jwst`` -> NIRCAM, MIRI (:attr:`JWSTDataModel.INSTRUMENTS`)
 
     Parameters
     ----------
@@ -943,9 +1159,13 @@ def default_instruments_for_telescope(
     if not key:
         return None
     if key == 'hst':
-        return list(DEFAULT_HST_INSTRUMENTS)
+        from st123.datamodels import HSTDataModel
+
+        return list(HSTDataModel.INSTRUMENTS)
     if key == 'jwst':
-        return list(DEFAULT_JWST_INSTRUMENTS)
+        from st123.datamodels import JWSTDataModel
+
+        return list(JWSTDataModel.INSTRUMENTS)
     raise ValueError(
         f'Unsupported telescope {telescope!r}; choose from hst, jwst'
     )

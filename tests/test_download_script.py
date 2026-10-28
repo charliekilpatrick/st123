@@ -8,7 +8,7 @@ import pytest
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 
-from st123.mast import (
+from st123.stages.download import (
     normalize_filter_name,
     observation_download_subdir,
     query_mast_jwst,
@@ -59,8 +59,8 @@ def test_query_mast_jwst_empty_table(tmp_path):
     coord = SkyCoord(150.0, 2.0, unit='deg')
     outdir = tmp_path / 'dl'
     with (
-        patch('st123.mast.download.query_jwst') as mock_q,
-        patch('st123.mast.download.download_jwst_observations') as mock_dl,
+        patch('st123.stages.download.download.query_jwst') as mock_q,
+        patch('st123.stages.download.download.download_jwst_observations') as mock_dl,
     ):
         from astropy.table import Table
 
@@ -75,7 +75,7 @@ def test_query_mast_jwst_empty_table(tmp_path):
 def test_query_mast_jwst_skips_miri_only_by_default(tmp_path):
     from astropy.table import Table
 
-    from st123.mast.download import MastDownloadResult
+    from st123.stages.download.download import MastDownloadResult
 
     coord = SkyCoord(150.0, 2.0, unit='deg')
     outdir = tmp_path / 'dl'
@@ -87,12 +87,12 @@ def test_query_mast_jwst_skips_miri_only_by_default(tmp_path):
         }
     )
     with (
-        patch('st123.mast.download.query_jwst', return_value=obs),
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
         patch(
-            'st123.mast.download.filter_jwst_observations_by_stage',
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
             side_effect=lambda table, stage: table,
         ),
-        patch('st123.mast.download.download_jwst_observations') as mock_dl,
+        patch('st123.stages.download.download.download_jwst_observations') as mock_dl,
     ):
         result = query_mast_jwst(
             coord,
@@ -106,13 +106,50 @@ def test_query_mast_jwst_skips_miri_only_by_default(tmp_path):
     mock_dl.assert_not_called()
 
     with (
-        patch('st123.mast.download.query_jwst', return_value=obs),
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
         patch(
-            'st123.mast.download.filter_jwst_observations_by_stage',
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
+        patch('st123.stages.download.download.download_jwst_observations') as mock_dl,
+    ):
+        defaulted = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+        )
+    assert defaulted.skipped_miri_only is True
+    mock_dl.assert_not_called()
+
+    with (
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
+        patch(
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
             side_effect=lambda table, stage: table,
         ),
         patch(
-            'st123.mast.download.download_jwst_observations', return_value=2
+            'st123.stages.download.download.download_jwst_observations',
+            return_value=2,
+        ) as mock_dl,
+    ):
+        miri_only = query_mast_jwst(
+            coord,
+            outdir=str(outdir),
+            radius=1 * u.arcmin,
+            instruments=['MIRI'],
+        )
+    assert miri_only.n_observations == 2
+    assert miri_only.skipped_miri_only is False
+    mock_dl.assert_called_once()
+
+    with (
+        patch('st123.stages.download.download.query_jwst', return_value=obs),
+        patch(
+            'st123.stages.download.download.filter_jwst_observations_by_stage',
+            side_effect=lambda table, stage: table,
+        ),
+        patch(
+            'st123.stages.download.download.download_jwst_observations', return_value=2
         ) as mock_dl,
     ):
         forced = query_mast_jwst(
@@ -167,7 +204,7 @@ def test_download_parser_requires_core_args():
 
 
 def test_miri_download_layout_and_filter_normalization():
-    from st123.mast import normalize_instrument_dirname, normalize_telescope_dirname
+    from st123.stages.download import normalize_instrument_dirname, normalize_telescope_dirname
 
     assert normalize_filter_name('F560W;CLEAR') == 'F560W'
     assert normalize_telescope_dirname('JWST') == 'JWST'
@@ -223,6 +260,17 @@ def test_parse_instruments_comma_and_space():
     ]
     assert resolve_instruments(['hst']) == ['ACS', 'WFC3', 'WFPC2']
     assert resolve_instruments(['jwst']) == ['NIRCAM', 'MIRI']
+    assert resolve_instruments(['jwst', 'hst']) == [
+        'NIRCAM',
+        'MIRI',
+        'ACS',
+        'WFC3',
+        'WFPC2',
+    ]
+    assert resolve_instruments(['jwst', 'hst']) == resolve_instruments(
+        ['NIRCAM', 'MIRI', 'ACS', 'WFC3', 'WFPC2']
+    )
+    assert resolve_instruments(['all']) == resolve_instruments(['jwst', 'hst'])
 
 
 def test_parse_telescopes_multi_and_comma():
@@ -253,6 +301,22 @@ def test_infer_and_resolve_telescopes_from_instruments():
     ]
     with pytest.raises(ValueError, match='Cannot infer'):
         download_script.infer_telescopes_from_instruments(['NOTAREAL'])
+
+
+def test_download_jwst_hst_aliases_partition_like_explicit():
+    """``--instruments jwst hst`` == NIRCAM MIRI ACS WFC3 WFPC2."""
+    from st123.scripts.utils.options import resolve_instruments
+
+    aliases = resolve_instruments(['jwst', 'hst'])
+    explicit = resolve_instruments(['NIRCAM', 'MIRI', 'ACS', 'WFC3', 'WFPC2'])
+    assert aliases == explicit
+    tels = download_script.resolve_telescopes(None, aliases)
+    assert tels == ['jwst', 'hst']
+    by_tel = download_script.partition_instruments_by_telescope(aliases, tels)
+    assert by_tel == {
+        'jwst': ['NIRCAM', 'MIRI'],
+        'hst': ['ACS', 'WFC3', 'WFPC2'],
+    }
 
 
 def test_partition_instruments_by_telescope_mixed():
@@ -297,13 +361,13 @@ def test_download_parser_accepts_multi_telescope():
 
 
 def test_download_main_success(monkeypatch, tmp_path):
-    from st123.mast.download import MastDownloadResult
+    from st123.stages.download.download import MastDownloadResult
 
     monkeypatch.chdir(tmp_path)
     project = tmp_path / 'o'
     with (
         patch(
-            'st123.mast.download.query_mast_jwst',
+            'st123.stages.download.download.query_mast_jwst',
             return_value=MastDownloadResult(3),
         ) as mock_q,
         patch('st123.scripts.link_raw.link_raw_tree', return_value=2) as mock_link,
@@ -330,13 +394,13 @@ def test_download_main_success(monkeypatch, tmp_path):
 
 
 def test_download_main_miri_only_skip_is_success(monkeypatch, tmp_path):
-    from st123.mast.download import MastDownloadResult
+    from st123.stages.download.download import MastDownloadResult
 
     monkeypatch.chdir(tmp_path)
     project = tmp_path / 'o'
     with (
         patch(
-            'st123.mast.download.query_mast_jwst',
+            'st123.stages.download.download.query_mast_jwst',
             return_value=MastDownloadResult(0, skipped_miri_only=True),
         ),
         patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
@@ -358,7 +422,7 @@ def test_download_main_miri_only_skip_is_success(monkeypatch, tmp_path):
 def test_download_main_links_single_instrument(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with (
-        patch('st123.mast.download.query_mast_hst', return_value=1),
+        patch('st123.stages.download.download.query_mast_hst', return_value=1),
         patch('st123.scripts.link_raw.link_raw_tree', return_value=4) as mock_link,
     ):
         rc = download_script.main(
@@ -385,7 +449,7 @@ def test_download_main_links_single_instrument(monkeypatch, tmp_path):
 def test_download_main_skip_link_raw(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with (
-        patch('st123.mast.download.query_mast_jwst', return_value=1),
+        patch('st123.stages.download.download.query_mast_jwst', return_value=1),
         patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
     ):
         rc = download_script.main(
@@ -413,7 +477,7 @@ def test_download_main_bad_coords():
 def test_download_main_zero_products(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with (
-        patch('st123.mast.download.query_mast_jwst', return_value=0),
+        patch('st123.stages.download.download.query_mast_jwst', return_value=0),
         patch('st123.scripts.link_raw.link_raw_tree') as mock_link,
     ):
         rc = download_script.main(
@@ -428,7 +492,7 @@ def test_download_main_hst_already_on_disk_is_success(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     project = tmp_path / 'o'
     with (
-        patch('st123.mast.download.query_mast_hst', return_value=2) as mock_q,
+        patch('st123.stages.download.download.query_mast_hst', return_value=2) as mock_q,
         patch('st123.scripts.link_raw.link_raw_tree', return_value=4) as mock_link,
     ):
         rc = download_script.main(
@@ -454,13 +518,13 @@ def test_download_main_hst_already_on_disk_is_success(monkeypatch, tmp_path):
 
 def test_download_main_hst_incomplete_exits_nonzero(monkeypatch, tmp_path):
     """Partial MAST inventory must exit 1 after linking what landed (issue #4)."""
-    from st123.mast.download import MastDownloadResult
+    from st123.stages.download.download import MastDownloadResult
 
     monkeypatch.chdir(tmp_path)
     project = tmp_path / 'o'
     with (
         patch(
-            'st123.mast.download.query_mast_hst',
+            'st123.stages.download.download.query_mast_hst',
             return_value=MastDownloadResult(1, n_failed=1),
         ),
         patch('st123.scripts.link_raw.link_raw_tree', return_value=2) as mock_link,
@@ -488,8 +552,8 @@ def test_download_main_multi_telescope_combined(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     project = tmp_path / 'o'
     with (
-        patch('st123.mast.download.query_mast_hst', return_value=2) as mock_hst,
-        patch('st123.mast.download.query_mast_jwst', return_value=5) as mock_jwst,
+        patch('st123.stages.download.download.query_mast_hst', return_value=2) as mock_hst,
+        patch('st123.stages.download.download.query_mast_jwst', return_value=5) as mock_jwst,
         patch('st123.scripts.link_raw.link_raw_tree', return_value=3) as mock_link,
     ):
         rc = download_script.main(

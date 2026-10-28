@@ -11,6 +11,10 @@ Current contents
 under ``CRDS_PATH`` when the default/server context is missing (common on
 partially synced offline caches).
 
+``psf_matching_imports`` loads ``SplitCosineBellWindow`` /
+``create_matching_kernel`` from ``photutils.psf_matching`` (photutils>=3),
+falling back to the deprecated ``photutils.psf.matching`` path.
+
 ``jwst`` 1.20.x was written against photutils <3. With ``photutils>=3`` two
 failures show up in Image3 ``source_catalog``:
 
@@ -21,7 +25,7 @@ failures show up in Image3 ``source_catalog``:
 2. ``JWSTSourceCatalog.xypos`` does ``np.transpose((xcentroid, ycentroid))``.
    For a single detection those centroids are scalars, so ``xypos`` becomes
    shape ``(2,)``. ``CircularAnnulus`` then treats the aperture as scalar and
-   ``to_mask()`` returns one ``ApertureMask``, which is not iterable — breaking
+   ``to_mask()`` returns one ``ApertureMask``, which is not iterable - breaking
    ``_aper_local_background`` (``TypeError: 'ApertureMask' object is not
    iterable``).
 
@@ -58,7 +62,7 @@ def ensure_local_crds_context(
     Parameters
     ----------
     observatory : str, optional
-        CRDS observatory name (``jwst``, ``hst``, …).
+        CRDS observatory name (``jwst``, ``hst``, ...).
     preferred : str, optional
         Preferred context file name (e.g. ``jwst_1464.pmap`` from input
         ``CRDS_CTX`` headers). Used when present on disk.
@@ -120,7 +124,27 @@ def ensure_local_crds_context(
     )
     return best
 
-# photutils <3 → >=3 names used by SourceFinder / SourceCatalog.
+def psf_matching_imports():
+    """
+    Import PSF-matching helpers for photutils 3+ (``psf_matching``).
+
+    Falls back to the deprecated ``photutils.psf.matching`` path on older
+    stacks so mosaic code can keep a single call site.
+    """
+    try:
+        from photutils.psf_matching import (  # type: ignore[attr-defined]
+            SplitCosineBellWindow,
+            create_matching_kernel,
+        )
+    except ImportError:  # pragma: no cover - photutils < 3
+        from photutils.psf.matching import (  # type: ignore[no-redef]
+            SplitCosineBellWindow,
+            create_matching_kernel,
+        )
+    return SplitCosineBellWindow, create_matching_kernel
+
+
+# photutils <3 -> >=3 names used by SourceFinder / SourceCatalog.
 _PHOTUTILS3_ALIASES = {
     'npixels': 'n_pixels',
     'nlevels': 'n_levels',
