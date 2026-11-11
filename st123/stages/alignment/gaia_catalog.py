@@ -1,8 +1,9 @@
-"""Gaia catalog queries for alignment (Vizier only; field-level cache).
+"""Gaia catalog queries for alignment (Gaia@AIP, ESA TAP, Vizier).
 
-ESA Gaia TAP is disabled in st123. All cone queries go through CDS VizieR
-with mirror rotation and retries. JHAT's ``get_GAIA_sources`` is patched to
-the same path via :func:`install_jhat_gaia_vizier_patch`.
+Cone queries try the fast Gaia@AIP IVOA cone-search first, then Gaia@AIP TAP,
+ESA Archive TAP, and finally CDS VizieR (slow when mirrors are down). Results
+are cached under ``<reduction>/gaia/``. JHAT's ``get_GAIA_sources`` is patched
+to the same path via :func:`install_jhat_gaia_vizier_patch`.
 """
 
 from __future__ import annotations
@@ -17,13 +18,18 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from st123.datamodels import as_datamodel
 from astropy.table import Table
-from astropy.wcs import WCS
 
 logger = logging.getLogger(__name__)
 
 # VizieR Gaia DR3 main source table (I/355).
 VIZIER_GAIA_DR3 = 'I/355/gaiadr3'
 VIZIER_GAIA_DR2 = 'I/345/gaia2'
+
+# ESA Gaia Archive TAP source tables.
+TAP_GAIA_DR3 = 'gaiadr3.gaia_source'
+TAP_GAIA_DR2 = 'gaiadr2.gaia_source'
+
+GaiaBackend = Literal['auto', 'vizier', 'tap']
 
 # Shared field catalog under ``<reduction>/gaia/``.
 GAIA_CACHE_DIRNAME = 'gaia'
@@ -68,10 +74,12 @@ def cut_gaia_sources(image: str, table_gaia: Table) -> Table:
     """
     if len(table_gaia) == 0:
         return table_gaia
-    with as_datamodel(image).open(memmap=True) as im:
+    dm = as_datamodel(image)
+    with dm.open(memmap=True) as im:
         hdr = im['SCI'].header
-        w = WCS(hdr)
         nx, ny = hdr['NAXIS1'], hdr['NAXIS2']
+    # sci_wcs passes fobj so ACS/WFC3 lookup-table distortion resolves.
+    w = dm.sci_wcs()
 
     pix_coords = w.all_world2pix(
         np.array(table_gaia['ra'], dtype=float),
@@ -92,6 +100,32 @@ def _normalize_vizier_gaia(table: Table) -> Table:
     return out
 
 
+def _normalize_tap_gaia(table: Table) -> Table:
+    """
+    Normalize ESA TAP Gaia columns to the shared st123 / JHAT schema.
+
+    Adds Vizier-style ``BPmag`` / ``RPmag`` aliases when only ``phot_*``
+    columns are present so :func:`jhat_get_gaia_sources` can stay backend-agnostic.
+    """
+    out = table.copy()
+    aliases = (
+        ('phot_bp_mean_mag', 'BPmag'),
+        ('phot_rp_mean_mag', 'RPmag'),
+        ('ref_epoch', 'Epoch'),
+    )
+    for src, dest in aliases:
+        if src in out.colnames and dest not in out.colnames:
+            out[dest] = out[src]
+    return out
+
+
+def _tap_table_for_dr(dr: str) -> str:
+    key = str(dr).strip().lower().replace('_', '').replace('.', '')
+    if key in ('gaiadr2', 'dr2', 'gaia2'):
+        return TAP_GAIA_DR2
+    return TAP_GAIA_DR3
+
+
 def _add_pm_ratio(table: Table) -> Table:
     pm_cols = ('pmra', 'pmdec', 'pmra_error', 'pmdec_error')
     if all(col in table.colnames for col in pm_cols) and 'pm/pmerr' not in table.colnames:
@@ -108,10 +142,11 @@ def _image_cone(
     telescope: str = 'jwst',
 ) -> tuple[SkyCoord, u.Quantity]:
     """Return cone center and radius covering the science footprint."""
-    with as_datamodel(image).open(memmap=True) as im:
+    dm = as_datamodel(image)
+    with dm.open(memmap=True) as im:
         hdr = im['SCI'].header
-        nx = hdr['NAXIS1']
-        ny = hdr['NAXIS2']
+        nx = int(hdr['NAXIS1'])
+        ny = int(hdr['NAXIS2'])
 
         if telescope == 'jwst':
             # Lazy: JWST GWCS stack is heavy; HST callers never enter here.
@@ -124,12 +159,29 @@ def _image_cone(
 
             ra0, dec0 = pix_to_world(nx / 2.0 - 1, ny / 2.0 - 1)
         elif telescope == 'hst':
-            w = WCS(hdr)
+            # Bare WCS(hdr) fails on ACS/WFC3 flc when CPDIS lookup tables
+            # need the open HDUList (sn2004g field-cache abort).
+            try:
+                w = dm.sci_wcs()
 
-            def pix_to_world(x, y):
-                return w.pixel_to_world_values(x, y)
+                def pix_to_world(x, y):
+                    return w.pixel_to_world_values(x, y)
 
-            ra0, dec0 = pix_to_world(nx / 2.0 - 1, ny / 2.0 - 1)
+                ra0, dec0 = pix_to_world(nx / 2.0 - 1, ny / 2.0 - 1)
+            except Exception as wcs_exc:
+                # Gaia only needs an approximate covering cone -- CRVAL +
+                # plate scale is enough when distortion tables are unavailable.
+                logger.warning(
+                    'Gaia cone: sci_wcs failed for %s (%s); using CRVAL/CD',
+                    Path(image).name,
+                    wcs_exc,
+                )
+                ra0 = float(hdr.get('CRVAL1') or im[0].header.get('CRVAL1'))
+                dec0 = float(hdr.get('CRVAL2') or im[0].header.get('CRVAL2'))
+                scale = _approx_plate_scale_deg(hdr)
+                half = scale * 0.5 * float(np.hypot(nx, ny))
+                coord0 = SkyCoord(ra0, dec0, unit=(u.deg, u.deg), frame='icrs')
+                return coord0, float(half * 1.1) * u.deg
         else:
             raise ValueError(f'Unsupported telescope: {telescope}')
 
@@ -145,6 +197,28 @@ def _image_cone(
             )
     radius = float(np.amax(radius_deg) * 1.1) * u.deg
     return coord0, radius
+
+
+def _approx_plate_scale_deg(hdr) -> float:
+    """Absolute plate scale in degrees/pixel from CD / CDELT (Gaia cone only)."""
+    try:
+        cd11 = float(hdr.get('CD1_1', 0.0) or 0.0)
+        cd12 = float(hdr.get('CD1_2', 0.0) or 0.0)
+        cd21 = float(hdr.get('CD2_1', 0.0) or 0.0)
+        cd22 = float(hdr.get('CD2_2', 0.0) or 0.0)
+        det = abs(cd11 * cd22 - cd12 * cd21)
+        if det > 0.0:
+            return float(np.sqrt(det))
+    except (TypeError, ValueError):
+        pass
+    for key in ('CDELT1', 'CDELT2'):
+        try:
+            v = abs(float(hdr.get(key) or 0.0))
+            if v > 0.0:
+                return v
+        except (TypeError, ValueError):
+            continue
+    return 1.0 / 3600.0  # 1"/pix fallback
 
 
 def _apply_min_cone_radius(
@@ -176,7 +250,15 @@ def _union_cone(
     centers: list[SkyCoord] = []
     radii: list[float] = []
     for image in images:
-        c, r = _image_cone(str(image), telescope=telescope)
+        try:
+            c, r = _image_cone(str(image), telescope=telescope)
+        except Exception as exc:
+            logger.warning(
+                'Gaia union cone: skipping %s (%s)',
+                Path(image).name,
+                exc,
+            )
+            continue
         centers.append(c)
         radii.append(float(r.to_value(u.deg)))
     if not centers:
@@ -368,8 +450,20 @@ VIZIER_MIRRORS: tuple[str, ...] = (
     'vizier.china-vo.org',
 )
 
+# Fail fast: 5 mirrors x 2 tries x 60s was burning ~10 min before TAP.
+VIZIER_TIMEOUT_SEC = 15.0
+VIZIER_RETRIES_PER_MIRROR = 1
+# In auto mode only probe this many mirrors before falling through to TAP.
+VIZIER_MAX_MIRRORS_AUTO = 2
+
+# Gaia@AIP IVOA cone search (stdlib urllib; independent of ESA/Vizier).
+AIP_GAIA_CONE_URL = {
+    'gaiadr3': 'https://gaia.aip.de/conesearch/api/gaiadr3.gaia_source/',
+    'gaiadr2': 'https://gaia.aip.de/conesearch/api/gaiadr2.gaia_source/',
+}
+AIP_GAIA_TAP_URL = 'https://gaia.aip.de/tap'
+
 _JHAT_GAIA_PATCH_MARKER = '_st123_get_GAIA_sources_vizier'
-_TAP_BLOCK_MARKER = '_st123_gaia_tap_blocked'
 
 
 def _query_gaia_vizier(
@@ -377,12 +471,15 @@ def _query_gaia_vizier(
     radius: u.Quantity,
     *,
     dr: str = 'gaiadr3',
-    retries_per_mirror: int = 2,
+    retries_per_mirror: int = VIZIER_RETRIES_PER_MIRROR,
+    max_mirrors: int | None = None,
+    timeout_sec: float = VIZIER_TIMEOUT_SEC,
 ) -> Table:
     """Query Gaia via CDS VizieR, retrying and rotating mirrors on failure."""
     import time
 
     from astroquery.vizier import Vizier
+    from astroquery.vizier import conf as vizier_conf
 
     catalog = _vizier_catalog_for_dr(dr)
     columns = [
@@ -398,42 +495,274 @@ def _query_gaia_vizier(
         'Source',
         'Epoch',
     ]
+    mirrors = list(VIZIER_MIRRORS)
+    if max_mirrors is not None:
+        mirrors = mirrors[: max(1, int(max_mirrors))]
     errors: list[str] = []
-    for server in VIZIER_MIRRORS:
-        for attempt in range(1, retries_per_mirror + 1):
-            try:
-                viz = Vizier(
-                    columns=columns,
-                    row_limit=-1,
-                    vizier_server=server,
-                )
-                logger.info(
-                    'Gaia Vizier query %s @ %s around %s (r=%.3f deg) '
-                    '[try %d/%d]',
-                    catalog,
-                    server,
-                    coord.to_string('decimal'),
-                    radius.to_value(u.deg),
-                    attempt,
-                    retries_per_mirror,
-                )
-                result = viz.query_region(coord, radius=radius, catalog=catalog)
-                # Empty TableList = no sources in cone (success, not a mirror fail).
-                if result is None or len(result) == 0:
-                    logger.info(
-                        'Vizier %s: no Gaia sources in cone',
-                        server,
+    prev_cls_timeout = getattr(Vizier, 'TIMEOUT', None)
+    prev_conf_timeout = getattr(vizier_conf, 'timeout', None)
+    try:
+        # Both class and conf timeouts must be set -- astroquery requests
+        # use conf.timeout for connect/read (default 60s). conf expects int.
+        timeout_i = max(1, int(round(float(timeout_sec))))
+        Vizier.TIMEOUT = timeout_i
+        vizier_conf.timeout = timeout_i
+        for server in mirrors:
+            for attempt in range(1, retries_per_mirror + 1):
+                try:
+                    viz = Vizier(
+                        columns=columns,
+                        row_limit=-1,
+                        vizier_server=server,
                     )
-                    return Table()
-                return _normalize_vizier_gaia(result[0])
-            except Exception as exc:
-                msg = f'{server} try {attempt}: {type(exc).__name__}: {exc}'
-                errors.append(msg)
-                logger.warning('Vizier Gaia query failed (%s)', msg)
-                time.sleep(min(2.0 * attempt, 5.0))
+                    viz.TIMEOUT = timeout_i
+                    logger.info(
+                        'Gaia Vizier query %s @ %s around %s (r=%.3f deg) '
+                        '[try %d/%d timeout=%.0fs]',
+                        catalog,
+                        server,
+                        coord.to_string('decimal'),
+                        radius.to_value(u.deg),
+                        attempt,
+                        retries_per_mirror,
+                        float(timeout_sec),
+                    )
+                    result = viz.query_region(
+                        coord, radius=radius, catalog=catalog
+                    )
+                    # Empty TableList = no sources in cone (success).
+                    if result is None or len(result) == 0:
+                        logger.info(
+                            'Vizier %s: no Gaia sources in cone',
+                            server,
+                        )
+                        return Table()
+                    return _normalize_vizier_gaia(result[0])
+                except Exception as exc:
+                    msg = f'{server} try {attempt}: {type(exc).__name__}: {exc}'
+                    errors.append(msg)
+                    logger.warning('Vizier Gaia query failed (%s)', msg)
+                    time.sleep(min(1.0 * attempt, 2.0))
+    finally:
+        if prev_cls_timeout is not None:
+            Vizier.TIMEOUT = prev_cls_timeout
+        if prev_conf_timeout is not None:
+            vizier_conf.timeout = prev_conf_timeout
     raise RuntimeError(
         'All Vizier mirrors failed for Gaia cone query. Tried: '
         + '; '.join(errors)
+    )
+
+
+def _gaia_adql_cone(coord: SkyCoord, radius: u.Quantity, *, dr: str) -> str:
+    table_name = _tap_table_for_dr(dr)
+    ra = float(coord.ra.degree)
+    dec = float(coord.dec.degree)
+    r_deg = float(radius.to_value(u.deg))
+    return (
+        'SELECT source_id, ra, dec, pmra, pmdec, pmra_error, pmdec_error, '
+        'phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag, ref_epoch '
+        f'FROM {table_name} '
+        "WHERE 1=CONTAINS(POINT('ICRS', ra, dec), "
+        f"CIRCLE('ICRS', {ra}, {dec}, {r_deg}))"
+    )
+
+
+def _query_gaia_esa_tap(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str = 'gaiadr3',
+) -> Table:
+    """
+    Query Gaia via ESA Archive TAP (``astroquery.gaia``).
+
+    Prefer async jobs so large cones are not rejected by the synchronous
+    queue limit; fall back to sync if async fails.
+    """
+    from st123.utils.logging import capture_output
+
+    with capture_output(discard=True):
+        from astroquery.gaia import Gaia
+
+    query = _gaia_adql_cone(coord, radius, dr=dr)
+    logger.info(
+        'Gaia ESA TAP query %s around %s (r=%.3f deg)',
+        _tap_table_for_dr(dr),
+        coord.to_string('decimal'),
+        radius.to_value(u.deg),
+    )
+    # Single async->sync attempt: the TAP chain falls through to Gaia@AIP
+    # quickly when ESA is 5xx / queue-saturated (sn2004g case).
+    try:
+        job = Gaia.launch_job_async(query)
+        result = job.get_results()
+    except Exception as async_exc:
+        logger.warning(
+            'Gaia ESA TAP async failed (%s: %s); trying synchronous',
+            type(async_exc).__name__,
+            async_exc,
+        )
+        try:
+            job = Gaia.launch_job(query)
+            result = job.get_results()
+        except Exception as sync_exc:
+            raise RuntimeError(
+                f'ESA TAP failed (async={type(async_exc).__name__}: {async_exc}; '
+                f'sync={type(sync_exc).__name__}: {sync_exc})'
+            ) from sync_exc
+    if result is None:
+        return Table()
+    return _normalize_tap_gaia(Table(result))
+
+
+def _query_gaia_aip_cone(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str = 'gaiadr3',
+    timeout_sec: float = 60.0,
+) -> Table:
+    """
+    Query Gaia via Gaia@AIP IVOA cone-search HTTP (no ESA / Vizier dependency).
+
+    Returns the shared TAP-style column schema used elsewhere in st123.
+    """
+    from io import BytesIO
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    key = str(dr).strip().lower().replace('_', '').replace('.', '')
+    if key in ('gaiadr2', 'dr2', 'gaia2'):
+        base = AIP_GAIA_CONE_URL['gaiadr2']
+    else:
+        base = AIP_GAIA_CONE_URL['gaiadr3']
+    params = urlencode(
+        {
+            'RA': f'{float(coord.ra.degree):.8f}',
+            'DEC': f'{float(coord.dec.degree):.8f}',
+            'SR': f'{float(radius.to_value(u.deg)):.8f}',
+            'VERB': '3',
+        }
+    )
+    url = f'{base}?{params}'
+    logger.info(
+        'Gaia AIP cone query around %s (r=%.3f deg)',
+        coord.to_string('decimal'),
+        radius.to_value(u.deg),
+    )
+    req = Request(url, headers={'Accept': 'application/x-votable+xml,application/xml'})
+    try:
+        with urlopen(req, timeout=float(timeout_sec)) as resp:
+            payload = resp.read()
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f'AIP Gaia cone failed: {type(exc).__name__}: {exc}') from exc
+    table = Table.read(BytesIO(payload), format='votable')
+    return _normalize_tap_gaia(table)
+
+
+def _query_gaia_aip_tap(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str = 'gaiadr3',
+) -> Table:
+    """Query Gaia via Gaia@AIP TAP (``pyvo`` when installed)."""
+    try:
+        import pyvo
+    except ImportError as exc:
+        raise RuntimeError('pyvo is not installed for AIP TAP') from exc
+
+    query = _gaia_adql_cone(coord, radius, dr=dr)
+    logger.info(
+        'Gaia AIP TAP query %s around %s (r=%.3f deg)',
+        _tap_table_for_dr(dr),
+        coord.to_string('decimal'),
+        radius.to_value(u.deg),
+    )
+    service = pyvo.dal.TAPService(AIP_GAIA_TAP_URL)
+    result = service.search(query)
+    return _normalize_tap_gaia(result.to_table())
+
+
+def _vizier_auto_query(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str = 'gaiadr3',
+) -> Table:
+    """Fail-fast Vizier probe used only as the last auto backend."""
+    return _query_gaia_vizier(
+        coord,
+        radius,
+        dr=dr,
+        retries_per_mirror=VIZIER_RETRIES_PER_MIRROR,
+        max_mirrors=VIZIER_MAX_MIRRORS_AUTO,
+        timeout_sec=VIZIER_TIMEOUT_SEC,
+    )
+
+
+# Labels only -- resolve callables at query time so tests can patch them.
+# Order: fast/reliable first; Vizier last (slow when mirrors are down).
+_AUTO_GAIA_BACKEND_NAMES: tuple[str, ...] = (
+    'tap_aip_cone',
+    'tap_aip',
+    'tap',
+    'vizier',
+)
+_TAP_GAIA_BACKEND_NAMES: tuple[str, ...] = (
+    'tap_aip_cone',
+    'tap_aip',
+    'tap',
+)
+
+
+def _gaia_backend_callable(label: str):
+    """Map backend label -> query function (looked up live for patchability)."""
+    if label == 'tap_aip_cone':
+        return _query_gaia_aip_cone
+    if label == 'tap_aip':
+        return _query_gaia_aip_tap
+    if label == 'tap':
+        return _query_gaia_esa_tap
+    if label == 'vizier':
+        return _vizier_auto_query
+    raise ValueError(f'unknown Gaia backend label {label!r}')
+
+
+def _query_gaia_backend_chain(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str,
+    backend_names: tuple[str, ...],
+) -> tuple[Table, str]:
+    """Try *backend_names* in order; return ``(table, label)`` or raise."""
+    errors: list[str] = []
+    for label in backend_names:
+        fn = _gaia_backend_callable(label)
+        try:
+            table = fn(coord, radius, dr=dr)
+            return table, label
+        except Exception as exc:
+            msg = f'{label}: {type(exc).__name__}: {exc}'
+            errors.append(msg)
+            logger.warning('Gaia %s failed (%s)', label, msg)
+    raise RuntimeError(
+        'All Gaia backends failed. Tried: ' + '; '.join(errors)
+    )
+
+
+def _query_gaia_tap_chain(
+    coord: SkyCoord,
+    radius: u.Quantity,
+    *,
+    dr: str = 'gaiadr3',
+) -> tuple[Table, str]:
+    """Gaia@AIP cone -> Gaia@AIP TAP -> ESA TAP (no Vizier)."""
+    return _query_gaia_backend_chain(
+        coord, radius, dr=dr, backend_names=_TAP_GAIA_BACKEND_NAMES
     )
 
 
@@ -442,25 +771,46 @@ def fetch_gaia_cone(
     radius: u.Quantity,
     *,
     dr: str = 'gaiadr3',
-    backend: Literal['vizier'] = 'vizier',
+    backend: GaiaBackend = 'auto',
 ) -> Table:
     """
     Download Gaia sources in a cone (no image cut).
 
-    Only CDS VizieR is supported (ESA TAP is disabled in st123).
+    Parameters
+    ----------
+    backend : {'auto', 'vizier', 'tap'}, optional
+        ``auto`` (default) tries Gaia@AIP cone, Gaia@AIP TAP, ESA TAP, then
+        Vizier last. ``tap`` skips Vizier. ``vizier`` forces CDS only.
     """
-    if backend != 'vizier':
+    be = str(backend or 'auto').strip().lower()
+    if be not in ('auto', 'vizier', 'tap'):
         raise ValueError(
-            f'Gaia backend {backend!r} is not allowed; st123 uses Vizier only'
+            f"Gaia backend {backend!r} is not allowed; use 'auto', 'vizier', or 'tap'"
         )
-    return _add_pm_ratio(_query_gaia_vizier(coord, radius, dr=dr))
 
+    if be == 'vizier':
+        table = _query_gaia_vizier(coord, radius, dr=dr)
+        used = 'vizier'
+    elif be == 'tap':
+        table, used = _query_gaia_tap_chain(coord, radius, dr=dr)
+    else:
+        table, used = _query_gaia_backend_chain(
+            coord, radius, dr=dr, backend_names=_AUTO_GAIA_BACKEND_NAMES
+        )
 
-def _block_gaia_tap(*_args, **_kwargs):
-    raise RuntimeError(
-        'ESA Gaia TAP is disabled in st123. Use Vizier via '
-        'st123.stages.alignment.gaia_catalog (JHAT is patched to do so automatically).'
+    out = _add_pm_ratio(table)
+    # Record which path produced this catalog (field-cache metadata).
+    try:
+        out.meta['st123_gaia_backend'] = used
+    except Exception:
+        pass
+    logger.info(
+        'Gaia cone via %s: %d source(s) (r=%.3f deg)',
+        used,
+        len(out),
+        radius.to_value(u.deg),
     )
+    return out
 
 
 def jhat_get_gaia_sources(
@@ -477,14 +827,15 @@ def jhat_get_gaia_sources(
     columns=None,
 ):
     """
-    Vizier-backed drop-in for JHAT ``get_GAIA_sources`` (no ESA TAP).
+    Drop-in for JHAT ``get_GAIA_sources`` using :func:`fetch_gaia_cone`.
 
-    Returns ``(dataframe, racol, deccol)`` matching JHAT's expected shape.
+    Prefers Vizier, falls back to ESA TAP when Vizier is down. Returns
+    ``(dataframe, racol, deccol)`` matching JHAT's expected shape.
     """
     import pandas as pd
     from astropy.time import Time
 
-    del calc_mag_errors, rename_mag_colnames  # Vizier supplies Gmag directly
+    del calc_mag_errors, rename_mag_colnames  # Gmag / phot_g supplied by backends
     dr = datarelease or 'gaiadr3'
     if str(dr).lower() in ('dr2', 'gaiadr2'):
         dr_key = 'gaiadr2'
@@ -492,8 +843,11 @@ def jhat_get_gaia_sources(
         dr_key = 'gaiadr3'
     r_deg = float(radius_deg) * float(radius_factor)
     coord = SkyCoord(float(ra0), float(dec0), unit='deg', frame='icrs')
-    tb = fetch_gaia_cone(coord, r_deg * u.deg, dr=dr_key, backend='vizier')
-    logger.info('JHAT Gaia via Vizier: %d sources (r=%.4f deg)', len(tb), r_deg)
+    tb = fetch_gaia_cone(coord, r_deg * u.deg, dr=dr_key, backend='auto')
+    used = tb.meta.get('st123_gaia_backend', 'auto') if hasattr(tb, 'meta') else 'auto'
+    logger.info(
+        'JHAT Gaia via %s: %d sources (r=%.4f deg)', used, len(tb), r_deg
+    )
 
     n = len(tb)
     ra = np.asarray(tb['ra'], dtype=float) if n else np.array([])
@@ -617,31 +971,11 @@ jhat_get_gaia_sources.__name__ = _JHAT_GAIA_PATCH_MARKER
 
 def install_jhat_gaia_vizier_patch() -> None:
     """
-    Force JHAT / astroquery Gaia lookups through Vizier (idempotent).
+    Route JHAT Gaia lookups through :func:`jhat_get_gaia_sources` (idempotent).
 
-    * Replaces ``jhat.simple_jwst_phot.get_GAIA_sources`` with
-      :func:`jhat_get_gaia_sources`.
-    * Blocks ``astroquery.gaia.Gaia.launch_job`` / ``launch_job_async`` so any
-      remaining TAP path fails loudly instead of hanging on ESA.
+    Replaces ``jhat.simple_jwst_phot.get_GAIA_sources`` so JHAT uses the same
+    Gaia@AIP-first / ESA / Vizier-last path as the rest of st123.
     """
-    try:
-        # GaiaClass() prints ESA status banners on import; discard that noise.
-        from st123.utils.logging import capture_output
-
-        with capture_output(discard=True):
-            from astroquery.gaia import Gaia
-
-        for name in ('launch_job', 'launch_job_async'):
-            fn = getattr(Gaia, name, None)
-            if fn is None or getattr(fn, _TAP_BLOCK_MARKER, False):
-                continue
-            blocked = _block_gaia_tap
-            setattr(blocked, _TAP_BLOCK_MARKER, True)
-            setattr(Gaia, name, staticmethod(blocked))
-        logger.debug('Blocked astroquery.gaia TAP launch_job*')
-    except Exception as exc:
-        logger.debug('Could not block Gaia TAP (%s)', exc)
-
     try:
         import jhat.simple_jwst_phot as sjp
     except ImportError:
@@ -652,7 +986,7 @@ def install_jhat_gaia_vizier_patch() -> None:
         return
 
     sjp.get_GAIA_sources = jhat_get_gaia_sources
-    logger.info('Installed JHAT Gaia->Vizier patch (ESA TAP disabled)')
+    logger.info('Installed JHAT Gaia patch (AIP cone first, Vizier last)')
 
 
 def ensure_gaia_catalog(
@@ -661,16 +995,17 @@ def ensure_gaia_catalog(
     telescope: str = 'hst',
     cache_dir: PathLike | None = None,
     dr: str = 'gaiadr3',
-    backend: Literal['vizier'] = 'vizier',
+    backend: GaiaBackend = 'auto',
     force: bool = False,
     min_radius_deg: float = GAIA_MIN_CONE_RADIUS_DEG,
 ) -> Path:
     """
     Ensure a field-level Gaia catalog exists for *images*.
 
-    Downloads once via Vizier into ``<cache_dir>/<dr>.ecsv`` (default
-    ``<reduction>/gaia/``) and reuses it when the cached cone already covers
-    all footprints. Cone radius is at least *min_radius_deg* (default 0.1 deg).
+    Downloads once into ``<cache_dir>/<dr>.ecsv`` (default ``<reduction>/gaia/``)
+    via Vizier with ESA TAP fallback, and reuses the cache when the cone already
+    covers all footprints. Cone radius is at least *min_radius_deg*
+    (default 0.1 deg).
     """
     paths = [Path(p).expanduser() for p in images]
     if not paths:
@@ -706,13 +1041,16 @@ def ensure_gaia_catalog(
         cache_dir,
     )
     table = fetch_gaia_cone(coord, radius, dr=dr, backend=backend)
+    used = str(
+        (getattr(table, 'meta', None) or {}).get('st123_gaia_backend') or backend
+    )
     return _save_gaia_cache(
         table,
         cache_dir=cache_dir,
         coord=coord,
         radius=radius,
         dr=dr,
-        backend=backend,
+        backend=used,
     )
 
 
@@ -723,7 +1061,7 @@ def write_gaia_refcat(
     telescope: str = 'hst',
     cache_dir: PathLike | None = None,
     dr: str = 'gaiadr3',
-    backend: Literal['vizier'] = 'vizier',
+    backend: GaiaBackend = 'auto',
 ) -> Path:
     """
     Write a whitespace phot/refcat table (``ra dec mag [x y]``) from the field
@@ -755,9 +1093,7 @@ def write_gaia_refcat(
         mag = np.asarray(gaia['mag'], dtype=float)
     else:
         mag = np.full(len(gaia), np.nan)
-    with as_datamodel(image_s).open(memmap=True) as hdul:
-        hdr = hdul['SCI'].header
-        w = WCS(hdr)
+    w = as_datamodel(image_s).sci_wcs()
     x, y = w.all_world2pix(ra, dec, 0)
     with open(out, 'w', encoding='utf-8') as fh:
         fh.write('ra dec mag x y\n')
@@ -778,15 +1114,15 @@ def query_gaia(
     telescope: str = 'jwst',
     save_file: str | bool = False,
     *,
-    backend: Literal['vizier'] = 'vizier',
+    backend: GaiaBackend = 'auto',
     cache_dir: PathLike | None = None,
     use_cache: bool = True,
 ) -> Table:
     """
-    Query Gaia for sources covering an image (Vizier only).
+    Query Gaia for sources covering an image.
 
-    Uses CDS VizieR and a field-level cache under ``<reduction>/gaia/`` so
-    each pipeline stage reuses one download. ESA TAP is not supported.
+    Uses CDS VizieR (with ESA TAP fallback) and a field-level cache under
+    ``<reduction>/gaia/`` so each pipeline stage reuses one download.
 
     Parameters
     ----------
@@ -798,8 +1134,8 @@ def query_gaia(
         ``'jwst'`` uses the ImageModel GWCS; ``'hst'`` uses the SCI WCS.
     save_file : str or bool, optional
         Path to save the ``ra``/``dec`` list, or ``False`` to skip.
-    backend : {'vizier'}, optional
-        Must be ``vizier`` (TAP is disabled).
+    backend : {'auto', 'vizier', 'tap'}, optional
+        ``auto`` (default) tries Vizier then ESA TAP.
     cache_dir : path-like or None, optional
         Directory for the shared field catalog (default:
         ``<reduction>/gaia`` inferred from *image*).

@@ -40,6 +40,62 @@ PathLike = Union[str, os.PathLike]
 logger = logging.getLogger(__name__)
 
 _FRAME_LIST_NAME = 'dolphot_frames.txt'
+# WFC3/IR 128x128 (and similar) subarrays break DOLPHOT when mixed with
+# full-frame UVIS/ACS chips ("Number of extensions are not the same").
+_DOLPHOT_MIN_SCI_AXIS = 256
+
+
+def _hst_sci_shape(path: PathLike) -> tuple[int, int] | None:
+    """Return ``(naxis2, naxis1)`` of the first SCI (or primary) image."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        with as_datamodel(p).open(memmap=True) as hdul:
+            for hdu in hdul:
+                name = str(getattr(hdu, 'name', '') or '').upper()
+                data = getattr(hdu, 'data', None)
+                if data is None:
+                    continue
+                if name and name not in {'SCI', 'PRIMARY', ''}:
+                    if getattr(data, 'ndim', 0) != 2:
+                        continue
+                if getattr(data, 'ndim', 0) == 2 and min(data.shape) > 0:
+                    return int(data.shape[0]), int(data.shape[1])
+    except Exception as exc:
+        logger.debug('Could not read SCI shape for %s: %s', p.name, exc)
+    return None
+
+
+def _drop_tiny_hst_subarrays(paths: Sequence[PathLike]) -> list[Path]:
+    """Drop HST frames whose SCI is smaller than ``_DOLPHOT_MIN_SCI_AXIS``.
+
+    Short WFC3/IR subarrays (e.g. 128x128, EXPTIME~1s) poison a mixed-box
+    DOLPHOT run against a full-frame UVIS/ACS reference.
+    """
+    kept: list[Path] = []
+    dropped = 0
+    for raw in paths:
+        p = Path(raw)
+        shape = _hst_sci_shape(p)
+        if shape is not None and min(shape) < int(_DOLPHOT_MIN_SCI_AXIS):
+            dropped += 1
+            logger.warning(
+                'dolphot-prep: dropping tiny HST subarray %s (SCI %dx%d < %d)',
+                p.name,
+                shape[1],
+                shape[0],
+                _DOLPHOT_MIN_SCI_AXIS,
+            )
+            continue
+        kept.append(p)
+    if dropped:
+        logger.warning(
+            'dolphot-prep: dropped %d tiny HST subarray frame(s); %d remain',
+            dropped,
+            len(kept),
+        )
+    return kept
 
 
 def _repair_zero_exptime_fits(path: PathLike) -> float | None:
@@ -1806,7 +1862,20 @@ def apply_splitgroups(
                     chip.unlink()
                 except OSError:
                     pass
-        return kept if kept else [src]
+        if kept:
+            return kept
+        # No usable SCI chips: keep the unsplit MEF only when it itself has a
+        # full-frame SCI (WFC3/IR). Tiny subarrays must not fall through -- they
+        # poison mixed-box DOLPHOT runs ("Number of extensions are not the same").
+        shape = _hst_sci_shape(src)
+        if shape is not None and min(shape) >= int(_DOLPHOT_MIN_SCI_AXIS):
+            return [src]
+        logger.warning(
+            'splitgroups: dropping %s (no usable SCI chip; SCI shape=%s)',
+            src.name,
+            shape,
+        )
+        return []
 
     per_mef = _parallel_map(_one, paths, ncores=ncores, label='splitgroups')
     chip_files: list[Path] = []
@@ -1948,6 +2017,7 @@ def prepare_hst_frames(
         [Path(p) for p in files],
         stage='dolphot-prep',
     )
+    src_files = _drop_tiny_hst_subarrays(src_files)
     if not src_files:
         raise ValueError(
             'prepare_hst_frames: no science frames remain after EXPFLAG filtering'
@@ -2113,8 +2183,9 @@ def prepare_hst_frames(
             ncores=workers,
         )
 
-    # Coadd reference (img0): run *mask so CTX=0 / WHT=0 pixels become the
-    # DOLPHOT DMIN ignore sentinel, then calcsky (needs a .sky for img0).
+    # Coadd reference (img0): run *mask so true uncovered CTX=0 / WHT=0
+    # pixels become the DOLPHOT DMIN ignore sentinel (inpainted interior
+    # holes keep restored coverage), then calcsky (needs a .sky for img0).
     # JWST/NIRCam refs are already nircammask'd + calcsky'd in the prior run.
     if ref_is_coadd and staged_ref.is_file() and not ref_is_jwst:
         ref_calc_inst = inst if not mixed else 'wfc3'

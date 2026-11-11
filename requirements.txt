@@ -39,6 +39,11 @@ jwst==1.20.2
 drizzlepac==3.11.0
 stwcs==1.7.7
 stpsf==2.2.0
+# Pin explicitly: stpsf only requires pysiaf>=0.23.3, which can leave an
+# outdated JWST PRD (0.28.0 -> PRDOPSSOC-073) and spam
+# "LOCAL JWST PRD VERSION ... DOESN'T MATCH ... PRDOPSSOC-075" on import.
+# 0.29.0 ships PRDOPSSOC-075.
+pysiaf==0.29.0
 tables==3.11.1
 h5py==3.16.0
 tweakreg-hack==0.1.1

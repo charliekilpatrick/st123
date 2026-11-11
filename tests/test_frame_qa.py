@@ -891,6 +891,26 @@ def test_quality_is_catastrophic_image_peak_overrides_gaia():
     assert not _quality_is_catastrophic(q, peer_n_calibrators=400)
 
 
+def test_quality_is_catastrophic_sparse_xcorr_does_not_clear_bad_peak():
+    """sn2004g F658N: peak 34\" + xcorr 50 mas n_inner=857 must stay catastrophic."""
+    from st123.stages.alignment.hst_jhat import _quality_is_catastrophic
+
+    q = {
+        'dispersion_mas': 332.5,
+        'n_calibrators': 50,
+        'gaia_residual_arcsec': 0.93,
+        'n_gaia': 386,
+        'image_peak_arcsec': 34.1,
+        'image_residual_arcsec': 0.050,
+        'image_xcorr': {'abs_arcsec': 0.050, 'n_inner': 857},
+        'catastrophic': True,
+    }
+    assert _quality_is_catastrophic(q, peer_n_calibrators=400)
+    # Dense overlap may still override a bad peak.
+    q['image_xcorr'] = {'abs_arcsec': 0.050, 'n_inner': 12000}
+    assert not _quality_is_catastrophic(q, peer_n_calibrators=400)
+
+
 def test_recover_catastrophic_hst_jhat_applies_gaia_shift(tmp_path: Path):
     from st123.stages.alignment.hst_jhat import recover_catastrophic_hst_jhat
 
@@ -942,6 +962,188 @@ def test_recover_catastrophic_hst_jhat_applies_gaia_shift(tmp_path: Path):
     apply_shift = restore.call_args_list[1]
     assert apply_shift.kwargs['dra_deg'] == pytest.approx(-gaia['dra_deg'])
     assert apply_shift.kwargs['ddec_deg'] == pytest.approx(-gaia['ddec_deg'])
+
+
+def test_recover_catastrophic_rejects_smooth_without_xcorr(tmp_path: Path):
+    """Hub-peak leftover=0 is not enough; full-frame xcorr must agree."""
+    from st123.stages.alignment.hst_jhat import recover_catastrophic_hst_jhat
+
+    jhat = _tiny_jhat(tmp_path / 'u3iu0701t_jhat.fits')
+    hub = _tiny_jhat(tmp_path / 'coadd_acs_f555w_jhat.fits')
+    with fits.open(jhat, mode='update') as hdul:
+        hdul[0].header['EXPTIME'] = 1000.0
+        hdul.flush()
+    gaia_pipe = {
+        'ok': True,
+        'method': 'gaia_match',
+        'abs_arcsec': 5.266,
+        'dra_arcsec': 5.0,
+        'ddec_arcsec': 1.0,
+        'dra_deg': 5.0 / 3600.0,
+        'ddec_deg': 1.0 / 3600.0,
+        'n_match': 80,
+        'peak_count': 80,
+    }
+    gaia_good = {
+        'ok': True,
+        'method': 'gaia_2dhist',
+        'abs_arcsec': 5.266,
+        'dra_arcsec': 5.0,
+        'ddec_arcsec': 1.0,
+        'dra_deg': 5.0 / 3600.0,
+        'ddec_deg': 1.0 / 3600.0,
+        'n_match': 80,
+        'peak_count': 80,
+        'peak_mode': 'outer',
+    }
+    fake_peak = {'ra': 150.0, 'dec': -10.0, 'sci_ext': 1}
+    fake_hub_peaks = [
+        {'ra': 150.012, 'dec': -9.988, 'sci_ext': 1},  # ~45" away
+    ]
+    smooth_cand = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'abs_arcsec': 45.922,
+        'dra_arcsec': -16.987,
+        'ddec_arcsec': -42.664,
+        'dra_deg': -16.987 / 3600.0,
+        'ddec_deg': -42.664 / 3600.0,
+        'sci_ext': 1,
+    }
+    gaia_calls = {'n': 0}
+
+    def _gaia(*_a, **_k):
+        gaia_calls['n'] += 1
+        # First call: pipeline residual; later: post-shift / fallback.
+        if gaia_calls['n'] == 1:
+            return dict(gaia_pipe)
+        return dict(gaia_good)
+
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat._frame_exptime', return_value=1000.0
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.restore_pipeline_relative_wcs_with_common_shift',
+            return_value=[{'applied': True}],
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value={
+                'ok': True,
+                'abs_arcsec': 34.0,
+                'dra_arcsec': 34.0,
+                'ddec_arcsec': 0.0,
+                'dra_deg': 34.0 / 3600.0,
+                'ddec_deg': 0.0,
+                'n_inner': 500,
+                'candidates': [],
+            },
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._smoothed_sci_peak_sky',
+            return_value=fake_peak,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._smoothed_sci_peaks_sky',
+            return_value=fake_hub_peaks,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._sky_offset_between_peaks',
+            side_effect=[
+                dict(smooth_cand),  # cand measure
+                {  # leftover vs chosen peak -- tautological 0
+                    'ok': True,
+                    'abs_arcsec': 0.0,
+                    'dra_arcsec': 0.0,
+                    'ddec_arcsec': 0.0,
+                    'dra_deg': 0.0,
+                    'ddec_deg': 0.0,
+                },
+            ],
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_vs_gaia',
+            side_effect=_gaia,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value={'ok': False},
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.refine_hst_narrowband_to_refcat',
+            return_value={'ok': True},
+        ),
+        patch(
+            'st123.utils.helpers.get_filter',
+            return_value='F606W',
+        ),
+    ):
+        report = recover_catastrophic_hst_jhat(
+            [jhat], abs_ref=hub, refcat=None
+        )
+    # Must not accept the 46" smooth_peak; fall through to Gaia.
+    assert report.get('method') != 'smooth_peak'
+    assert report['applied'] is True
+    assert report['method'] in ('gaia_2dhist', 'gaia_match')
+    assert report['abs_arcsec'] == pytest.approx(5.266)
+
+
+def test_recover_catastrophic_skips_smooth_for_narrowband(tmp_path: Path):
+    from st123.stages.alignment.hst_jhat import recover_catastrophic_hst_jhat
+
+    jhat = _tiny_jhat(tmp_path / 'u3iu0701t_jhat.fits')
+    hub = _tiny_jhat(tmp_path / 'hub_jhat.fits')
+    with fits.open(jhat, mode='update') as hdul:
+        hdul[0].header['EXPTIME'] = 1000.0
+        hdul.flush()
+    gaia = {
+        'ok': True,
+        'method': 'gaia_2dhist',
+        'abs_arcsec': 1.5,
+        'dra_arcsec': 1.5,
+        'ddec_arcsec': 0.0,
+        'dra_deg': 1.5 / 3600.0,
+        'ddec_deg': 0.0,
+        'n_match': 40,
+        'peak_count': 40,
+        'peak_mode': 'outer',
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat._frame_exptime', return_value=1000.0
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.restore_pipeline_relative_wcs_with_common_shift',
+            return_value=[{'applied': True}],
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value={'ok': False, 'candidates': []},
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._smoothed_sci_peak_sky',
+        ) as peak_fn,
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_vs_gaia',
+            return_value=gaia,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value={'ok': False},
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.refine_hst_narrowband_to_refcat',
+            return_value={'ok': True},
+        ),
+        patch('st123.utils.helpers.get_filter', return_value='F658N'),
+    ):
+        report = recover_catastrophic_hst_jhat(
+            [jhat], abs_ref=hub, refcat=None
+        )
+    assert peak_fn.call_count == 0
+    assert report['method'] in ('gaia_2dhist', 'gaia_match')
+    assert report['applied'] is True
 
 
 def test_finalize_recovers_catastrophic_before_reject(tmp_path: Path):
@@ -1108,6 +1310,14 @@ def test_l3_qa_fails_zero_match_pair(tmp_path: Path):
             return_value=miss,
         ),
         patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=miss,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=miss,
+        ),
+        patch(
             'st123.stages.alignment.hst_jhat.measure_hst_frame_relative_offset_pixel',
             return_value=miss,
         ),
@@ -1122,6 +1332,159 @@ def test_l3_qa_fails_zero_match_pair(tmp_path: Path):
     assert report['failed_pairs'][0]['reason'] == 'no_common_sources'
     assert report['failed_pairs'][0]['n_match'] == 0
 
+
+def test_l3_qa_accepts_uv_when_nucleus_image_locked(tmp_path: Path):
+    """UV/optical with no catalog stars is OK when galaxy peak is within tol."""
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    a = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    b = tmp_path / 'coadd_0_0_wfc3_f275w_drc.fits'
+    a.write_bytes(b'')
+    b.write_bytes(b'')
+    miss = {
+        'ok': False,
+        'n_match': 0,
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'method': 'none',
+    }
+    peak_locked = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'abs_arcsec': 0.16,
+        'dra_arcsec': 0.10,
+        'ddec_arcsec': 0.12,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value=miss,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak_locked,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=miss,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=miss,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_frame_relative_offset_pixel',
+            return_value=miss,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._measure_offset_one_sci',
+            return_value=miss,
+        ),
+    ):
+        report = validate_hst_coadds_alignment([a, b])
+    assert report['ok'] is True
+    assert report['failed_pairs'] == []
+    assert report['pairs'][0]['method'] == 'smooth_peak'
+
+
+def test_l3_qa_hard_fails_uv_with_large_nucleus_offset(tmp_path: Path):
+    """sn2020MMZ-class: UV nucleus tens of arcsec off must not soft-pass."""
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    a = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    b = tmp_path / 'coadd_0_0_wfc3_f275w_drc.fits'
+    a.write_bytes(b'')
+    b.write_bytes(b'')
+    peak_bad = {
+        'ok': False,
+        'error': 'offset exceeds search',
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'abs_arcsec': 54.0,
+        'dra_arcsec': 50.0,
+        'ddec_arcsec': -20.0,
+    }
+    miss = {
+        'ok': False,
+        'n_match': 0,
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'method': 'none',
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak_bad,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=miss,
+        ),
+    ):
+        report = validate_hst_coadds_alignment([a, b])
+    assert report['ok'] is False
+    assert report['failed_pairs'][0]['reason'] == 'image_offset'
+    assert report['failed_pairs'][0]['abs_arcsec'] == pytest.approx(54.0)
+
+
+def test_visit_sibling_salvage_recovers_catastrophic(tmp_path: Path):
+    from st123.stages.alignment.hst_jhat import (
+        recover_catastrophic_hst_via_visit_siblings,
+    )
+
+    raw_dir = tmp_path / 'raw'
+    jhat_dir = tmp_path / 'jhat'
+    raw_dir.mkdir()
+    jhat_dir.mkdir()
+    # Same visit key (u3iu07*) for WFPC2 catastrophic + healthy peer.
+    bad_raw = raw_dir / 'u3iu0702t_c0m.fits'
+    good_raw = raw_dir / 'u3iu0701t_c0m.fits'
+    for p in (bad_raw, good_raw):
+        fits.PrimaryHDU(header=fits.Header({'EXPTIME': 500.0})).writeto(p)
+    bad = jhat_dir / 'u3iu0702t_jhat.fits'
+    good = jhat_dir / 'u3iu0701t_jhat.fits'
+    fits.PrimaryHDU(header=fits.Header({'EXPTIME': 500.0})).writeto(bad)
+    fits.PrimaryHDU(header=fits.Header({'EXPTIME': 600.0})).writeto(good)
+
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat._raw_sibling_for_jhat',
+            side_effect=lambda p: (
+                bad_raw if '0702' in Path(p).name else good_raw
+            ),
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._jhat_minus_raw_sky_shift',
+            return_value=(0.01 / 3600.0, 0.0),
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.write_hst_jhat_from_raw',
+            return_value=bad,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.restore_pipeline_relative_wcs_with_common_shift',
+            return_value=[{'applied': True}],
+        ) as restore,
+        patch(
+            'st123.stages.alignment.hst_jhat.write_hst_narrowband_provenance',
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.stamp_quality_headers',
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._frame_exptime',
+            side_effect=lambda p: 600.0 if '0701' in Path(p).name else 500.0,
+        ),
+    ):
+        report = recover_catastrophic_hst_via_visit_siblings([bad], [good])
+
+    assert report['ok'] is True
+    assert report['n_recovered'] == 1
+    assert restore.called
+    assert Path(report['recovered'][0]['donor']).name == 'u3iu0701t_jhat.fits'
 
 def _peak_stamp(path: Path, x: int, y: int, *, nx: int = 320, ny: int = 320) -> Path:
     """North-up stamp with a Gaussian blob at pixel (x, y)."""
@@ -1165,6 +1528,204 @@ def test_smooth_peak_offset_west_north(tmp_path: Path):
     assert st['abs_arcsec'] == pytest.approx(12.649, abs=0.4)
 
 
+def _two_star_stamp(
+    path: Path,
+    stars: list[tuple[int, int]],
+    *,
+    nx: int = 400,
+    ny: int = 400,
+    amps: list[float] | None = None,
+) -> Path:
+    """North-up stamp with multiple Gaussian stars (sn2021dbg-class)."""
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    sci = np.zeros((ny, nx), dtype=np.float32)
+    if amps is None:
+        amps = [1.0] * len(stars)
+    for (x, y), amp in zip(stars, amps):
+        sci += amp * np.exp(
+            -0.5 * ((xx - x) ** 2 + (yy - y) ** 2) / (3.0 ** 2)
+        ).astype(np.float32)
+    hdr = fits.Header(
+        {
+            'CRVAL1': 15.0,
+            'CRVAL2': -7.5,
+            'CRPIX1': nx / 2.0 + 0.5,
+            'CRPIX2': ny / 2.0 + 0.5,
+            'CD1_1': -0.1 / 3600.0,
+            'CD1_2': 0.0,
+            'CD2_1': 0.0,
+            'CD2_2': 0.1 / 3600.0,
+            'CTYPE1': 'RA---TAN',
+            'CTYPE2': 'DEC--TAN',
+        }
+    )
+    fits.HDUList(
+        [fits.PrimaryHDU(), fits.ImageHDU(sci, header=hdr, name='SCI')]
+    ).writeto(path)
+    return path
+
+
+def test_multi_peak_recovers_false_single_star_lock(tmp_path: Path):
+    """
+    sn2021dbg-class: F814W SW lands on F555W NE; single peak is 0\" but the
+    true NE/SW pair shares an ~8\" translation recovered by multi-peak.
+    """
+    from st123.stages.alignment.hst_jhat import (
+        measure_hst_sky_offset_multi_peak,
+        measure_hst_sky_offset_smooth_peak,
+    )
+
+    # F555: NE at (180,180), SW at (300,150). Keep clear of edge_pix=40.
+    f555 = _two_star_stamp(
+        tmp_path / 'f555w.fits', [(180, 180), (300, 150)], amps=[1.0, 0.7]
+    )
+    # True translation T=(-120,+30) pix puts F814 SW on F555 NE (false lock)
+    # while NE/SW both vote for the same outer offset.
+    f814 = _two_star_stamp(
+        tmp_path / 'f814w.fits', [(60, 210), (180, 180)], amps=[0.7, 1.0]
+    )
+    peak = measure_hst_sky_offset_smooth_peak(
+        f814, f555, max_offset_arcsec=90.0, smooth_pix=5.0
+    )
+    assert peak['ok'] is True
+    assert float(peak['abs_arcsec']) < 0.5
+    multi = measure_hst_sky_offset_multi_peak(
+        f814,
+        f555,
+        max_offset_arcsec=90.0,
+        smooth_pix=5.0,
+        excl_radius=40,
+    )
+    assert multi['ok'] is True
+    # img-ref = F814 - F555 = (-120,+30) pix. CD1_1<0 so +x is west:
+    # dx=-120 is east (+12\"), dy=+30 is north (+3\").
+    assert multi['dra_arcsec'] == pytest.approx(12.0, abs=0.8)
+    assert multi['ddec_arcsec'] == pytest.approx(3.0, abs=0.8)
+    assert multi['abs_arcsec'] == pytest.approx(12.369, abs=1.0)
+
+
+def test_l3_qa_fails_when_multi_peak_finds_false_lock(tmp_path: Path):
+    """Single-peak ~0\" must not soft-pass when multi-peak+xcorr agree on tens of arcsec."""
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    a = tmp_path / 'coadd_0_0_acs_f555w_drc.fits'
+    b = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    a.write_bytes(b'')
+    b.write_bytes(b'')
+    peak_locked = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+    }
+    multi_bad = {
+        'ok': True,
+        'method': 'multi_peak',
+        'n_match': 2,
+        'peak_count': 2,
+        'abs_arcsec': 32.0,
+        'dra_arcsec': -24.0,
+        'ddec_arcsec': -21.0,
+    }
+    xcorr_bad = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'n_match': 5000,
+        'n_inner': 5000,
+        'abs_arcsec': 31.8,
+        'dra_arcsec': -23.8,
+        'ddec_arcsec': -20.9,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak_locked,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=multi_bad,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=xcorr_bad,
+        ),
+    ):
+        report = validate_hst_coadds_alignment([a, b])
+    assert report['ok'] is False
+    assert report['failed_pairs'][0]['reason'] == 'image_offset'
+    assert report['failed_pairs'][0]['method'] == 'multi_peak'
+    assert report['failed_pairs'][0]['abs_arcsec'] == pytest.approx(32.0)
+
+
+def test_l3_qa_accepts_when_xcorr_rejects_false_multi(tmp_path: Path):
+    """sn2020mmz-class: multi~3\" with locked nuclei+xcorr must soft-pass."""
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    a = tmp_path / 'coadd_0_0_acs_f555w_drc.fits'
+    b = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    a.write_bytes(b'')
+    b.write_bytes(b'')
+    peak_locked = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'abs_arcsec': 0.088,
+        'dra_arcsec': 0.05,
+        'ddec_arcsec': 0.07,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+    }
+    multi_false = {
+        'ok': True,
+        'method': 'multi_peak',
+        'n_match': 8,
+        'peak_count': 8,
+        'abs_arcsec': 3.237,
+        'dra_arcsec': 3.09,
+        'ddec_arcsec': 0.96,
+    }
+    xcorr_ok = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'n_match': 5000,
+        'n_inner': 5000,
+        'abs_arcsec': 0.05,
+        'dra_arcsec': 0.03,
+        'ddec_arcsec': 0.04,
+    }
+    cat_ok = {
+        'ok': True,
+        'method': '2dhist',
+        'n_match': 20,
+        'abs_arcsec': 0.02,
+        'dra_arcsec': 0.01,
+        'ddec_arcsec': 0.01,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak_locked,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=multi_false,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=xcorr_ok,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value=cat_ok,
+        ),
+    ):
+        report = validate_hst_coadds_alignment([a, b])
+    assert report['ok'] is True
+    assert report['failed_pairs'] == []
+
+
 def test_l3_qa_fails_25arcsec_galaxy_peak(tmp_path: Path):
     from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
 
@@ -1180,12 +1741,201 @@ def test_l3_qa_fails_25arcsec_galaxy_peak(tmp_path: Path):
         'dra_arcsec': -25.084,
         'ddec_arcsec': 5.965,
     }
-    with patch(
-        'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
-        return_value=peak,
+    miss = {
+        'ok': False,
+        'n_match': 0,
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'method': 'none',
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=miss,
+        ),
     ):
         report = validate_hst_coadds_alignment([a, b])
     assert report['ok'] is False
     assert report['failed_pairs'][0]['reason'] == 'image_offset'
     assert report['failed_pairs'][0]['abs_arcsec'] == pytest.approx(25.784)
     assert report['max_abs_arcsec'] == pytest.approx(25.784)
+
+
+def test_l3_qa_accepts_when_multi_peak_locked_despite_single_peak(tmp_path: Path):
+    """After star-field unify, single-peak can still disagree on which star is brightest."""
+    from st123.stages.alignment.hst_jhat import validate_hst_coadds_alignment
+
+    a = tmp_path / 'coadd_0_0_acs_f555w_drc.fits'
+    b = tmp_path / 'coadd_0_0_acs_f814w_drc.fits'
+    a.write_bytes(b'')
+    b.write_bytes(b'')
+    peak_bad = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'n_match': 1,
+        'abs_arcsec': 32.0,
+        'dra_arcsec': -24.0,
+        'ddec_arcsec': -21.0,
+    }
+    multi_ok = {
+        'ok': True,
+        'method': 'multi_peak',
+        'n_match': 2,
+        'peak_count': 2,
+        'abs_arcsec': 0.03,
+        'dra_arcsec': 0.02,
+        'ddec_arcsec': 0.02,
+    }
+    cat_ok = {
+        'ok': True,
+        'method': '2dhist',
+        'n_match': 20,
+        'abs_arcsec': 0.02,
+        'dra_arcsec': 0.01,
+        'ddec_arcsec': 0.01,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=peak_bad,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_multi_peak',
+            return_value=multi_ok,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value=cat_ok,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value={'ok': False},
+        ),
+    ):
+        report = validate_hst_coadds_alignment([a, b])
+    assert report['ok'] is True
+    assert report['failed_pairs'] == []
+
+
+def test_arbitrate_rejects_false_multi_when_xcorr_locked():
+    """sn2020mmz: nuclei locked + multi~3\" must not apply when xcorr~0\"."""
+    from st123.stages.alignment.hst_jhat import arbitrate_hst_l3_sky_offset
+
+    peak = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'abs_arcsec': 0.088,
+        'dra_arcsec': 0.05,
+        'ddec_arcsec': 0.07,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+    }
+    multi = {
+        'ok': True,
+        'method': 'multi_peak',
+        'abs_arcsec': 3.237,
+        'dra_arcsec': 3.09,
+        'ddec_arcsec': 0.96,
+        'dra_deg': 0.00085,
+        'ddec_deg': 0.00027,
+    }
+    xcorr = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'abs_arcsec': 0.05,
+        'dra_arcsec': 0.03,
+        'ddec_arcsec': 0.04,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+        'n_inner': 5000,
+    }
+    out = arbitrate_hst_l3_sky_offset(peak, multi, xcorr)
+    assert out['ok'] is True
+    assert float(out['abs_arcsec']) < 1.0
+    assert out['arbiter'] == 'xcorr_rejects_multi'
+
+
+def test_arbitrate_applies_multi_when_xcorr_agrees():
+    """sn2021dbg: smooth~0 + multi~32\" with agreeing xcorr -> apply multi."""
+    from st123.stages.alignment.hst_jhat import arbitrate_hst_l3_sky_offset
+
+    peak = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+    }
+    multi = {
+        'ok': True,
+        'method': 'multi_peak',
+        'abs_arcsec': 32.0,
+        'dra_arcsec': -24.0,
+        'ddec_arcsec': -21.0,
+        'dra_deg': -24.0 / 3600.0,
+        'ddec_deg': -21.0 / 3600.0,
+    }
+    xcorr = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'abs_arcsec': 31.5,
+        'dra_arcsec': -23.5,
+        'ddec_arcsec': -20.8,
+        'dra_deg': -23.5 / 3600.0,
+        'ddec_deg': -20.8 / 3600.0,
+        'n_inner': 8000,
+    }
+    out = arbitrate_hst_l3_sky_offset(peak, multi, xcorr)
+    assert out['ok'] is True
+    assert out['method'] == 'multi_peak'
+    assert float(out['abs_arcsec']) == pytest.approx(32.0)
+    assert out['arbiter'] == 'multi_xcorr_agree'
+
+
+def test_arbitrate_xcorr_breaks_false_multi_lock():
+    """After a bad multi apply: multi=0 but xcorr~3.7\" must still shift."""
+    from st123.stages.alignment.hst_jhat import arbitrate_hst_l3_sky_offset
+
+    peak = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+    }
+    multi = {
+        'ok': True,
+        'method': 'multi_peak',
+        'abs_arcsec': 0.0,
+        'dra_arcsec': 0.0,
+        'ddec_arcsec': 0.0,
+        'dra_deg': 0.0,
+        'ddec_deg': 0.0,
+        'peak_mode': 'core',
+        'peak_core': 8,
+        'peak_outer': 7,
+    }
+    xcorr = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'abs_arcsec': 3.711,
+        'dra_arcsec': -3.541,
+        'ddec_arcsec': -1.110,
+        'dra_deg': -3.541 / 3600.0,
+        'ddec_deg': -1.110 / 3600.0,
+        'n_inner': 4910113,
+    }
+    out = arbitrate_hst_l3_sky_offset(peak, multi, xcorr)
+    assert out['ok'] is True
+    assert out['method'] == 'image_xcorr'
+    assert float(out['abs_arcsec']) == pytest.approx(3.711)
+    assert out['arbiter'] == 'xcorr_breaks_false_lock'

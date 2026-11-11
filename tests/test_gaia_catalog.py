@@ -1,4 +1,4 @@
-"""Tests for Vizier-backed Gaia catalog helpers and field cache."""
+"""Tests for Gaia catalog helpers (Vizier primary, ESA TAP fallback)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from st123.stages.alignment.gaia_catalog import (
     VIZIER_GAIA_DR3,
     VIZIER_MIRRORS,
     _apply_min_cone_radius,
+    _normalize_tap_gaia,
     _normalize_vizier_gaia,
     _vizier_catalog_for_dr,
     default_gaia_cache_dir,
@@ -48,6 +49,39 @@ def _toy_sci(path, *, ra=150.0, dec=2.0):
     return path
 
 
+def _vizier_table():
+    return Table(
+        {
+            'RA_ICRS': [150.0],
+            'DE_ICRS': [2.0],
+            'pmRA': [0.0],
+            'pmDE': [0.0],
+            'e_pmRA': [0.1],
+            'e_pmDE': [0.1],
+            'Gmag': [15.0],
+            'Source': [99],
+        }
+    )
+
+
+def _tap_table():
+    return Table(
+        {
+            'source_id': [42],
+            'ra': [150.0],
+            'dec': [2.0],
+            'pmra': [0.0],
+            'pmdec': [0.0],
+            'pmra_error': [0.1],
+            'pmdec_error': [0.1],
+            'phot_g_mean_mag': [15.0],
+            'phot_bp_mean_mag': [15.5],
+            'phot_rp_mean_mag': [14.5],
+            'ref_epoch': [2016.0],
+        }
+    )
+
+
 def test_normalize_vizier_gaia_columns():
     raw = Table(
         {
@@ -67,6 +101,14 @@ def test_normalize_vizier_gaia_columns():
     assert 'phot_g_mean_mag' in out.colnames
     assert 'pmra' in out.colnames
     assert list(out['ra']) == [10.0, 11.0]
+
+
+def test_normalize_tap_gaia_aliases():
+    out = _normalize_tap_gaia(_tap_table())
+    assert 'BPmag' in out.colnames
+    assert 'RPmag' in out.colnames
+    assert 'Epoch' in out.colnames
+    assert float(out['BPmag'][0]) == pytest.approx(15.5)
 
 
 def test_vizier_catalog_for_dr():
@@ -95,18 +137,7 @@ def test_default_gaia_cache_dir_under_reduction(tmp_path):
 def test_query_gaia_uses_vizier_backend(tmp_path):
     path = _toy_sci(tmp_path / 'toy_sci.fits')
 
-    viz_table = Table(
-        {
-            'RA_ICRS': [150.0],
-            'DE_ICRS': [2.0],
-            'pmRA': [0.0],
-            'pmDE': [0.0],
-            'e_pmRA': [0.1],
-            'e_pmDE': [0.1],
-            'Gmag': [15.0],
-            'Source': [99],
-        }
-    )
+    viz_table = _vizier_table()
     mock_result = MagicMock()
     mock_result.__len__.return_value = 1
     mock_result.__getitem__.return_value = viz_table
@@ -193,18 +224,8 @@ def test_write_gaia_refcat_from_cache(tmp_path):
     (reduction / 'raw').mkdir(parents=True)
     img = _toy_sci(reduction / 'reference_prelim' / 'coadd.fits')
     cache_dir = reduction / 'gaia'
-    viz_table = Table(
-        {
-            'RA_ICRS': [150.0],
-            'DE_ICRS': [2.0],
-            'pmRA': [0.0],
-            'pmDE': [0.0],
-            'e_pmRA': [0.1],
-            'e_pmDE': [0.1],
-            'Gmag': [15.0],
-            'Source': [1],
-        }
-    )
+    viz_table = _vizier_table()
+    viz_table['Source'] = [1]
     mock_result = MagicMock()
     mock_result.__len__.return_value = 1
     mock_result.__getitem__.return_value = viz_table
@@ -219,31 +240,160 @@ def test_write_gaia_refcat_from_cache(tmp_path):
     assert len(text) >= 2
 
 
-def test_fetch_gaia_cone_rejects_tap_backend():
+def test_fetch_gaia_cone_rejects_unknown_backend():
     from astropy.coordinates import SkyCoord
     from astropy import units as u
 
     coord = SkyCoord(150.0, 2.0, unit='deg')
-    with pytest.raises(ValueError, match='Vizier only'):
-        fetch_gaia_cone(coord, 0.1 * u.deg, backend='tap')  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='not allowed'):
+        fetch_gaia_cone(coord, 0.1 * u.deg, backend='mast')  # type: ignore[arg-type]
+
+
+def test_fetch_gaia_cone_tap_backend():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with patch(
+        'st123.stages.alignment.gaia_catalog._query_gaia_tap_chain',
+        return_value=(_tap_table(), 'tap'),
+    ) as mock_tap:
+        out = fetch_gaia_cone(coord, 0.05 * u.deg, backend='tap')
+    mock_tap.assert_called_once()
+    assert len(out) == 1
+    assert out.meta.get('st123_gaia_backend') == 'tap'
+    assert float(out['ra'][0]) == pytest.approx(150.0)
+
+
+def test_fetch_gaia_cone_auto_prefers_aip_cone():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            return_value=_tap_table(),
+        ) as mock_aip,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_vizier',
+        ) as mock_viz,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+        ) as mock_esa,
+    ):
+        out = fetch_gaia_cone(coord, 0.05 * u.deg, backend='auto')
+    mock_aip.assert_called_once()
+    mock_viz.assert_not_called()
+    mock_esa.assert_not_called()
+    assert out.meta.get('st123_gaia_backend') == 'tap_aip_cone'
+    assert len(out) == 1
+
+
+def test_fetch_gaia_cone_auto_falls_back_to_esa_before_vizier():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            side_effect=RuntimeError('AIP cone down'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_tap',
+            side_effect=RuntimeError('pyvo missing'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+            return_value=_tap_table(),
+        ) as mock_esa,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_vizier',
+        ) as mock_viz,
+    ):
+        out = fetch_gaia_cone(coord, 0.05 * u.deg, backend='auto')
+    mock_esa.assert_called_once()
+    mock_viz.assert_not_called()
+    assert out.meta.get('st123_gaia_backend') == 'tap'
+    assert len(out) == 1
+
+
+def test_fetch_gaia_cone_tap_prefers_aip_cone():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            return_value=_tap_table(),
+        ) as mock_aip,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_tap',
+        ) as mock_aip_tap,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+        ) as mock_esa,
+    ):
+        out = fetch_gaia_cone(coord, 0.05 * u.deg, backend='tap')
+    mock_aip.assert_called_once()
+    mock_aip_tap.assert_not_called()
+    mock_esa.assert_not_called()
+    assert out.meta.get('st123_gaia_backend') == 'tap_aip_cone'
+    assert len(out) == 1
+
+
+def test_fetch_gaia_cone_tap_falls_through_to_esa():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            side_effect=RuntimeError('AIP down'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_tap',
+            side_effect=RuntimeError('pyvo missing'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+            return_value=_tap_table(),
+        ) as mock_esa,
+    ):
+        out = fetch_gaia_cone(coord, 0.05 * u.deg, backend='tap')
+    mock_esa.assert_called_once()
+    assert out.meta.get('st123_gaia_backend') == 'tap'
+    assert len(out) == 1
+
+
+def test_fetch_gaia_cone_vizier_does_not_fall_back():
+    from astropy.coordinates import SkyCoord
+    from astropy import units as u
+
+    coord = SkyCoord(150.0, 2.0, unit='deg')
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_vizier',
+            side_effect=RuntimeError('All Vizier mirrors failed'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_tap_chain'
+        ) as mock_tap,
+        pytest.raises(RuntimeError, match='Vizier mirrors failed'),
+    ):
+        fetch_gaia_cone(coord, 0.05 * u.deg, backend='vizier')
+    mock_tap.assert_not_called()
 
 
 def test_vizier_retries_then_uses_next_mirror():
     from astropy.coordinates import SkyCoord
     from astropy import units as u
 
-    viz_table = Table(
-        {
-            'RA_ICRS': [150.0],
-            'DE_ICRS': [2.0],
-            'pmRA': [0.0],
-            'pmDE': [0.0],
-            'e_pmRA': [0.1],
-            'e_pmDE': [0.1],
-            'Gmag': [15.0],
-            'Source': [1],
-        }
-    )
+    viz_table = _vizier_table()
+    viz_table['Source'] = [1]
     mock_result = MagicMock()
     mock_result.__len__.return_value = 1
     mock_result.__getitem__.return_value = viz_table
@@ -273,35 +423,34 @@ def test_vizier_retries_then_uses_next_mirror():
     assert len(out) == 1
     assert n_calls['n'] >= 2
     assert float(out['ra'][0]) == pytest.approx(150.0)
+    assert out.meta.get('st123_gaia_backend') == 'vizier'
 
 
-def test_jhat_gaia_patch_blocks_tap_and_uses_vizier():
-    viz_table = Table(
-        {
-            'RA_ICRS': [150.0],
-            'DE_ICRS': [2.0],
-            'pmRA': [0.0],
-            'pmDE': [0.0],
-            'e_pmRA': [0.1],
-            'e_pmDE': [0.1],
-            'Gmag': [15.0],
-            'Source': [42],
-        }
-    )
+def test_jhat_gaia_patch_uses_vizier_and_leaves_tap_available():
+    viz_table = _vizier_table()
+    viz_table['Source'] = [42]
     mock_result = MagicMock()
     mock_result.__len__.return_value = 1
     mock_result.__getitem__.return_value = viz_table
 
-    with patch('astroquery.vizier.Vizier') as mock_viz_cls:
+    with (
+        # auto prefers AIP/ESA; force the Vizier path for this identity check.
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            side_effect=RuntimeError('skip aip cone for test'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_tap',
+            side_effect=RuntimeError('skip aip tap for test'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+            side_effect=RuntimeError('skip esa for test'),
+        ),
+        patch('astroquery.vizier.Vizier') as mock_viz_cls,
+    ):
         mock_viz_cls.return_value.query_region.return_value = mock_result
         install_jhat_gaia_vizier_patch()
-        from astroquery.gaia import Gaia
-
-        with pytest.raises(RuntimeError, match='TAP is disabled'):
-            Gaia.launch_job_async('SELECT 1')
-        with pytest.raises(RuntimeError, match='TAP is disabled'):
-            Gaia.launch_job('SELECT 1')
-
         import jhat.simple_jwst_phot as sjp
 
         assert sjp.get_GAIA_sources.__name__ == jhat_get_gaia_sources.__name__
@@ -310,3 +459,35 @@ def test_jhat_gaia_patch_blocks_tap_and_uses_vizier():
     assert len(df) == 1
     assert 'g' in df.columns
     mock_viz_cls.return_value.query_region.assert_called()
+
+    # ESA TAP must remain callable so auto-fallback can use it.
+    from astroquery.gaia import Gaia
+
+    assert callable(getattr(Gaia, 'launch_job_async', None))
+    assert not getattr(Gaia.launch_job_async, '_st123_tap_blocked', False)
+
+
+def test_jhat_get_gaia_sources_falls_back_to_tap():
+    with (
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_cone',
+            side_effect=RuntimeError('AIP cone down'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_aip_tap',
+            side_effect=RuntimeError('pyvo missing'),
+        ),
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_esa_tap',
+            return_value=_normalize_tap_gaia(_tap_table()),
+        ) as mock_esa,
+        patch(
+            'st123.stages.alignment.gaia_catalog._query_gaia_vizier',
+        ) as mock_viz,
+    ):
+        df, racol, deccol = jhat_get_gaia_sources(150.0, 2.0, 0.05, mjd=None)
+    mock_esa.assert_called_once()
+    mock_viz.assert_not_called()
+    assert racol == 'ra' and deccol == 'dec'
+    assert len(df) == 1
+    assert float(df['ra'].iloc[0]) == pytest.approx(150.0)

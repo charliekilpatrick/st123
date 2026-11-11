@@ -59,9 +59,18 @@ pip install -e ".[dev]"
 
 Pinned dependencies live in `requirements.txt` (via `pyproject.toml`), including
 the local custom JHAT path dependency
-(`jhat @ file:./extdeps/jhat`). Do **not** `pip install jhat` from PyPI for
-this project unless you intentionally want upstream instead of the custom
-build. Details are in `[extdeps/jhat/README.md](extdeps/jhat/README.md)`.
+(`jhat @ file:./extdeps/jhat`) and an explicit `pysiaf==0.29.0` pin so the JWST
+SIAF PRD stays current (avoids the
+`LOCAL JWST PRD VERSION ... DOESN'T MATCH ...` warning from older transitive
+`stpsf` installs). Do **not** `pip install jhat` from PyPI for this project
+unless you intentionally want upstream instead of the custom build. Details
+are in `[extdeps/jhat/README.md](extdeps/jhat/README.md)`.
+
+If an existing env still warns about `PRDOPSSOC-073` vs `PRDOPSSOC-075`:
+
+```bash
+pip install -U 'pysiaf==0.29.0'
+```
 
 If `tables` still cannot find HDF5 on macOS Homebrew:
 

@@ -286,6 +286,105 @@ def test_visit_cross_filter_applies_to_all_frames(tmp_path: Path):
     }
 
 
+def test_visit_cross_filter_falls_back_to_image_xcorr(tmp_path: Path):
+    """Catalog 2dhist can fail; image lock still ties filters (clinic #7/#11)."""
+    from st123.stages.alignment.hst_jhat import harmonize_hst_visits_across_filters
+
+    f814 = _dual_sci_frame(tmp_path / 'ieec43abq_jhat.fits')
+    f555 = _dual_sci_frame(
+        tmp_path / 'ieec43acq_jhat.fits', star_on_chip2_only=False
+    )
+    with fits.open(f555, mode='update') as hdul:
+        hdul[0].header['FILTER'] = 'F555W'
+        hdul[0].header['EXPTIME'] = 500.0
+        hdul.flush()
+    with fits.open(f814, mode='update') as hdul:
+        hdul[0].header['EXPTIME'] = 100.0
+        hdul.flush()
+
+    fail = {'ok': False, 'abs_arcsec': 0.0, 'error': 'no peak'}
+    xcorr = {
+        'ok': True,
+        'method': 'image_xcorr',
+        'dra_deg': 0.05 / 3600.0,
+        'ddec_deg': 0.0,
+        'dra_arcsec': 0.05,
+        'ddec_arcsec': 0.0,
+        'abs_arcsec': 0.05,
+        'n_inner': 5000,
+    }
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_frame_relative_offset_pixel',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=xcorr,
+        ) as mock_xc,
+        patch(
+            'st123.stages.alignment.hst_jhat.apply_common_abs_shift_vs_ref',
+            return_value={'ok': True, 'applied': True},
+        ),
+    ):
+        report = harmonize_hst_visits_across_filters([f814, f555], abs_ref=None)
+
+    assert report['ok'] is True
+    mock_xc.assert_called()
+    rel = report['visits'][0]['relative']
+    assert any(r.get('applied') and r.get('method') == 'image_xcorr' for r in rel)
+
+
+def test_visit_cross_filter_soft_skips_when_relative_fails(tmp_path: Path):
+    """Unmatched filters keep prior WCS instead of hard-failing the visit."""
+    from st123.stages.alignment.hst_jhat import harmonize_hst_visits_across_filters
+
+    f814 = _dual_sci_frame(tmp_path / 'ieec43abq_jhat.fits')
+    f555 = _dual_sci_frame(
+        tmp_path / 'ieec43acq_jhat.fits', star_on_chip2_only=False
+    )
+    with fits.open(f555, mode='update') as hdul:
+        hdul[0].header['FILTER'] = 'F555W'
+        hdul[0].header['EXPTIME'] = 500.0
+        hdul.flush()
+    with fits.open(f814, mode='update') as hdul:
+        hdul[0].header['EXPTIME'] = 100.0
+        hdul.flush()
+
+    fail = {'ok': False, 'abs_arcsec': 0.0, 'error': 'no peak'}
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_2dhist',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_frame_relative_offset_pixel',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_smooth_peak',
+            return_value=fail,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.apply_common_abs_shift_vs_ref',
+            return_value={'ok': True, 'applied': True},
+        ),
+    ):
+        report = harmonize_hst_visits_across_filters([f814, f555], abs_ref=None)
+
+    assert report['ok'] is True
+    rel = report['visits'][0]['relative']
+    assert any(r.get('skipped') for r in rel)
+
+
 def _sci_jhat(path: Path) -> Path:
     pri = fits.PrimaryHDU(
         header=fits.Header(

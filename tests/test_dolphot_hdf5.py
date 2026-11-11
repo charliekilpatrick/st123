@@ -65,6 +65,38 @@ def test_ensure_dolphot_catalog_hdf5_roundtrip(tmp_path: Path):
         assert hf['photometry'].attrs.get('st123_dolphot_hdf5_format') == 1
 
 
+def test_ensure_empty_phot_writes_zero_row_hdf5(tmp_path: Path):
+    """Zero-detection DOLPHOT runs leave an empty .phot; treat as success."""
+    h5py = pytest.importorskip('h5py')
+    from st123.scripts import dolphot_hdf5 as dh
+    from st123.stages.photometry.dolphot_catalog_hdf5 import (
+        ensure_dolphot_catalog_hdf5,
+        read_dolphot_catalog_hdf5,
+    )
+
+    outdir = tmp_path / 'hst_0_0'
+    base = _write_minimal_catalog(outdir)
+    base.write_text('')  # DOLPHOT found no stars
+    out = ensure_dolphot_catalog_hdf5(
+        outdir, compression=False, include_directory_manifest=False, force=True
+    )
+    assert out is not None and out.is_file()
+    table = read_dolphot_catalog_hdf5(out)
+    assert len(table) == 0
+    assert len(table.colnames) == 4
+
+    project = tmp_path / 'proj'
+    empty = project / 'dolphot' / 'hst_0_0'
+    nonempty = project / 'dolphot' / 'hst_1_0'
+    _write_minimal_catalog(empty)
+    (empty / 'hst_0_0.phot').write_text('')
+    _write_minimal_catalog(nonempty, name='hst_1_0')
+    rc = dh.main(['--base-dir', str(project), '-v', '--force'])
+    assert rc == 0
+    assert (empty / 'hst_0_0.h5').is_file()
+    assert (nonempty / 'hst_1_0.h5').is_file()
+
+
 def test_ensure_uses_dolphot_param(tmp_path: Path):
     """st123 run dirs store the input param as dolphot.param, not <base>.param."""
     pytest.importorskip('h5py')

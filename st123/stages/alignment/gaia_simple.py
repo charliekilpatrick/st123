@@ -236,7 +236,7 @@ def align_image_to_gaia_simple(
     dst = Path(output).expanduser().resolve()
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    gaia = query_gaia(str(src), telescope=telescope, backend='vizier')
+    gaia = query_gaia(str(src), telescope=telescope)
     if len(gaia) == 0:
         raise RuntimeError(f'gaia_simple: no Gaia sources for {src.name}')
 

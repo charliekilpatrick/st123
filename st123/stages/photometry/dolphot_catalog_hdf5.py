@@ -155,7 +155,11 @@ def find_column_index_0based(
     return None
 
 
-def load_dolphot_catalog_array(path: PathLike) -> np.ndarray:
+def load_dolphot_catalog_array(
+    path: PathLike,
+    *,
+    n_columns: Optional[int] = None,
+) -> np.ndarray:
     """
     Load the main DOLPHOT catalog (numeric rows, whitespace-separated).
 
@@ -163,11 +167,16 @@ def load_dolphot_catalog_array(path: PathLike) -> np.ndarray:
     ----------
     path : path-like
         Path to ``dpXXXX`` (no extension), same as ``dolphot['base']`` in the pipeline.
+    n_columns : int, optional
+        Expected column count from the ``.columns`` file. Required to shape an
+        empty catalog correctly: ``numpy.loadtxt`` on a zero-byte ``.phot`` yields
+        ``(0, 1)``, which must not be treated as a one-column catalog.
 
     Returns
     -------
     numpy.ndarray
-        2-D float array of shape (n_sources, n_columns).
+        2-D float array of shape (n_sources, n_columns). Zero detections return
+        shape ``(0, n_columns)`` when *n_columns* is provided.
 
     Notes
     -----
@@ -176,7 +185,15 @@ def load_dolphot_catalog_array(path: PathLike) -> np.ndarray:
     read once per scrape.
     """
     path = Path(path)
-    return np.loadtxt(path, dtype=np.float64, ndmin=2)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    if path.stat().st_size == 0:
+        ncol = int(n_columns or 0)
+        return np.zeros((0, ncol), dtype=np.float64)
+    catalog = np.loadtxt(path, dtype=np.float64, ndmin=2)
+    if catalog.shape[0] == 0 and n_columns is not None:
+        return np.zeros((0, int(n_columns)), dtype=np.float64)
+    return catalog
 
 
 def dolphot_columns_to_astropy_table(
@@ -200,6 +217,10 @@ def dolphot_columns_to_astropy_table(
 
     if catalog.ndim != 2:
         raise ValueError("catalog must be a 2-D array")
+    # Empty DOLPHOT runs leave a zero-byte .phot; loadtxt reports (0, 1).
+    # Trust the .columns definition and emit a 0-row table.
+    if catalog.shape[0] == 0:
+        catalog = np.zeros((0, len(columns)), dtype=np.float64)
     ncol = catalog.shape[1]
     if len(columns) != ncol:
         raise ValueError(
@@ -790,8 +811,10 @@ def write_dolphot_catalog_hdf5(
         catalog = np.asarray(catalog_array, dtype=np.float64)
         if catalog.ndim != 2:
             raise ValueError("catalog_array must be 2-D")
+        if catalog.shape[0] == 0:
+            catalog = np.zeros((0, len(columns)), dtype=np.float64)
     else:
-        catalog = load_dolphot_catalog_array(base)
+        catalog = load_dolphot_catalog_array(base, n_columns=len(columns))
 
     use_matrix = len(names) > _MAX_COMPOUND_HDF5_COLUMNS
     if use_matrix:

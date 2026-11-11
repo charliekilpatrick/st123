@@ -107,10 +107,14 @@ def test_expflag_interrupted_rejected_after_sanitize(tmp_path: Path):
 def test_prune_bad_hst_expflag(tmp_path: Path):
     good = _hst_flc(tmp_path / 'g_flc.fits', expflag='NORMAL')
     bad = _hst_flc(tmp_path / 'b_flc.fits', expflag='TDF-DOWN')
+    bad2 = _hst_flc(tmp_path / 'b2_flc.fits', expflag='EXCESSIVE DOWNTIME')
     pruned = prune_bad_hst_expflag(tmp_path, remove=True)
     assert str(bad) in pruned
+    assert str(bad2) in pruned
+    assert len(pruned) == 2
     assert good.is_file()
     assert not bad.exists()
+    assert not bad2.exists()
 
 
 def test_hst_flc_under_visit_named_dir_not_euclid(tmp_path: Path):

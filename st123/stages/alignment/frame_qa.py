@@ -32,6 +32,12 @@ FRAME_CATASTROPHIC_TOL_ARCSEC = 0.200
 # FFT xcorr on an empty cutout can report a 0" leftover; require this many
 # finite inner pixels before treating the lock as real.
 FRAME_IMAGE_XCORR_MIN_INNER = 200
+# When galaxy-peak still reports a large offset, a near-zero xcorr with
+# only a few hundred finite pixels is a sparse false lock (sn2004g
+# WFPC2/F658N: peak 34", xcorr 50 mas with n_inner=857 cleared
+# catastrophic and poisoned visit-sibling salvage). Require a denser
+# overlap before xcorr overrides a bad peak.
+FRAME_IMAGE_XCORR_PEAK_DISAGREE_MIN_INNER = 10000
 # Wide recovery search / apply cap when a frame is already catastrophic.
 # Shared-stamp galaxy peaks can sit tens of arcsec apart (SN 2014cx F606W is
 # 25" west and 6" north of F555W after a false ~69" FFT lock; pipeline WCS

@@ -120,7 +120,7 @@ def score_level3_gaia(
     filt = get_filter(path).lower()
 
     try:
-        gaia = query_gaia(str(path), telescope='hst', backend='vizier')
+        gaia = query_gaia(str(path), telescope='hst')
     except Exception as exc:
         logger.warning('Gaia query failed for %s: %s', path.name, exc)
         return Level3GaiaScore(path, 0, 0, 0, inst, filt)

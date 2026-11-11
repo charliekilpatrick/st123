@@ -1050,18 +1050,14 @@ def run_orchestrated_mosaic(
             seen.add(p)
             uniq_files.append(p)
     if not uniq_files:
-        # No JWST JHAT after MIRI-only skip (or empty tree): soft-skip JWST-only.
-        if not hst_inst and not jwst_inst:
-            logger.warning(
-                'No JHAT frames for mosaic under %s; skipping', base_dir
-            )
-            return 0
-        logger.error(
-            'No JHAT frames found for instruments %s under %s',
-            instruments,
+        # Soft-skip when the tree is empty (including HST fields where every
+        # frame was EXPFLAG-rejected upstream and align produced no JHAT).
+        logger.warning(
+            'No JHAT frames for mosaic under %s (instruments=%s); soft-skip',
             base_dir,
+            instruments,
         )
-        return 1
+        return 0
 
     existing_box = getattr(args, 'existing_box', None)
     center_ra = getattr(args, 'center_ra', None)

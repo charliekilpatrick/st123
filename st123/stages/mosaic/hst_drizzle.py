@@ -561,6 +561,52 @@ def _inpaint_from_neighbors(sci: np.ndarray, hole: np.ndarray, valid: np.ndarray
     return out
 
 
+def _restore_coverage_from_neighbors(
+    wht: np.ndarray,
+    ctx: np.ndarray | None,
+    hole: np.ndarray,
+    valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Copy WHT (and CTX) into inpainted holes from the nearest valid pixel.
+
+    Interior drizzle holes (CR / hot excluded by ``final_bits``) are filled in
+    SCI for cosmetics. Leaving ``WHT=0`` / ``CTX==0`` makes DOLPHOT ``*mask``
+    rewrite those pixels to DMIN and swiss-cheeses the coadd reference. Restore
+    coverage from neighbors so photometry uses the inpainted SCI; true
+    uncovered footprint stays ``WHT=0`` / ``CTX==0``. Cosmic rays on science
+    frames remain masked via CALACS DQ bits in ``acsmask`` on FLT/FLC chips.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    wht_out = np.asarray(wht, dtype=np.float32).copy()
+    sel = np.asarray(hole, dtype=bool)
+    good = np.asarray(valid, dtype=bool)
+    if not np.any(sel) or not np.any(good):
+        return wht_out, ctx
+    inv = np.asarray(~good, dtype=bool)
+    _, (iy, ix) = ndimage.distance_transform_edt(inv, return_indices=True)
+    wht_out[sel] = wht_out[iy[sel], ix[sel]]
+    # Neighbors can themselves be empty at the footprint edge; force a
+    # positive weight so default CTX-based *mask still keeps the pixel.
+    need = sel & ~(np.isfinite(wht_out) & (wht_out > 0))
+    if np.any(need):
+        sample = wht_out[good & np.isfinite(wht_out) & (wht_out > 0)]
+        fill_w = float(np.median(sample)) if sample.size else 1.0
+        if not np.isfinite(fill_w) or fill_w <= 0:
+            fill_w = 1.0
+        wht_out[need] = np.float32(fill_w)
+    ctx_out = ctx
+    if ctx is not None:
+        ctx_out = np.asarray(ctx).copy()
+        ctx_out[sel] = ctx_out[iy[sel], ix[sel]]
+        still0 = sel & (ctx_out == 0)
+        if np.any(still0):
+            ctx_out[still0] = 1
+    return wht_out, ctx_out
+
+
 def _split_empty_components(
     empty: np.ndarray,
     *,
@@ -637,18 +683,28 @@ def fill_drizzle_uncovered_with_sky(
     Cosmetically fill uncovered SCI pixels and flag them in DQ / WHT.
 
     AstroDrizzle leaves ``CTX==0`` (and often NaN SCI) outside the illuminated
-    footprint. Align and mosaic coadds are sanitized so SCI has no NaNs:
+    footprint, and also punches interior holes where input DQ bits are
+    excluded by ``final_bits`` (ACS CR=4096, hot=16, ...). Align and mosaic
+    coadds are sanitized so SCI has no NaNs:
 
     - Large / border-touching empty regions get the illuminated median sky
-      (true non-coverage).
-    - Small interior holes are nearest-neighbor interpolated from valid SCI
-      so the image looks continuous.
+      (true non-coverage). ``WHT=0`` / ``CTX==0`` so DOLPHOT ``*mask`` maps
+      them to DMIN.
+    - Small interior holes are nearest-neighbor interpolated from valid SCI.
+      Coverage (``WHT`` / ``CTX``) is restored from neighbors so ``*mask`` does
+      **not** DMIN them -- otherwise a thin ACS stack becomes a swiss cheese
+      of ignored pixels. DQ bit 2 still marks the inpaint for provenance.
+      Real CRs stay masked on science FLT/FLC chips via CALACS DQ in
+      ``acsmask``.
+    - Isolated SCI hot/cold spikes (CTX>0 but extreme vs local median) are
+      inpainted and given ``WHT=0`` (CTX kept) so weight-aware tools ignore
+      them while default CTX-based ``*mask`` does not swiss-cheese the ref.
     - WFPC2 single-bit CTX pixels near the footprint edge keep their drizzle
-      SCI (real detector data) instead of being replaced with sky.
+      SCI (real detector data) instead of being replaced with sky; ``WHT=0``
+      and DQ bit 4 mark them unreliable.
 
-    In all three cases ``WHT=0`` so DOLPHOT ``*mask`` still maps them to DMIN.
     A ``DQ`` extension records why: bit 1 = no data (sky), bit 2 = inpainted
-    hole, bit 4 = kept SCI but untrustworthy (single-coverage edge).
+    hole / hot clip, bit 4 = kept SCI but untrustworthy (single-coverage edge).
 
     For WFPC2, the single-bit edge cut uses
     :attr:`WFPC2DataModel.DROP_SINGLE_CTX_EDGE_PIX` but only when the mosaic
@@ -805,14 +861,25 @@ def fill_drizzle_uncovered_with_sky(
             remain = good & ~hot
             sci = _inpaint_from_neighbors(sci, hot, remain)
         sci_hdu.data = sci
-        ignore = exterior | small_holes | single_edge | hot
+        # True non-coverage and unreliable edge / hot spikes: drop weight.
+        # Inpainted interior holes keep (restored) coverage so *mask does not
+        # DMIN them; DQ bit 2 records the cosmetic fill.
+        ignore = exterior | single_edge | hot
+        wht = None
         if wht_hdu is not None and np.asarray(wht_hdu.data).shape == sci.shape:
             wht = np.asarray(wht_hdu.data, dtype=np.float32).copy()
             wht[ignore] = 0.0
-            wht_hdu.data = wht
+        ctx_out = None
         if ctx_hdu is not None and np.asarray(ctx_hdu.data).shape == sci.shape:
             ctx_out = np.asarray(ctx_hdu.data).copy()
-            ctx_out[exterior | small_holes] = 0
+            ctx_out[exterior] = 0
+        if n_inpaint and wht is not None:
+            wht, ctx_out = _restore_coverage_from_neighbors(
+                wht, ctx_out, small_holes, good
+            )
+        if wht is not None and wht_hdu is not None:
+            wht_hdu.data = wht
+        if ctx_out is not None and ctx_hdu is not None:
             ctx_hdu.data = ctx_out
         dq_hdu = _ensure_l3_dq_hdu(hdul, sci.shape)
         dq = np.asarray(dq_hdu.data, dtype=np.int16).copy()
@@ -882,9 +949,9 @@ def _finalize_drizzle_product(
     Move AstroDrizzle output to *desired* and drop WFPC2 ``_drw`` duplicates.
 
     DrizzlePac forces ``_drw.fits`` for WFPC2 when given a bare stem; we always
-    keep a single ``_drz.fits`` (or ``_drc.fits``) product. Uncovered pixels
-    are then filled in SCI (sky or inpaint) and flagged in ``DQ`` / ``WHT=0``
-    so photometry ignores them while the image stays visually continuous.
+    keep a single ``_drz.fits`` (or ``_drc.fits``) product. Uncovered footprint
+    is sky-filled with ``WHT=0`` / ``CTX==0``; small interior holes are
+    inpainted with coverage restored so ``*mask`` does not DMIN them.
     """
     product = product.resolve()
     desired = desired.resolve()
@@ -1256,6 +1323,18 @@ def _default_final_scale(instrument: str) -> float | None:
     if inst == 'wfc3':
         return 0.04
     return None
+
+
+def _pixel_scale_arcsec_from_wcs(wcs_like) -> float:
+    """Plate scale (arcsec/pix) from a WCS or FITS WCS header."""
+    import numpy as np
+    from astropy.wcs import WCS as AstropyWCS
+
+    if isinstance(wcs_like, fits.Header):
+        wcs = AstropyWCS(wcs_like, naxis=2)
+    else:
+        wcs = wcs_like
+    return float(np.sqrt(np.abs(np.linalg.det(wcs.pixel_scale_matrix)))) * 3600.0
 
 
 def _wcs_orientat_deg(celestial_wcs) -> float:
@@ -1780,24 +1859,54 @@ def drizzle_filter_group(
             break
     output_stem = out.parent / name
 
+    # Explicit job-level scale (same for every filter). Instrument defaults
+    # apply only when there is no shared stamp WCS.
+    explicit_scale = final_scale
     scale = final_scale
-    if scale is None:
+    if scale is None and output_wcs is None:
         scale = _default_final_scale(inst)
 
     forced_wcs_kwargs: dict[str, object] | None = None
     if output_wcs is not None:
         from astropy.wcs import WCS as AstropyWCS
 
-        pixscale = float(scale or _default_final_scale(inst) or 0.05)
+        # Shared stamp: every filter/instrument must share ONE pixel grid so
+        # galaxy nuclei land at the same (x, y). Never fall back to
+        # per-instrument ``_default_final_scale`` (ACS 0.05" vs WFC3 0.04"
+        # produced sn2020MMZ F275W at 5308x5202 while ACS was 4246x4162).
         if isinstance(output_wcs, fits.Header):
             from st123.stages.mosaic.mosaic import strip_header_obsgeo
 
+            stamp_scale = _pixel_scale_arcsec_from_wcs(output_wcs)
+            pixscale = (
+                float(explicit_scale)
+                if explicit_scale is not None
+                else float(stamp_scale)
+            )
             wcs_hdr = output_wcs.copy()
             strip_header_obsgeo(wcs_hdr)
+            # Header donors already carry NAXIS/CDELT; rebuild when the job
+            # requests an explicit scale different from the stamp.
+            try:
+                hdr_scale = _pixel_scale_arcsec_from_wcs(wcs_hdr)
+            except Exception:
+                hdr_scale = pixscale
+            if abs(float(hdr_scale) - float(pixscale)) > 1.0e-4:
+                from astropy.wcs import WCS as _WCS
+
+                wcs_hdr, _ = build_boxed_drizzle_wcs(
+                    _WCS(wcs_hdr, naxis=2), pixscale
+                )
         elif isinstance(output_wcs, AstropyWCS):
             from st123.stages.mosaic.mosaic import wcs_without_observatory
 
             clean_wcs = wcs_without_observatory(output_wcs)
+            stamp_scale = _pixel_scale_arcsec_from_wcs(clean_wcs)
+            pixscale = (
+                float(explicit_scale)
+                if explicit_scale is not None
+                else float(stamp_scale)
+            )
             wcs_hdr, _ = build_boxed_drizzle_wcs(clean_wcs, pixscale)
         else:
             raise TypeError(
@@ -2118,6 +2227,98 @@ def _pick_coadd_abs_ref(
     return max(existing, key=score)
 
 
+_LOOKUP_TABLE_NAMES = frozenset({'D2IMARR', 'WCSDVARR'})
+
+
+def _required_lookup_extvers(hdul) -> dict[str, set[int]]:
+    """EXTVERs referenced by SCI ``D2IM*.EXTVER`` / ``DP*.EXTVER`` cards."""
+    req: dict[str, set[int]] = {'D2IMARR': set(), 'WCSDVARR': set()}
+    for hdu in hdul:
+        if getattr(hdu, 'name', None) != 'SCI':
+            continue
+        hdr = hdu.header
+        for key in hdr:
+            if not key.endswith('.EXTVER'):
+                continue
+            try:
+                ver = int(float(hdr[key]))
+            except (TypeError, ValueError):
+                continue
+            if key.startswith('D2IM'):
+                req['D2IMARR'].add(ver)
+            elif key.startswith('DP'):
+                req['WCSDVARR'].add(ver)
+    return req
+
+
+def _lookup_table_extver_map(hdul) -> dict[str, set]:
+    """Present lookup-table EXTVERs (``None`` if the card is missing)."""
+    out: dict[str, set] = {}
+    for hdu in hdul:
+        name = getattr(hdu, 'name', None)
+        if name not in _LOOKUP_TABLE_NAMES:
+            continue
+        out.setdefault(name, set()).add(hdu.header.get('EXTVER'))
+    return out
+
+
+def _assert_lookup_tables_resolvable(hdul, path: Path) -> None:
+    """Raise ``KeyError`` if SCI lookup-table references cannot be resolved."""
+    present = _lookup_table_extver_map(hdul)
+    for name, vers in _required_lookup_extvers(hdul).items():
+        have: set[int] = set()
+        for v in present.get(name, set()):
+            if v is None:
+                continue
+            try:
+                have.add(int(float(v)))
+            except (TypeError, ValueError):
+                continue
+        missing = sorted(vers - have)
+        if missing:
+            raise KeyError(
+                f"Extension ('{name}', {float(missing[0])}) not found "
+                f"in {path.name}."
+            )
+
+
+def _snapshot_lookup_tables(hdul) -> list:
+    """Deep-copy ``D2IMARR`` / ``WCSDVARR`` HDUs (header + data + EXTVER)."""
+    import numpy as np
+    from astropy.io import fits as _fits
+
+    snaps: list = []
+    for hdu in hdul:
+        name = getattr(hdu, 'name', None)
+        if name not in _LOOKUP_TABLE_NAMES:
+            continue
+        data = hdu.data
+        snaps.append(
+            _fits.ImageHDU(
+                data=None if data is None else np.array(data, copy=True),
+                header=hdu.header.copy(),
+                name=name,
+            )
+        )
+    return snaps
+
+
+def _restore_lookup_tables(hdul, snaps: list) -> int:
+    """Replace lookup-table HDUs with *snaps*. Returns number restored."""
+    if not snaps:
+        return 0
+    idxs = [
+        i
+        for i, hdu in enumerate(hdul)
+        if getattr(hdu, 'name', None) in _LOOKUP_TABLE_NAMES
+    ]
+    for i in reversed(idxs):
+        del hdul[i]
+    for snap in snaps:
+        hdul.append(snap.copy())
+    return len(snaps)
+
+
 def apply_sky_shift_to_fits(
     path: PathLike,
     dra_deg: float,
@@ -2125,11 +2326,21 @@ def apply_sky_shift_to_fits(
     *,
     comment: str = 'st123: L3-unified abs shift',
 ) -> int:
-    """Add (DeltaRA, DeltaDec) degrees to every SCI CRVAL in *path*. Returns n updated."""
+    """Add (DeltaRA, DeltaDec) degrees to every SCI CRVAL in *path*. Returns n updated.
+
+    Preserves ``D2IMARR`` / ``WCSDVARR`` EXTVERs: snapshots lookup tables before
+    the SCI edit and restores them if an update pass collapses or drops them.
+    Refuses to mutate files whose SCI already references missing EXTVERs.
+    """
     from st123.stages.alignment.hst_jhat import apply_sky_translation_to_sci, _sci_hdu_indices
 
     p = Path(path)
-    with as_datamodel(p).open(mode='update', memmap=False) as hdul:
+    # sanitize=False: CRVAL-only edit; avoid any rewrite that could restack
+    # distortion lookup tables.
+    with as_datamodel(p).open(mode='update', memmap=False, sanitize=False) as hdul:
+        _assert_lookup_tables_resolvable(hdul, p)
+        lookup_snap = _snapshot_lookup_tables(hdul)
+        extver_before = _lookup_table_extver_map(hdul)
         idxs = _sci_hdu_indices(hdul)
         if not idxs:
             # Single-extension coadd / primary science.
@@ -2157,6 +2368,16 @@ def apply_sky_shift_to_fits(
                 float(ddec_deg) * 3600.0,
                 '[arcsec] L3-unify dDec',
             )
+        extver_after = _lookup_table_extver_map(hdul)
+        if lookup_snap and extver_after != extver_before:
+            n_restored = _restore_lookup_tables(hdul, lookup_snap)
+            logger.warning(
+                'apply_sky_shift_to_fits: restored %d lookup-table HDU(s) '
+                'after EXTVER collapse in %s',
+                n_restored,
+                p.name,
+            )
+        _assert_lookup_tables_resolvable(hdul, p)
         hdul.flush()
     return int(n)
 
@@ -2195,6 +2416,7 @@ def unify_hst_astrometric_frame(
         FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC,
         HST_ABS_OFFSET_MAX_ARCSEC,
         HST_L3_ALIGN_MAX_ARCSEC,
+        HST_L3_UNIFY_APPLY_MAX_ARCSEC,
         measure_hst_sky_offset_2dhist,
         measure_hst_sky_offset_smooth_peak,
         validate_hst_coadds_alignment,
@@ -2265,7 +2487,80 @@ def unify_hst_astrometric_frame(
         report['iterations'] = it + 1
         iter_rows: list[dict] = []
         any_shift = False
+        search_cap = max(float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC), 120.0)
+        image_tol = float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
 
+        from st123.stages.alignment.hst_jhat import (
+            _count_colocated_smoothed_peaks,
+            arbitrate_hst_l3_sky_offset,
+            measure_hst_sky_offset_image_xcorr,
+            measure_hst_sky_offset_multi_peak,
+        )
+
+        def _measure_vs_abs(coadd: Path, *, filt: str | None = None) -> dict:
+            # Same arbiter as final L3 QA: never apply a multi_peak shift that
+            # image_xcorr rejects, and never stop at multi_peak=0 when xcorr
+            # still sees a few-arcsec residual (sn2020mmz F555W/F814W).
+            # UV frames: heavier smooth so the galaxy nucleus beats a bright
+            # optical field star (sn2020mmz F275W locked onto the SW ACS star
+            # at smooth_pix=20).
+            from st123.stages.alignment.clinic import is_uv_filter_token
+
+            smooth_pix = 80.0 if is_uv_filter_token(str(filt or '')) else 20.0
+            peak = measure_hst_sky_offset_smooth_peak(
+                coadd,
+                abs_ref,
+                max_offset_arcsec=search_cap,
+                smooth_pix=smooth_pix,
+            )
+            multi = measure_hst_sky_offset_multi_peak(
+                coadd, abs_ref, max_offset_arcsec=search_cap
+            )
+            try:
+                xc = measure_hst_sky_offset_image_xcorr(
+                    coadd, abs_ref, max_offset_arcsec=search_cap
+                )
+            except Exception as exc:
+                xc = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
+
+            off = arbitrate_hst_l3_sky_offset(
+                peak, multi, xc, image_tol=image_tol
+            )
+            if off.get('ok'):
+                return off
+
+            peak_as = peak.get('abs_arcsec')
+            if peak_as is not None and float(peak_as) > image_tol:
+                n_colo = _count_colocated_smoothed_peaks(
+                    coadd, abs_ref, tol_arcsec=image_tol
+                )
+                if n_colo >= 1:
+                    return {
+                        'ok': True,
+                        'method': 'peak_overlap',
+                        'n_match': int(n_colo),
+                        'abs_arcsec': 0.0,
+                        'dra_arcsec': 0.0,
+                        'ddec_arcsec': 0.0,
+                        'dra_deg': 0.0,
+                        'ddec_deg': 0.0,
+                        'arbiter': 'peak_overlap',
+                    }
+
+            off = measure_hst_sky_offset_2dhist(
+                coadd, abs_ref, max_offset_arcsec=search
+            )
+            if off.get('ok') and float(off.get('abs_arcsec') or 0.0) > image_tol:
+                return off
+            if xc.get('ok') and float(xc.get('abs_arcsec') or 0.0) > image_tol:
+                out = dict(xc)
+                out['method'] = 'image_xcorr'
+                out['arbiter'] = 'xcorr_fallback'
+                return out
+            return off if off.get('ok') else {'ok': False, 'method': 'none'}
+
+        # Phase 1: measure every non-ref coadd vs abs_ref.
+        pending: list[tuple[dict, Path, list[Path], dict]] = []
         for rec in records:
             coadd = Path(rec['output'])
             frames = [Path(p) for p in rec.get('frames') or []]
@@ -2280,32 +2575,128 @@ def unify_hst_astrometric_frame(
             if row['is_abs_ref'] or not coadd.is_file():
                 iter_rows.append(row)
                 continue
-
-            peak = measure_hst_sky_offset_smooth_peak(
-                coadd,
-                abs_ref,
-                max_offset_arcsec=float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC),
-            )
-            off = {'ok': False}
+            off = _measure_vs_abs(coadd, filt=str(rec.get('filter') or ''))
+            # Brightest-peak / nucleus-cutout locks onto field stars
+            # (UV: sn2020mmz F275W galaxy -> SW ACS star; optical:
+            # sn2017bzb F438W smooth_peak ~208"). smooth and image_xcorr
+            # often *agree* on that false lock, so requiring xcorr
+            # corroboration is not enough -- only a coherent multi_peak
+            # star-field shift is trusted for large image-method moves.
+            apply_max = float(HST_L3_UNIFY_APPLY_MAX_ARCSEC)
             if (
-                peak.get('ok')
-                and float(peak.get('abs_arcsec') or 0.0)
-                > float(FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC)
+                off.get('ok')
+                and str(off.get('method') or '') in ('smooth_peak', 'image_xcorr')
+                and float(off.get('abs_arcsec') or 0.0) > apply_max
             ):
-                off = peak
-            else:
-                off = measure_hst_sky_offset_2dhist(
-                    coadd, abs_ref, max_offset_arcsec=search
+                from st123.stages.alignment.clinic import is_uv_filter_token
+
+                image_as = float(off.get('abs_arcsec') or 0.0)
+                multi_chk: dict = {'ok': False}
+                try:
+                    multi_chk = measure_hst_sky_offset_multi_peak(
+                        coadd, abs_ref, max_offset_arcsec=search_cap
+                    )
+                except Exception:
+                    multi_chk = {'ok': False}
+                multi_as = (
+                    float(multi_chk.get('abs_arcsec') or 0.0)
+                    if multi_chk.get('ok')
+                    else None
                 )
-            row['measure'] = {
-                'ok': bool(off.get('ok')),
-                'abs_arcsec': off.get('abs_arcsec'),
-                'dra_arcsec': off.get('dra_arcsec'),
-                'ddec_arcsec': off.get('ddec_arcsec'),
-                'peak_count': off.get('peak_count'),
-                'n_pairs': off.get('n_pairs'),
-                'method': off.get('method'),
-            }
+                # Shared-stamp mosaics: never promote a huge image lock;
+                # content should already sit on the JWST box.
+                stamp_locked = output_wcs is not None
+                multi_ok = (
+                    multi_as is not None
+                    and multi_as > image_tol
+                    and abs(multi_as - image_as) <= 2.0
+                    and multi_as <= apply_max
+                    and not stamp_locked
+                )
+                if multi_ok:
+                    off = dict(multi_chk)
+                    off['ok'] = True
+                    off['method'] = 'multi_peak'
+                    off['arbiter'] = 'large_image_needs_multi'
+                else:
+                    uv = is_uv_filter_token(str(rec.get('filter') or ''))
+                    logger.warning(
+                        'L3 unify: refusing %s %s %.3f" for %s '
+                        '(galaxy-on-star risk; multi=%s%s)',
+                        'UV' if uv else 'optical',
+                        off.get('method'),
+                        image_as,
+                        coadd.name,
+                        f'{multi_as:.3f}"' if multi_as is not None else 'n/a',
+                        '; stamp WCS locked' if stamp_locked else '',
+                    )
+                    off = {
+                        'ok': False,
+                        'method': (
+                            'uv_image_refused' if uv else 'image_lock_refused'
+                        ),
+                        'abs_arcsec': image_as,
+                        'error': 'galaxy_star_false_lock',
+                    }
+            # Keep the full measure (incl. dra_deg/ddec_deg) for apply /
+            # sibling propagation; also mirror a compact summary.
+            row['measure'] = dict(off)
+            row['measure']['ok'] = bool(off.get('ok'))
+            pending.append((rec, coadd, frames, row))
+
+        # Phase 1b: if a mover needs a large shift onto abs_ref, propagate
+        # that same sky Delta to coadds that are truly image-locked to the
+        # mover (peak ~0 and multi-peak does not find an outer translation).
+        # Keeps sn2021dbg F275W with F555W when abs_ref is F814W.
+        apply_max = float(HST_L3_UNIFY_APPLY_MAX_ARCSEC)
+        movers = [
+            (rec, coadd, frames, row)
+            for rec, coadd, frames, row in pending
+            if (row.get('measure') or {}).get('ok')
+            and float((row['measure'].get('abs_arcsec') or 0.0)) > float(limit)
+            # Never propagate a shift we would refuse to apply.
+            and float((row['measure'].get('abs_arcsec') or 0.0)) <= apply_max
+        ]
+        for rec, coadd, frames, row in pending:
+            m = row.get('measure') or {}
+            if m.get('ok') and float(m.get('abs_arcsec') or 0.0) > float(limit):
+                continue
+            for m_rec, m_coadd, _mf, m_row in movers:
+                if m_coadd.resolve() == coadd.resolve():
+                    continue
+                pk = measure_hst_sky_offset_smooth_peak(
+                    coadd, m_coadd, max_offset_arcsec=search_cap
+                )
+                if not (
+                    pk.get('ok')
+                    and float(pk.get('abs_arcsec') or 0.0) <= image_tol
+                ):
+                    continue
+                multi = measure_hst_sky_offset_multi_peak(
+                    coadd, m_coadd, max_offset_arcsec=search_cap
+                )
+                if multi.get('ok') and float(multi.get('abs_arcsec') or 0.0) > image_tol:
+                    # False peak colocation (different stars on one pixel).
+                    continue
+                donor = dict(m_row.get('measure') or {})
+                donor['ok'] = True
+                donor['method'] = (
+                    f"propagated_from_{(m_row.get('filter') or m_coadd.name)}"
+                )
+                row['measure'] = donor
+                logger.info(
+                    'L3 unify: propagating %.3f" shift from %s to %s '
+                    '(image-locked sibling; abs_ref=%s)',
+                    float(donor.get('abs_arcsec') or 0.0),
+                    m_coadd.name,
+                    coadd.name,
+                    abs_ref.name,
+                )
+                break
+
+        # Phase 2: apply measured / propagated shifts.
+        for rec, coadd, frames, row in pending:
+            off = row.get('measure') or {}
             if not off.get('ok'):
                 logger.warning(
                     'L3 unify: could not measure %s vs %s (pairs=%s peak=%s)',
@@ -2317,14 +2708,71 @@ def unify_hst_astrometric_frame(
                 iter_rows.append(row)
                 continue
 
-            if float(off['abs_arcsec']) <= limit:
+            if float(off.get('abs_arcsec') or 0.0) <= limit:
                 logger.info(
                     'L3 unify: %s already on frame (|Delta|=%.3f")',
                     coadd.name,
-                    off['abs_arcsec'],
+                    off.get('abs_arcsec'),
                 )
                 iter_rows.append(row)
                 continue
+
+            # Hard apply ceiling: measurement may report tens-of-arcsec
+            # false locks (search_cap >= 120"); never write those into L2.
+            abs_as = float(off.get('abs_arcsec') or 0.0)
+            method = str(off.get('method') or '')
+            stamp_locked = output_wcs is not None
+            refuse_apply = False
+            refuse_reason = ''
+            if abs_as > float(FRAME_CATASTROPHIC_RECOVER_MAX_ARCSEC):
+                refuse_apply = True
+                refuse_reason = 'above_catastrophic_recover_cap'
+            elif stamp_locked and abs_as > apply_max:
+                refuse_apply = True
+                refuse_reason = 'stamp_apply_cap'
+            elif (
+                method in ('smooth_peak', 'image_xcorr', 'peak_overlap')
+                and abs_as > apply_max
+            ):
+                refuse_apply = True
+                refuse_reason = 'image_apply_cap'
+            elif abs_as > apply_max and not method.startswith('multi_peak'):
+                # Propagated / 2dhist / other: still refuse above apply_max
+                # unless multi_peak (trusted star-field, non-stamp only).
+                refuse_apply = True
+                refuse_reason = 'apply_cap'
+            if refuse_apply:
+                logger.warning(
+                    'L3 unify: refusing apply %.3f" (%s, method=%s) for %s',
+                    abs_as,
+                    refuse_reason,
+                    method or 'none',
+                    coadd.name,
+                )
+                row['measure'] = dict(off)
+                row['measure']['ok'] = False
+                row['measure']['error'] = refuse_reason
+                row['refused_apply'] = refuse_reason
+                iter_rows.append(row)
+                continue
+
+            if off.get('dra_deg') is None or off.get('ddec_deg') is None:
+                import numpy as np
+
+                dec0 = 0.0
+                try:
+                    from astropy.io import fits as _fits
+
+                    dec0 = float(
+                        _fits.getheader(coadd, extname='SCI').get('CRVAL2', 0.0)
+                    )
+                except Exception:
+                    dec0 = 0.0
+                cosdec = float(np.cos(np.radians(dec0)))
+                off['dra_deg'] = float(off.get('dra_arcsec') or 0.0) / (
+                    3600.0 * cosdec if cosdec else 3600.0
+                )
+                off['ddec_deg'] = float(off.get('ddec_arcsec') or 0.0) / 3600.0
 
             # img-ref -> apply -Delta to L2 (+ remosaic) so they move onto abs_ref.
             # When a shared stamp *output_wcs* is locked, never mutate the L3
@@ -2335,14 +2783,14 @@ def unify_hst_astrometric_frame(
             ddec_as = -float(off['ddec_arcsec'])
             logger.info(
                 'L3 unify iter%d: %s -> %s apply dRA=%+.3f" dDec=%+.3f" '
-                '(was |Delta|=%.3f", peak=%s)%s',
+                '(was |Delta|=%.3f", method=%s)%s',
                 it + 1,
                 coadd.name,
                 abs_ref.name,
                 dra_as,
                 ddec_as,
                 off['abs_arcsec'],
-                off.get('peak_count'),
+                off.get('method'),
                 '; stamp WCS locked' if output_wcs is not None else '',
             )
 
@@ -2422,7 +2870,6 @@ def unify_hst_astrometric_frame(
                     )
                     rec['output'] = str(product)
                     row['remosaicked'] = str(product)
-                    # Refresh abs_ref path object if we remosaicked the ref (we don't).
                 except Exception as exc:
                     row['remosaic_error'] = str(exc)
                     logger.exception(

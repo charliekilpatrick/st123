@@ -565,7 +565,6 @@ def run_hst_visit_alignment(
                         gaia_images,
                         telescope='hst',
                         cache_dir=gaia_cache,
-                        backend='vizier',
                     )
                 except Exception as exc:
                     logger.warning(
@@ -611,23 +610,19 @@ def run_hst_visit_alignment(
                         '-> %s',
                         l3_jhat_path.name,
                     )
-                    align_image_to_gaia_simple(
-                        l3_jhat_path,
-                        l3_jhat_path,
-                        telescope='hst',
-                    )
                 else:
                     logger.info(
-                        '[4/6] reusing existing Gaia L3 product %s',
+                        '[4/6] reusing existing L3 product %s',
                         l3_jhat_path.name,
                     )
+                gaia_ok = False
+                try:
+                    with as_datamodel(l3_jhat_path).open(memmap=True) as _h:
+                        gaia_ok = bool(_h[0].header.get('GAIASIMP'))
+                except Exception:
                     gaia_ok = False
+                if not gaia_ok:
                     try:
-                        with as_datamodel(l3_jhat_path).open(memmap=True) as _h:
-                            gaia_ok = bool(_h[0].header.get('GAIASIMP'))
-                    except Exception:
-                        gaia_ok = False
-                    if not gaia_ok:
                         logger.info(
                             '[4/6] applying gaia_simple CRPIX shift to %s',
                             Path(l3_jhat_path).name,
@@ -637,12 +632,23 @@ def run_hst_visit_alignment(
                             l3_jhat_path,
                             telescope='hst',
                         )
+                        gaia_ok = True
+                    except Exception as exc:
+                        # Issue #16: Vizier outage must not force per-frame Gaia.
+                        # Keep pipeline-WCS L3 and still build a dense detection
+                        # refcat so JHAT can lock frames relative to each other.
+                        logger.warning(
+                            '[4/6] gaia_simple failed (%s); continuing with '
+                            'pipeline-WCS L3 detection refcat for frame-to-frame '
+                            'JHAT (absolute Gaia deferred)',
+                            exc,
+                        )
 
                 phot_name = f'{Path(best_l3).stem}.phot.txt'
                 ref_phot = l3_outdir / phot_name
                 try:
                     ensure_l3_science_refcat(l3_jhat_path, ref_phot)
-                    # Keep ra/dec on the Gaia-aligned L3 WCS (x/y fixed).
+                    # Keep ra/dec on the current L3 WCS (Gaia or pipeline).
                     rewrite_phot_radec(ref_phot, l3_jhat_path)
                 except Exception as exc:
                     logger.warning(
@@ -663,8 +669,10 @@ def run_hst_visit_alignment(
                         ref_phot = None
                 if ref_phot is not None and ref_phot.is_file() and ref_phot.stat().st_size > 0:
                     logger.info(
-                        '[4/6] done: science frames will use L3 detection refcat %s',
+                        '[4/6] done: science frames will use L3 detection refcat %s'
+                        '%s',
                         ref_phot,
+                        '' if gaia_ok else ' (pipeline WCS; Gaia unavailable)',
                     )
                 else:
                     ref_phot = None
@@ -750,6 +758,19 @@ def run_hst_visit_alignment(
     # soft_fail=True on the batch: sparse / short WFPC2 frames may fail JHAT
     # without invalidating the visit. Only abort when nothing usable aligned.
     if n_ok == 0:
+        # Empty raw (all EXPFLAG rejected at link-raw) or every remaining
+        # frame rejected as bad EXPFLAG: not an align algorithm failure.
+        all_expflag = bool(results) and all(
+            r.get('align_mode') == 'REJECTED_EXPFLAG'
+            or str(r.get('error') or '').startswith('EXPFLAG=')
+            for r in results
+        )
+        if n_fail == 0 or all_expflag:
+            logger.warning(
+                'HST visit align: no usable science frames '
+                '(empty raw or all EXPFLAG-rejected); soft-skip'
+            )
+            return 0
         logger.error('HST visit align produced no JHAT products')
         return 1
     if n_fail:

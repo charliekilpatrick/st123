@@ -527,7 +527,7 @@ def test_fill_drizzle_keeps_wfpc2_single_coverage_footprint(tmp_path: Path):
 
 
 def test_fill_drizzle_inpaints_small_holes_and_flags_dq(tmp_path: Path):
-    """Interior speckle holes are interpolated in SCI and flagged in DQ."""
+    """Interior speckle holes are interpolated; coverage restored for *mask."""
     ny = nx = 64
     sci = np.full((ny, nx), 5.0, dtype=np.float32)
     sci[20:24, 20:24] = np.nan
@@ -553,7 +553,9 @@ def test_fill_drizzle_inpaints_small_holes_and_flags_dq(tmp_path: Path):
         hole = np.asarray(hdul['SCI'].data)[20:24, 20:24]
         assert np.isfinite(hole).all()
         assert np.allclose(hole, 5.0, atol=1e-5)
-        assert np.all(hdul['WHT'].data[20:24, 20:24] == 0)
+        # Restored coverage: acsmask uses CTX (default) and must not DMIN these.
+        assert np.all(hdul['WHT'].data[20:24, 20:24] > 0)
+        assert np.all(hdul['CTX'].data[20:24, 20:24] != 0)
         dq = np.asarray(hdul['DQ'].data)
         assert np.all(dq[20:24, 20:24] & HSTDataModel.L3_DQ_INPAINT)
         assert int(dq[40, 40]) == 0
@@ -625,6 +627,36 @@ def test_assert_drizzle_product_nonempty_rejects_naxis0(tmp_path: Path):
     except RuntimeError:
         raised = True
     assert raised
+
+
+def test_shared_stamp_uses_stamp_scale_not_instrument_default():
+    """ACS vs WFC3 must not get different NAXIS on the same shared stamp."""
+    from astropy.wcs import WCS
+
+    from st123.stages.mosaic.hst_drizzle import (
+        _default_final_scale,
+        _pixel_scale_arcsec_from_wcs,
+        build_boxed_drizzle_wcs,
+    )
+
+    stamp = WCS(naxis=2)
+    stamp.wcs.crpix = [200.5, 200.5]
+    stamp.wcs.cd = [[-0.04 / 3600.0, 0.0], [0.0, 0.04 / 3600.0]]
+    stamp.wcs.crval = [140.27, 64.25]
+    stamp.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    stamp.pixel_shape = (400, 400)
+    stamp._naxis = [400, 400]
+    stamp_scale = _pixel_scale_arcsec_from_wcs(stamp)
+    assert stamp_scale == pytest.approx(0.04, rel=0.01)
+    # Bug: ACS default 0.05" rescaled the stamp to a coarser grid.
+    acs_default = float(_default_final_scale('acs') or 0.05)
+    hdr_bad, _ = build_boxed_drizzle_wcs(stamp, acs_default)
+    hdr_good, _ = build_boxed_drizzle_wcs(stamp, stamp_scale)
+    assert int(hdr_bad['NAXIS1']) != int(hdr_good['NAXIS1'])
+    assert int(hdr_good['NAXIS1']) == 400
+    assert _pixel_scale_arcsec_from_wcs(hdr_good) == pytest.approx(
+        stamp_scale, rel=0.01
+    )
 
 
 def test_astrodrizzle_wcs_kwargs_from_shared_box():
@@ -835,3 +867,200 @@ def test_unify_or_keep_coadds_survives_lookup_error():
     assert report['ok'] is True
     assert 'D2IMARR' in str(report.get('error') or '')
     assert report['reason'].startswith('unify_raised')
+
+
+def _write_multi_ext_with_d2im(path: Path, *, crval1: float = 150.0) -> Path:
+    """Minimal 2-SCI HST-like FITS with D2IMARR EXTVER 1..4 resolvable."""
+    primary = fits.PrimaryHDU()
+    primary.header['TELESCOP'] = 'HST'
+    primary.header['INSTRUME'] = 'WFC3'
+    hdus = [primary]
+    for sci_ver, d2_a, d2_b in ((1, 1, 2), (2, 3, 4)):
+        sci = fits.ImageHDU(
+            np.ones((8, 8), dtype=np.float32),
+            name='SCI',
+        )
+        sci.header['EXTVER'] = sci_ver
+        sci.header['CRVAL1'] = crval1
+        sci.header['CRVAL2'] = -10.0
+        sci.header['CRPIX1'] = 4.0
+        sci.header['CRPIX2'] = 4.0
+        sci.header['CD1_1'] = -1.0e-4
+        sci.header['CD1_2'] = 0.0
+        sci.header['CD2_1'] = 0.0
+        sci.header['CD2_2'] = 1.0e-4
+        sci.header['CTYPE1'] = 'RA---TAN'
+        sci.header['CTYPE2'] = 'DEC--TAN'
+        sci.header['D2IMDIS1'] = 'LOOKUP'
+        sci.header['D2IM1.EXTVER'] = float(d2_a)
+        sci.header['D2IM1.NAXES'] = 2.0
+        sci.header['D2IMDIS2'] = 'LOOKUP'
+        sci.header['D2IM2.EXTVER'] = float(d2_b)
+        sci.header['D2IM2.NAXES'] = 2.0
+        hdus.append(sci)
+    for ver in (1, 2, 3, 4):
+        d2 = fits.ImageHDU(
+            np.zeros((4, 4), dtype=np.float32),
+            name='D2IMARR',
+        )
+        d2.header['EXTVER'] = ver
+        hdus.append(d2)
+    fits.HDUList(hdus).writeto(path, overwrite=True)
+    return path
+
+
+def test_apply_sky_shift_preserves_d2imarr_extvers(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import apply_sky_shift_to_fits
+
+    path = _write_multi_ext_with_d2im(tmp_path / 'frame_jhat.fits')
+    n = apply_sky_shift_to_fits(path, 1.0 / 3600.0, -0.5 / 3600.0)
+    assert n == 2
+    with fits.open(path) as hdul:
+        d2_vers = sorted(
+            int(h.header['EXTVER'])
+            for h in hdul
+            if h.name == 'D2IMARR'
+        )
+        assert d2_vers == [1, 2, 3, 4]
+        assert float(hdul['SCI', 1].header['CRVAL1']) == pytest.approx(
+            150.0 + 1.0 / 3600.0
+        )
+
+
+def test_apply_sky_shift_refuses_broken_d2imarr(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import apply_sky_shift_to_fits
+
+    path = _write_multi_ext_with_d2im(tmp_path / 'broken_jhat.fits')
+    with fits.open(path, mode='update') as hdul:
+        # Collapse lookup tables the way a bad JHAT write can.
+        idxs = [i for i, h in enumerate(hdul) if h.name == 'D2IMARR']
+        for i in reversed(idxs):
+            del hdul[i]
+        collapsed = fits.ImageHDU(
+            np.zeros((4, 4), dtype=np.float32),
+            name='D2IMARR',
+        )
+        # EXTVER deliberately missing -- SCI still references 1..4.
+        hdul.append(collapsed)
+        hdul.flush()
+    with pytest.raises(KeyError, match='D2IMARR'):
+        apply_sky_shift_to_fits(path, 1.0 / 3600.0, 0.0)
+
+
+def test_unify_refuses_huge_smooth_peak_apply(tmp_path: Path, monkeypatch):
+    """Optical smooth_peak ~100\" must not be written into L2 CRVALs."""
+    from st123.stages.mosaic import hst_drizzle as drizzle
+
+    abs_ref = tmp_path / 'coadd_wfc3_f625w_drc.fits'
+    mover = tmp_path / 'coadd_wfc3_f438w_drc.fits'
+    frame = tmp_path / 'frame_f438w_jhat.fits'
+    _write_multi_ext_with_d2im(frame, crval1=150.0)
+    for p in (abs_ref, mover):
+        sci = fits.ImageHDU(np.ones((16, 16), dtype=np.float32), name='SCI')
+        sci.header['CRVAL1'] = 150.0
+        sci.header['CRVAL2'] = -10.0
+        sci.header['CRPIX1'] = 8.0
+        sci.header['CRPIX2'] = 8.0
+        sci.header['CD1_1'] = -1.0e-4
+        sci.header['CD2_2'] = 1.0e-4
+        sci.header['CTYPE1'] = 'RA---TAN'
+        sci.header['CTYPE2'] = 'DEC--TAN'
+        fits.HDUList([fits.PrimaryHDU(), sci]).writeto(p, overwrite=True)
+
+    crval1_before = float(fits.getheader(frame, extname='SCI')['CRVAL1'])
+
+    huge = {
+        'ok': True,
+        'method': 'smooth_peak',
+        'abs_arcsec': 208.0,
+        'dra_arcsec': 208.0,
+        'ddec_arcsec': 0.0,
+        'dra_deg': 208.0 / 3600.0,
+        'ddec_deg': 0.0,
+        'n_match': 1,
+    }
+    refused_multi = {'ok': False, 'abs_arcsec': None}
+
+    monkeypatch.setattr(
+        drizzle,
+        '_pick_coadd_abs_ref',
+        lambda *_a, **_k: abs_ref.resolve(),
+    )
+
+    import st123.stages.alignment.hst_jhat as hj
+
+    monkeypatch.setattr(
+        hj,
+        'measure_hst_sky_offset_smooth_peak',
+        lambda *_a, **_k: dict(huge),
+    )
+    monkeypatch.setattr(
+        hj,
+        'measure_hst_sky_offset_multi_peak',
+        lambda *_a, **_k: dict(refused_multi),
+    )
+    monkeypatch.setattr(
+        hj,
+        'measure_hst_sky_offset_image_xcorr',
+        lambda *_a, **_k: dict(huge),
+    )
+    monkeypatch.setattr(
+        hj,
+        'arbitrate_hst_l3_sky_offset',
+        lambda *_a, **_k: dict(huge),
+    )
+    monkeypatch.setattr(
+        hj,
+        'measure_hst_sky_offset_2dhist',
+        lambda *_a, **_k: {'ok': False},
+    )
+    monkeypatch.setattr(
+        hj,
+        '_count_colocated_smoothed_peaks',
+        lambda *_a, **_k: 0,
+    )
+    monkeypatch.setattr(
+        hj,
+        'validate_hst_coadds_alignment',
+        lambda *_a, **_k: {'ok': True, 'max_abs_arcsec': 0.0, 'n_coadds': 2},
+    )
+
+    records = [
+        {
+            'status': 'ok',
+            'instrument': 'wfc3',
+            'filter': 'f625w',
+            'output': str(abs_ref),
+            'frames': [],
+        },
+        {
+            'status': 'ok',
+            'instrument': 'wfc3',
+            'filter': 'f438w',
+            'output': str(mover),
+            'frames': [str(frame)],
+        },
+    ]
+    report = drizzle.unify_hst_astrometric_frame(
+        records,
+        outdir=tmp_path / 'unify',
+        remosaic=False,
+        max_iters=1,
+    )
+    groups = report.get('groups') or []
+    assert groups, report
+    mover_rows = [
+        r
+        for r in groups
+        if Path(r.get('coadd', '')).name == mover.name
+    ]
+    assert mover_rows, groups
+    measure = mover_rows[0].get('measure') or {}
+    assert measure.get('ok') is False
+    assert measure.get('method') in (
+        'image_lock_refused',
+        'uv_image_refused',
+    )
+    assert mover_rows[0].get('applied') is False
+    crval1_after = float(fits.getheader(frame, extname='SCI')['CRVAL1'])
+    assert crval1_after == pytest.approx(crval1_before)

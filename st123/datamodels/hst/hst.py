@@ -564,4 +564,4 @@ def prune_bad_hst_expflag(
                     path.unlink()
                 except OSError as exc:
                     logger.warning('could not remove %s: %s', path, exc)
-            return rejected
+    return rejected

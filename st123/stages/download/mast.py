@@ -31,6 +31,11 @@ _MAST_PUBLIC_NOTICE: bool = False
 # MAST product-list / download retries (issue #4: silent partial inventory).
 _HST_MAST_MAX_ATTEMPTS = 3
 _HST_MAST_RETRY_DELAY_SEC = 5.0
+# Cone-search (Observations.query_region) can exceed astroquery's default
+# 600s on dense fields (e.g. NGC 1808); raise and retry on timeout.
+_MAST_QUERY_TIMEOUT_SEC = 1200
+_MAST_QUERY_MAX_ATTEMPTS = 3
+_MAST_QUERY_RETRY_DELAY_SEC = 10.0
 
 
 def _is_transient_mast_error(exc: BaseException) -> bool:
@@ -280,9 +285,53 @@ def query_region(coord: SkyCoord, radius: u.Quantity) -> Table:
     Table
         MAST observation table with masked cells filled.
     """
-    with capture_output():
-        obs_table = Observations.query_region(coord, radius=radius)
-    return obs_table.filled()
+    # astroquery.mast uses Conf.timeout (default 600s). Dense HST cones
+    # (crowded hosts) can hit that during Observations.query_region.
+    try:
+        from astroquery.mast import conf as mast_conf
+    except Exception:  # pragma: no cover - older astroquery
+        mast_conf = None
+
+    prev_timeout = None
+    if mast_conf is not None:
+        prev_timeout = getattr(mast_conf, 'timeout', None)
+        try:
+            mast_conf.timeout = float(_MAST_QUERY_TIMEOUT_SEC)
+        except Exception:
+            prev_timeout = None
+
+    last_exc: Exception | None = None
+    try:
+        for attempt in range(1, _MAST_QUERY_MAX_ATTEMPTS + 1):
+            try:
+                with capture_output():
+                    obs_table = Observations.query_region(coord, radius=radius)
+                return obs_table.filled()
+            except Exception as exc:
+                last_exc = exc
+                if (
+                    attempt < _MAST_QUERY_MAX_ATTEMPTS
+                    and _is_transient_mast_error(exc)
+                ):
+                    delay = _MAST_QUERY_RETRY_DELAY_SEC * attempt
+                    logger.warning(
+                        'Transient MAST query_region error '
+                        '(attempt %d/%d): %s; retrying in %.1fs',
+                        attempt,
+                        _MAST_QUERY_MAX_ATTEMPTS,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+        raise RuntimeError('MAST query_region failed') from last_exc
+    finally:
+        if mast_conf is not None and prev_timeout is not None:
+            try:
+                mast_conf.timeout = prev_timeout
+            except Exception:
+                pass
 
 
 def filter_hst_observations(

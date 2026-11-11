@@ -87,7 +87,7 @@ with suppress_output():
     )
     from jwst.pipeline import calwebb_image3  # noqa: E402
 
-# JHAT's stock Gaia path uses ESA TAP; force Vizier for all JWST align paths.
+# Route JHAT Gaia through st123 (Vizier primary, ESA TAP fallback).
 from st123.stages.alignment.gaia_catalog import install_jhat_gaia_vizier_patch  # noqa: E402
 
 install_jhat_gaia_vizier_patch()
