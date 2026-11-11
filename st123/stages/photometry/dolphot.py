@@ -67,6 +67,29 @@ def _hst_sci_shape(path: PathLike) -> tuple[int, int] | None:
     return None
 
 
+def _is_dolphot_chip_product(path: PathLike) -> bool:
+    """True for ``splitgroups`` outputs (``*.chipN.fits``), not upstream JHATs."""
+    name = Path(path).name.lower()
+    return '.chip' in name and name.endswith('.fits')
+
+
+def _dedupe_paths_by_resolve(paths: Sequence[PathLike]) -> list[Path]:
+    """Keep first occurrence of each resolved path (symlink-safe)."""
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
+
+
 def _drop_tiny_hst_subarrays(paths: Sequence[PathLike]) -> list[Path]:
     """Drop HST frames whose SCI is smaller than ``_DOLPHOT_MIN_SCI_AXIS``.
 
@@ -1083,6 +1106,8 @@ def discover_mosaic_phot_jobs(
     inst = (instrument or '').lower() or None
 
     def _collect_jhat(inst_name: str | None) -> list[Path]:
+        # Prefer jhat_hst / jhat_jwst; legacy ``jhat`` is often a symlink to
+        # one of those and must not double-count the same MEFs.
         jhat_dirs = [
             root / 'jhat_jwst',
             root / 'jhat_hst',
@@ -1098,6 +1123,7 @@ def discover_mosaic_phot_jobs(
                         if not p.name.lower().startswith('coadd_')
                     )
                 )
+        found = _dedupe_paths_by_resolve(found)
         if inst_name is not None:
             found = filter_frames_for_instrument(found, inst_name)
         return found
@@ -1777,8 +1803,9 @@ def apply_splitgroups(
     -------
     list of pathlib.Path
         Per-chip ``*.chipN.fits`` products next to each input (SCI chips only
-        when identifiable). If ``splitgroups`` is unavailable or produces no
-        chips, returns the original paths.
+        when identifiable). Never returns upstream JHAT/MEF paths: if
+        ``splitgroups`` is unavailable or produces no usable SCI chips, those
+        inputs are omitted (empty list for that MEF).
     """
     bin_dir = resolve_dolphot_bin(dolphot_bin, required=False)
     exe = None
@@ -1791,8 +1818,11 @@ def apply_splitgroups(
         if which:
             exe = Path(which)
     if exe is None:
-        logger.warning('splitgroups not found; keeping multi-extension FITS')
-        return [Path(p) for p in files]
+        logger.warning(
+            'splitgroups not found; omitting multi-extension FITS '
+            '(refusing unsplit JHAT/MEFs in dolphot.param)'
+        )
+        return []
 
     env = _prepend_bin_env(None, exe.parent)
     paths = [Path(p).resolve() for p in files]
@@ -1815,7 +1845,9 @@ def apply_splitgroups(
         chips = sorted(src.parent.glob(f'{stem}.chip*.fits'))
         if not chips:
             logger.warning('splitgroups produced no chips for %s', src.name)
-            return [src]
+            # Never fall back to the upstream JHAT/MEF: DOLPHOT aborts with
+            # "Number of extensions are not the same" when MEFs mix with chips.
+            return []
         parent_inst = None
         parent_filt = None
         try:
@@ -1864,12 +1896,8 @@ def apply_splitgroups(
                     pass
         if kept:
             return kept
-        # No usable SCI chips: keep the unsplit MEF only when it itself has a
-        # full-frame SCI (WFC3/IR). Tiny subarrays must not fall through -- they
-        # poison mixed-box DOLPHOT runs ("Number of extensions are not the same").
+        # No usable SCI chips: drop the MEF rather than poisoning dolphot.param.
         shape = _hst_sci_shape(src)
-        if shape is not None and min(shape) >= int(_DOLPHOT_MIN_SCI_AXIS):
-            return [src]
         logger.warning(
             'splitgroups: dropping %s (no usable SCI chip; SCI shape=%s)',
             src.name,
@@ -1877,11 +1905,15 @@ def apply_splitgroups(
         )
         return []
 
-    per_mef = _parallel_map(_one, paths, ncores=ncores, label='splitgroups')
+    # Deduplicate first: ``jhat`` often symlinks to ``jhat_hst``, and parallel
+    # splitgroups on the same basename races (one worker deletes the other's
+    # chips, then falls through empty).
+    unique_paths = _dedupe_paths_by_resolve(paths)
+    per_mef = _parallel_map(_one, unique_paths, ncores=ncores, label='splitgroups')
     chip_files: list[Path] = []
     for chips in per_mef:
         chip_files.extend(chips)
-    return chip_files
+    return _dedupe_paths_by_resolve(chip_files)
 
 
 def prepare_frames(
@@ -2017,6 +2049,7 @@ def prepare_hst_frames(
         [Path(p) for p in files],
         stage='dolphot-prep',
     )
+    src_files = _dedupe_paths_by_resolve(src_files)
     src_files = _drop_tiny_hst_subarrays(src_files)
     if not src_files:
         raise ValueError(
@@ -2147,6 +2180,21 @@ def prepare_hst_frames(
         work = apply_splitgroups(
             science_mefs, dolphot_bin=dolphot_bin, ncores=workers
         )
+        # Hard gate: after splitgroups, only *.chipN.fits may enter dolphot.param.
+        # Upstream *_jhat.fits MEFs must never mix with chip products (issue #17).
+        unsplit = [p for p in work if not _is_dolphot_chip_product(p)]
+        if unsplit:
+            logger.warning(
+                'prepare_hst_frames: dropping %d non-splitgroups path(s) before param: %s',
+                len(unsplit),
+                ', '.join(Path(p).name for p in unsplit[:8]),
+            )
+            work = [p for p in work if _is_dolphot_chip_product(p)]
+        if not work:
+            raise RuntimeError(
+                'prepare_hst_frames: splitgroups produced no usable SCI chips '
+                'for any science MEF; refusing to write a MEF-based dolphot.param'
+            )
     # splitgroups copies primary EXPTIME; repair chips if MEF was already staged
     # with EXPTIME=0 before this fix (re-prep / skip_split paths).
     for chip in work:
@@ -2283,6 +2331,14 @@ def prepare_hst_frames(
     ]
     if not sci_for_param:
         sci_for_param = list(work)
+    sci_for_param = _dedupe_paths_by_resolve(sci_for_param)
+    if not skip_split:
+        leaked = [p for p in sci_for_param if not _is_dolphot_chip_product(p)]
+        if leaked:
+            raise RuntimeError(
+                'prepare_hst_frames: refusing unsplit science frames in '
+                f'dolphot.param: {[Path(p).name for p in leaked[:8]]}'
+            )
 
     # Rewrite L2 chip + L3 ref WCS into DOLPHOT-parseable TAN / TAN-SIP
     # (strip orphaned Lookup/D2IM; ensure SIP <= order 5 + reverse coeffs).

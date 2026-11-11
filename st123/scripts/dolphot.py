@@ -251,8 +251,12 @@ def _pick_hst_reference(
 def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
     """Prefer jhat frames; fall back to reduction/raw calibrated products."""
     from st123.datamodels.hst import filter_paths_for_stage
-    from st123.stages.photometry.dolphot import filter_frames_for_instrument
+    from st123.stages.photometry.dolphot import (
+        _dedupe_paths_by_resolve,
+        filter_frames_for_instrument,
+    )
 
+    # Prefer jhat_hst; legacy ``jhat`` is often a symlink to the same tree.
     jhat_dirs = (reduction / 'jhat_hst', reduction / 'jhat')
     raw = reduction / 'raw'
     files: list[Path] = []
@@ -270,9 +274,7 @@ def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
         patterns = ('*_flc.fits', '*_flt.fits', '*_c0m.fits')
         for pat in patterns:
             files.extend(sorted(raw.glob(pat)))
-        files = sorted(set(files))
-    else:
-        files = sorted(set(files))
+    files = _dedupe_paths_by_resolve(files)
     files = filter_paths_for_stage(files, stage='dolphot-collect')
     if instrument.lower() == _HST_MIXED:
         return files
