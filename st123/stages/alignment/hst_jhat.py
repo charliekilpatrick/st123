@@ -1619,14 +1619,7 @@ def recover_failed_hst_visit_relative(
             entry['align_mode'] = 'REJECTED_EXPFLAG'
             continue
 
-        donor: Path | None = None
-        visit = _hst_visit_key(raw)
-        for cand in ok_jhats:
-            if _hst_visit_key(cand) == visit:
-                donor = cand
-                break
-        if donor is None and ok_jhats:
-            donor = ok_jhats[0]
+        donor = _pick_healthy_sibling_donor(raw, ok_jhats)
 
         dra_deg = 0.0
         ddec_deg = 0.0
@@ -7864,16 +7857,49 @@ def polish_hst_jhat_abs_residual(
     return report
 
 
+def _hst_instrument_key(path: str | Path) -> str:
+    """Coarse instrument tag (``acs`` / ``wfc3`` / ``wfpc2`` / ``unk``)."""
+    try:
+        from st123.utils.helpers import get_instrument
+
+        return get_instrument(path).split('_')[0].lower() or 'unk'
+    except Exception:
+        name = Path(path).name.lower()
+        for tok in ('acs', 'wfc3', 'wfpc2'):
+            if tok in name:
+                return tok
+        return 'unk'
+
+
+def _pick_healthy_sibling_donor(
+    cat: Path,
+    goods: Sequence[Path],
+) -> Path | None:
+    """Prefer same-visit, then same-instrument, then any healthy donor."""
+    if not goods:
+        return None
+    visit = _hst_visit_key(cat)
+    same_visit = [g for g in goods if _hst_visit_key(g) == visit]
+    if same_visit:
+        return max(same_visit, key=_frame_exptime)
+    inst = _hst_instrument_key(cat)
+    same_inst = [g for g in goods if _hst_instrument_key(g) == inst]
+    if same_inst:
+        return max(same_inst, key=_frame_exptime)
+    return max(list(goods), key=_frame_exptime)
+
+
 def recover_catastrophic_hst_via_visit_siblings(
     catastrophic: Sequence[str | Path],
     healthy: Sequence[str | Path],
 ) -> dict[str, Any]:
     """
-    Salvage catastrophic JHAT frames by copying a same-visit OK sibling WCS.
+    Salvage catastrophic JHAT frames by copying a healthy sibling WCS.
 
     Abs-ref image locks often fail when the hub is a different instrument
-    (WFPC2 vs ACS L3) or filter (F658N vs F555W). Frame-to-frame, a visit
-    peer that already passed QA is the safer donor (clinic / issues #9-14).
+    (WFPC2 vs ACS L3) or filter (F658N vs F555W). Prefer a same-visit OK
+    peer, then same-instrument, then any healthy frame (clinic / issues
+    #9-14, sn1999br WFPC2 visits with no intra-visit OK donor).
     """
     cats = [
         Path(p).expanduser().resolve()
@@ -7897,19 +7923,13 @@ def recover_catastrophic_hst_via_visit_siblings(
         report['error'] = 'no catastrophic or healthy frames'
         return report
 
-    by_visit: dict[str, list[Path]] = {}
-    for g in goods:
-        by_visit.setdefault(_hst_visit_key(g), []).append(g)
-
     for cat in cats:
-        visit = _hst_visit_key(cat)
-        donors = list(by_visit.get(visit) or [])
-        if not donors:
+        donor = _pick_healthy_sibling_donor(cat, goods)
+        if donor is None:
             report['failed'].append(
-                {'path': str(cat), 'error': 'no same-visit healthy donor'}
+                {'path': str(cat), 'error': 'no healthy donor'}
             )
             continue
-        donor = max(donors, key=_frame_exptime)
         donor_raw = _raw_sibling_for_jhat(donor)
         cat_raw = _raw_sibling_for_jhat(cat)
         if donor_raw is None or cat_raw is None:
@@ -7952,23 +7972,182 @@ def recover_catastrophic_hst_via_visit_siblings(
                 }
             )
             continue
+        donor_kind = (
+            'same_visit'
+            if _hst_visit_key(donor) == _hst_visit_key(cat)
+            else (
+                'same_instrument'
+                if _hst_instrument_key(donor) == _hst_instrument_key(cat)
+                else 'any_healthy'
+            )
+        )
         report['recovered'].append(
             {
                 'path': str(dest),
                 'donor': str(donor),
+                'donor_kind': donor_kind,
                 'dra_arcsec': float(dra_deg) * 3600.0,
                 'ddec_arcsec': float(ddec_deg) * 3600.0,
             }
         )
         log.info(
-            'Visit-sibling salvage %s from donor %s '
+            'Visit-sibling salvage %s from donor %s (%s) '
             '(dRA=%+.3f" dDec=%+.3f")',
             dest.name,
             donor.name,
+            donor_kind,
             float(dra_deg) * 3600.0,
             float(ddec_deg) * 3600.0,
         )
     report['ok'] = bool(report['recovered'])
+    report['n_recovered'] = len(report['recovered'])
+    return report
+
+
+def polish_catastrophic_hst_via_abs_xcorr(
+    frames: Sequence[str | Path],
+    *,
+    abs_ref: str | Path | None = None,
+    max_leftover_arcsec: float = FRAME_L3_IMAGE_OFFSET_TOL_ARCSEC,
+) -> dict[str, Any]:
+    """
+    Apply a dense abs-hub image_xcorr residual to clear near-miss locks.
+
+    After visit-abs recovery, WFPC2 frames can sit just above the 200 mas
+    catastrophic gate (sn1999br ``u6ea86*`` ~250 mas) while Gaia NN remains
+    several arcsec off. A single CRVAL polish from a dense leftover brings
+    them under the gate without discarding the exposure.
+    """
+    live = [
+        Path(p).expanduser().resolve()
+        for p in frames
+        if Path(p).is_file()
+    ]
+    report: dict[str, Any] = {
+        'ok': True,
+        'method': 'abs_xcorr_polish',
+        'n_input': len(live),
+        'recovered': [],
+        'failed': [],
+    }
+    hub = Path(abs_ref).expanduser().resolve() if abs_ref else None
+    if hub is None or not hub.is_file() or not live:
+        report['ok'] = False
+        report['error'] = 'missing abs hub or frames'
+        return report
+
+    for path in live:
+        xc = measure_hst_sky_offset_image_xcorr(
+            path,
+            hub,
+            max_offset_arcsec=float(max_leftover_arcsec),
+        )
+        if not xc.get('ok') or xc.get('abs_arcsec') is None:
+            report['failed'].append(
+                {'path': str(path), 'error': 'no dense abs xcorr'}
+            )
+            continue
+        leftover = float(xc['abs_arcsec'])
+        n_inner = int(xc.get('n_inner') or 0)
+        if n_inner < int(FRAME_IMAGE_XCORR_MIN_INNER):
+            report['failed'].append(
+                {
+                    'path': str(path),
+                    'error': f'sparse xcorr n_inner={n_inner}',
+                }
+            )
+            continue
+        if leftover <= float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+            # Already inside the gate; nothing to apply.
+            report['recovered'].append(
+                {
+                    'path': str(path),
+                    'applied': False,
+                    'leftover_arcsec': leftover,
+                    'n_inner': n_inner,
+                }
+            )
+            continue
+        if leftover > float(max_leftover_arcsec):
+            report['failed'].append(
+                {
+                    'path': str(path),
+                    'error': f'leftover {leftover:.3f}" exceeds polish cap',
+                }
+            )
+            continue
+        try:
+            # Apply on the current JHAT WCS -- do NOT restore pipeline WCS
+            # (that would throw away the near-miss JHAT lock and leave only
+            # a tiny CRVAL nudge on a several-arcsec pipeline offset).
+            with as_datamodel(path).open(mode='update', memmap=False) as hdul:
+                apply_sky_translation_to_sci(
+                    hdul,
+                    -float(xc['dra_deg']),
+                    -float(xc['ddec_deg']),
+                    comment='st123: abs-xcorr polish of near-miss JHAT',
+                )
+        except Exception as exc:
+            report['failed'].append(
+                {
+                    'path': str(path),
+                    'error': f'{type(exc).__name__}: {exc}',
+                }
+            )
+            continue
+        post = measure_hst_sky_offset_image_xcorr(
+            path,
+            hub,
+            max_offset_arcsec=float(max_leftover_arcsec),
+            sci_ext=xc.get('sci_ext'),
+        )
+        post_as = (
+            float(post['abs_arcsec'])
+            if post.get('ok') and post.get('abs_arcsec') is not None
+            else None
+        )
+        if post_as is None or post_as > float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+            report['failed'].append(
+                {
+                    'path': str(path),
+                    'error': (
+                        'polish leftover still high: '
+                        f'{post_as if post_as is not None else "n/a"}'
+                    ),
+                    'pre_arcsec': leftover,
+                    'post_arcsec': post_as,
+                }
+            )
+            continue
+        stamp_quality_headers(
+            path,
+            align_mode='VISIT_ABS',
+            catastrophic=False,
+            quality_flag='RECOVERED_IMAGE',
+        )
+        report['recovered'].append(
+            {
+                'path': str(path),
+                'applied': True,
+                'pre_arcsec': leftover,
+                'post_arcsec': post_as,
+                'n_inner': n_inner,
+                'dra_arcsec': float(xc.get('dra_arcsec') or 0.0),
+                'ddec_arcsec': float(xc.get('ddec_arcsec') or 0.0),
+            }
+        )
+        log.info(
+            'Abs-xcorr polish %s: %.1f mas -> %.1f mas (n_inner=%s)',
+            path.name,
+            1000.0 * leftover,
+            1000.0 * post_as,
+            n_inner,
+        )
+    report['ok'] = bool(report['recovered'])
+    report['n_recovered'] = sum(
+        1 for row in report['recovered'] if row.get('applied') is not False
+    )
+    # Count already-under-gate as recovered for bookkeeping.
     report['n_recovered'] = len(report['recovered'])
     return report
 
@@ -8744,6 +8923,84 @@ def finalize_hst_jhat_dir_quality(
     still_cat: list[Path] = []
     still_cat_results: list[dict] = []
     healthy_paths: list[Path] = []
+    for r in results:
+        if r.get('status') != 'ok':
+            continue
+        p = Path(r.get('outpath') or '').expanduser().resolve()
+        if not p.is_file():
+            continue
+        q = r.get('quality') or {}
+        if _quality_is_catastrophic(q, peer_n_calibrators=peer_n):
+            still_cat.append(p)
+            still_cat_results.append(r)
+        else:
+            healthy_paths.append(p)
+    # Near-miss polish BEFORE sibling rewrite: dense abs-hub xcorr just
+    # above the 200 mas gate (sn1999br WFPC2 after visit-abs recovery).
+    # Applying the leftover CRVAL shift preserves the JHAT solution;
+    # cross-visit sibling rewrite can undo a good near-miss lock.
+    still_cat = []
+    still_cat_results = []
+    for r in results:
+        if r.get('status') != 'ok':
+            continue
+        p = Path(r.get('outpath') or '').expanduser().resolve()
+        if not p.is_file():
+            continue
+        q = r.get('quality') or {}
+        if _quality_is_catastrophic(q, peer_n_calibrators=peer_n):
+            still_cat.append(p)
+            still_cat_results.append(r)
+    if still_cat and hub is not None and Path(hub).is_file():
+        polish = polish_catastrophic_hst_via_abs_xcorr(
+            still_cat, abs_ref=hub
+        )
+        log.info(
+            'Abs-xcorr catastrophic polish: recovered %d / %d',
+            int(polish.get('n_recovered') or 0),
+            len(still_cat),
+        )
+        polished_names = {
+            Path(x['path']).name for x in (polish.get('recovered') or [])
+        }
+        for r in still_cat_results:
+            p = Path(r.get('outpath') or '').expanduser().resolve()
+            if p.name not in polished_names:
+                continue
+            stamped = stamp_hst_jhat_quality(
+                p,
+                refcat=ref_phot,
+                abs_ref=hub,
+                align_mode='VISIT_ABS',
+                internal_max_arcsec=internal_by_path.get(p.resolve()),
+            )
+            stamped['catastrophic'] = False
+            stamped['ok'] = True
+            stamped['abs_method'] = 'abs_xcorr_polish'
+            r['quality'] = stamped
+            r['recover'] = polish
+            r['align_mode'] = 'VISIT_ABS'
+            row = row_by_name.get(p.name)
+            if row is not None:
+                row['n_calibrators'] = stamped.get('n_calibrators')
+                row['dispersion_mas'] = stamped.get('dispersion_mas')
+                row['align_mode'] = 'VISIT_ABS'
+                row['image_peak_arcsec'] = stamped.get('image_peak_arcsec')
+                row['image_residual_arcsec'] = stamped.get(
+                    'image_residual_arcsec'
+                )
+                row['image_xcorr'] = stamped.get('image_xcorr')
+                row['status'] = 'ok'
+        peer_n = median_healthy_n_calibrators(
+            r.get('n_calibrators')
+            if isinstance(r.get('n_calibrators'), int)
+            else None
+            for r in frame_rows
+        )
+
+    still_cat = []
+    still_cat_results = []
+    healthy_paths = []
     for r in results:
         if r.get('status') != 'ok':
             continue

@@ -1486,6 +1486,129 @@ def test_visit_sibling_salvage_recovers_catastrophic(tmp_path: Path):
     assert restore.called
     assert Path(report['recovered'][0]['donor']).name == 'u3iu0701t_jhat.fits'
 
+
+def test_visit_sibling_salvage_falls_back_to_same_instrument(tmp_path: Path):
+    """sn1999br-style: all frames in a visit are catastrophic; use peer visit."""
+    from st123.stages.alignment.hst_jhat import (
+        recover_catastrophic_hst_via_visit_siblings,
+    )
+
+    raw_dir = tmp_path / 'raw'
+    jhat_dir = tmp_path / 'jhat'
+    raw_dir.mkdir()
+    jhat_dir.mkdir()
+    bad_raw = raw_dir / 'u6ea8601m_c0m.fits'
+    good_raw = raw_dir / 'u29r2n01t_c0m.fits'
+    for p in (bad_raw, good_raw):
+        fits.PrimaryHDU(
+            header=fits.Header({'EXPTIME': 500.0, 'INSTRUME': 'WFPC2'})
+        ).writeto(p)
+    bad = jhat_dir / 'u6ea8601m_jhat.fits'
+    good = jhat_dir / 'u29r2n01t_jhat.fits'
+    fits.PrimaryHDU(
+        header=fits.Header({'EXPTIME': 500.0, 'INSTRUME': 'WFPC2'})
+    ).writeto(bad)
+    fits.PrimaryHDU(
+        header=fits.Header({'EXPTIME': 600.0, 'INSTRUME': 'WFPC2'})
+    ).writeto(good)
+
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat._raw_sibling_for_jhat',
+            side_effect=lambda p: (
+                bad_raw if 'u6ea' in Path(p).name else good_raw
+            ),
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._jhat_minus_raw_sky_shift',
+            return_value=(0.01 / 3600.0, 0.0),
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.write_hst_jhat_from_raw',
+            return_value=bad,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.restore_pipeline_relative_wcs_with_common_shift',
+            return_value=[{'applied': True}],
+        ),
+        patch('st123.stages.alignment.hst_jhat.write_hst_narrowband_provenance'),
+        patch('st123.stages.alignment.hst_jhat.stamp_quality_headers'),
+        patch(
+            'st123.stages.alignment.hst_jhat._frame_exptime',
+            side_effect=lambda p: 600.0 if 'u29r' in Path(p).name else 500.0,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat._hst_instrument_key',
+            return_value='wfpc2',
+        ),
+    ):
+        report = recover_catastrophic_hst_via_visit_siblings([bad], [good])
+
+    assert report['ok'] is True
+    assert report['n_recovered'] == 1
+    assert report['recovered'][0]['donor_kind'] == 'same_instrument'
+    assert Path(report['recovered'][0]['donor']).name == 'u29r2n01t_jhat.fits'
+
+
+def test_polish_catastrophic_hst_via_abs_xcorr(tmp_path: Path):
+    from st123.stages.alignment.hst_jhat import polish_catastrophic_hst_via_abs_xcorr
+
+    frame = tmp_path / 'u6ea8601m_jhat.fits'
+    hub = tmp_path / 'coadd_acs_f555w_jhat.fits'
+    fits.PrimaryHDU().writeto(frame)
+    fits.PrimaryHDU().writeto(hub)
+
+    pre = {
+        'ok': True,
+        'abs_arcsec': 0.25,
+        'dra_deg': 0.25 / 3600.0,
+        'ddec_deg': 0.0,
+        'dra_arcsec': 0.25,
+        'ddec_arcsec': 0.0,
+        'n_inner': 50000,
+        'sci_ext': 1,
+    }
+    post = {
+        'ok': True,
+        'abs_arcsec': 0.05,
+        'n_inner': 50000,
+        'sci_ext': 1,
+    }
+    calls = {'n': 0}
+
+    def _xc(*args, **kwargs):
+        calls['n'] += 1
+        return pre if calls['n'] == 1 else post
+
+    class _FakeHdul:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with (
+        patch(
+            'st123.stages.alignment.hst_jhat.measure_hst_sky_offset_image_xcorr',
+            side_effect=_xc,
+        ),
+        patch(
+            'st123.stages.alignment.hst_jhat.as_datamodel',
+        ) as dm,
+        patch(
+            'st123.stages.alignment.hst_jhat.apply_sky_translation_to_sci',
+        ) as apply_shift,
+        patch('st123.stages.alignment.hst_jhat.stamp_quality_headers'),
+    ):
+        dm.return_value.open.return_value = _FakeHdul()
+        report = polish_catastrophic_hst_via_abs_xcorr([frame], abs_ref=hub)
+
+    assert report['ok'] is True
+    assert report['n_recovered'] == 1
+    assert report['recovered'][0]['applied'] is True
+    assert apply_shift.called
+
+
 def _peak_stamp(path: Path, x: int, y: int, *, nx: int = 320, ny: int = 320) -> Path:
     """North-up stamp with a Gaussian blob at pixel (x, y)."""
     yy, xx = np.mgrid[0:ny, 0:nx]

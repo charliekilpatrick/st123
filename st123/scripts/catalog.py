@@ -31,7 +31,7 @@ def create_parser():
     add_base_dir(
         parser,
         required=False,
-        default='ngc628_phot',
+        default=None,
         aliases=('--basedir', '--workdir', '--data-dir', '--photdir'),
         help=(
             'Directory containing rsg*.csv and *columns files (legacy CSV '
@@ -134,6 +134,9 @@ def main(argv=None) -> int:
         from st123.stages.photometry.catalog import create_common_catalog
 
         photdir = args.base_dir
+        if not photdir:
+            logger.error('CSV combine mode requires --base-dir')
+            return 1
 
         csv_files = sorted(glob.glob(f'{photdir}/rsg*.csv'))
         if not csv_files:
@@ -152,7 +155,7 @@ def main(argv=None) -> int:
         common_ids = np.unique(source_ids)
 
         columns = sorted(glob.glob(f'{photdir}/*columns'))
-        outfile = args.outfile or 'ngc628_combined_phot.csv'
+        outfile = args.outfile or 'combined_phot.csv'
         create_common_catalog(common_ids, dfs, columns, outfile)
         logger.info('Wrote %s', outfile)
         return 0
