@@ -243,9 +243,13 @@ def _pick_hst_reference(
             return (layout_rank, inst_rank, filt_rank, name)
 
         return sorted(coadds, key=_rank)[0]
-    if frames:
-        return frames[0]
-    raise FileNotFoundError(f'No HST reference coadd or frames under {reduction}')
+    # Never fall back to an upstream JHAT/MEF as img0: DOLPHOT requires a
+    # drizzle coadd (or JWST i2d) whose extension layout matches chip products
+    # (issue #17 / sn1999br: img0_file = *_jhat poisons ingestion).
+    raise FileNotFoundError(
+        f'No usable HST coadd under {reduction / "reference"}; '
+        'run mosaic before dolphot-prep (refusing JHAT/MEF as img0)'
+    )
 
 
 def _collect_hst_frames(reduction: Path, instrument: str) -> list[Path]:
@@ -323,9 +327,13 @@ def _run_hst(args) -> int:
     if args.refimage:
         refimage = Path(args.refimage)
     else:
-        refimage = _pick_hst_reference(
-            reduction, files, instrument=instrument
-        )
+        try:
+            refimage = _pick_hst_reference(
+                reduction, files, instrument=instrument
+            )
+        except FileNotFoundError as exc:
+            logger.error('%s', exc)
+            return 1
 
     outdir = (
         Path(args.outdir)
@@ -341,17 +349,22 @@ def _run_hst(args) -> int:
             outdir,
         )
 
-    param = prepare_hst_frames(
-        files,
-        outdir,
-        instrument,
-        refimage=refimage,
-        dolphot_bin=args.dolphot_bin,
-        skip_mask=args.skip_mask,
-        skip_sky=args.skip_sky,
-        skip_split=args.skip_split,
-        ncores=args.ncores,
-    )
+    try:
+        param = prepare_hst_frames(
+            files,
+            outdir,
+            instrument,
+            refimage=refimage,
+            dolphot_bin=args.dolphot_bin,
+            skip_mask=args.skip_mask,
+            skip_sky=args.skip_sky,
+            skip_split=args.skip_split,
+            ncores=args.ncores,
+        )
+    except ValueError as exc:
+        logger.error('%s', exc)
+        return 1
+
     logger.info('Wrote %s (%d frames + ref)', param, len(files))
     _log_run_commands(
         outdir,

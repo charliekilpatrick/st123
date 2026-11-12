@@ -8,10 +8,13 @@ from unittest import mock
 import numpy as np
 from astropy.io import fits
 
-from st123.scripts.dolphot import _collect_hst_frames
+import pytest
+
+from st123.scripts.dolphot import _collect_hst_frames, _pick_hst_reference
 from st123.stages.photometry.dolphot import (
     _dedupe_paths_by_resolve,
     _is_dolphot_chip_product,
+    _is_unsplit_hst_jhat,
     apply_splitgroups,
     prepare_hst_frames,
 )
@@ -65,6 +68,39 @@ def test_is_dolphot_chip_product():
     assert _is_dolphot_chip_product('foo_jhat.chip4.fits')
     assert not _is_dolphot_chip_product('foo_jhat.fits')
     assert not _is_dolphot_chip_product('coadd_acs_f814w_drc.fits')
+
+
+def test_is_unsplit_hst_jhat():
+    assert _is_unsplit_hst_jhat('jey322pnq_jhat.fits')
+    assert not _is_unsplit_hst_jhat('jey322pnq_jhat.chip1.fits')
+    assert not _is_unsplit_hst_jhat('coadd_0_0_acs_f555w_drc.fits')
+
+
+def test_pick_hst_reference_refuses_jhat_fallback(tmp_path: Path):
+    reduction = tmp_path / 'reduction'
+    jhat = reduction / 'jhat_hst'
+    jhat.mkdir(parents=True)
+    mef = jhat / 'abc_jhat.fits'
+    mef.write_bytes(b'x')
+    with pytest.raises(FileNotFoundError, match='refusing JHAT'):
+        _pick_hst_reference(reduction, [mef], instrument='hst')
+
+
+def test_prepare_hst_frames_refuses_jhat_img0(tmp_path: Path):
+    mef = _write_acs_mef(tmp_path / 'abc_jhat.fits')
+    outdir = tmp_path / 'dolphot'
+    outdir.mkdir()
+    with pytest.raises(ValueError, match='refusing unsplit JHAT as img0'):
+        prepare_hst_frames(
+            [mef],
+            outdir,
+            'hst',
+            refimage=mef,
+            skip_mask=True,
+            skip_sky=True,
+            skip_split=True,
+            ncores=1,
+        )
 
 
 def test_apply_splitgroups_never_returns_unsplit_mef(tmp_path: Path):

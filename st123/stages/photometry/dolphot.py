@@ -73,6 +73,12 @@ def _is_dolphot_chip_product(path: PathLike) -> bool:
     return '.chip' in name and name.endswith('.fits')
 
 
+def _is_unsplit_hst_jhat(path: PathLike) -> bool:
+    """True for upstream JHAT MEFs (``*_jhat.fits``), not ``*.chipN.fits``."""
+    name = Path(path).name.lower()
+    return name.endswith('_jhat.fits') and '.chip' not in name
+
+
 def _dedupe_paths_by_resolve(paths: Sequence[PathLike]) -> list[Path]:
     """Keep first occurrence of each resolved path (symlink-safe)."""
     seen: set[Path] = set()
@@ -2055,8 +2061,19 @@ def prepare_hst_frames(
         raise ValueError(
             'prepare_hst_frames: no science frames remain after EXPFLAG filtering'
         )
-    ref_src = Path(refimage) if refimage is not None else src_files[0]
+    if refimage is None:
+        raise ValueError(
+            'prepare_hst_frames requires a drizzle/i2d coadd as refimage; '
+            'refusing to use a science JHAT/MEF as img0'
+        )
+    ref_src = Path(refimage)
     ref_is_jwst = _is_jwst_dolphot_reference(ref_src)
+    if _is_unsplit_hst_jhat(ref_src) and not ref_is_jwst:
+        raise ValueError(
+            f'prepare_hst_frames: refusing unsplit JHAT as img0 ({ref_src.name}); '
+            'run mosaic and pass a coadd_*_*_{drc,drz}.fits reference'
+        )
+
 
     # Classify science inputs up front (mixed mode needs per-file instrument).
     src_kinds: dict[Path, str] = {}
