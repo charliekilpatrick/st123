@@ -449,6 +449,57 @@ def test_filter_catastrophic_jhat_frames(tmp_path: Path):
     assert median_healthy_n_calibrators([16, 460, 470]) == 460
 
 
+def test_catastrophic_tol_and_keep_override(tmp_path: Path):
+    bad = tmp_path / 'marginal_jhat.fits'
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(bad)
+    with fits.open(bad, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.250
+        hdul[0].header['JWNCAL'] = 20
+        hdul.flush()
+    kept, dropped = filter_catastrophic_jhat_frames([bad], tol_arcsec=0.300)
+    assert kept == [bad.resolve()]
+    assert dropped == []
+    kept2, dropped2 = filter_catastrophic_jhat_frames(
+        [bad], keep_catastrophic=True
+    )
+    assert kept2 == [bad.resolve()]
+    assert dropped2 == []
+    assert is_catastrophic_alignment(0.250, 20, tol_arcsec=0.200)
+    assert not is_catastrophic_alignment(0.250, 20, tol_arcsec=0.300)
+
+
+def test_drop_catastrophic_rescues_least_bad(tmp_path: Path):
+    from st123.stages.mosaic.hst_drizzle import _drop_catastrophic_jhat_frames
+
+    a = tmp_path / 'a_jhat.fits'
+    b = tmp_path / 'b_jhat.fits'
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(a)
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(b)
+    with fits.open(a, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.280
+        hdul[0].header['JWNCAL'] = 18
+        hdul.flush()
+    with fits.open(b, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.320
+        hdul[0].header['JWNCAL'] = 18
+        hdul.flush()
+    kept, rejected = _drop_catastrophic_jhat_frames(
+        [a, b], context='unit-test'
+    )
+    assert len(kept) == 2  # n_frames <= 3 keeps all under 0.5"
+    assert any(r.get('catastrophic_kept') for r in rejected)
+    # Above the keep cap: no rescue.
+    c = tmp_path / 'c_jhat.fits'
+    fits.PrimaryHDU(np.zeros((8, 8), dtype=np.float32)).writeto(c)
+    with fits.open(c, mode='update') as hdul:
+        hdul[0].header['JWDISPD'] = 0.900
+        hdul[0].header['JWNCAL'] = 18
+        hdul.flush()
+    kept2, rejected2 = _drop_catastrophic_jhat_frames([c], context='unit-test')
+    assert kept2 == []
+    assert rejected2 and rejected2[0].get('status') == 'failed'
+
+
 def test_filter_keeps_st123cat_false_despite_crowded_phot(tmp_path: Path):
     """Galaxy-knot phot residual can be >200 mas after a verified image lock."""
     recovered = tmp_path / 'j9np06xyq_jhat.fits'

@@ -473,6 +473,7 @@ def main(argv=None) -> int:
             return 1
 
         logger.info('Found %d DOLPHOT run(s)', len(runs))
+        runnable: list = []
         for run in runs:
             cmd = _format_command(
                 run, ncores=ncores, dolphot_bin=args.dolphot_bin
@@ -481,8 +482,34 @@ def main(argv=None) -> int:
             try:
                 _assert_run_hst_quality(run)
             except RuntimeError as exc:
+                msg = str(exc)
+                if 'fail EXPFLAG' in msg or 'no science frames' in msg.lower():
+                    logger.warning('%s; soft-skip run', msg)
+                    continue
                 logger.error('%s', exc)
                 return 1
+            # Empty param image list after quality filter: skip, do not fail.
+            from st123.stages.photometry.dolphot import parse_param_image_list
+
+            param = run.outdir / run.param_file
+            if param.is_file():
+                try:
+                    _ref, bases = parse_param_image_list(param)
+                except Exception:
+                    bases = ['__present__']
+                if not bases:
+                    logger.warning(
+                        '%s: empty frame list after quality filter; soft-skip',
+                        run.label,
+                    )
+                    continue
+            runnable.append(run)
+        runs = runnable
+        if not runs:
+            logger.warning(
+                'No runnable DOLPHOT dirs after quality filter; soft-skip'
+            )
+            return 0
 
         if args.dry_run:
             logger.info(

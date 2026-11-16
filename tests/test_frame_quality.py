@@ -151,3 +151,72 @@ def test_visit_relative_recovery_skips_bad_expflag(tmp_path: Path):
     assert results[0]['align_mode'] == 'REJECTED_EXPFLAG'
     assert results[0]['outpath'] is None
     assert not list(out.glob('*_jhat.fits'))
+
+
+def _wfc3_ir_flt(
+    path: Path,
+    *,
+    nextend: int = 5,
+    exptime: float = 599.0,
+    with_samp_time: bool = True,
+) -> Path:
+    """Minimal WFC3/IR flt primary (+ optional SAMP/TIME/SCI stubs)."""
+    from astropy.io import fits
+    import numpy as np
+
+    hdr = fits.Header()
+    hdr['INSTRUME'] = 'WFC3'
+    hdr['DETECTOR'] = 'IR'
+    hdr['TELESCOP'] = 'HST'
+    hdr['FILTER'] = 'F160W'
+    hdr['EXPTIME'] = float(exptime)
+    hdr['NEXTEND'] = int(nextend)
+    hdr['EXPFLAG'] = 'NORMAL'
+    hdus = [fits.PrimaryHDU(header=hdr)]
+    if with_samp_time:
+        sci = fits.ImageHDU(
+            np.zeros((16, 16), dtype=np.float32), name='SCI'
+        )
+        samp = fits.ImageHDU(
+            np.ones((16, 16), dtype=np.float32), name='SAMP'
+        )
+        time = fits.ImageHDU(
+            np.ones((16, 16), dtype=np.float32), name='TIME'
+        )
+        hdus.extend([sci, samp, time])
+        # Pad with empty extensions so NEXTEND can match a real IR MEF.
+        while len(hdus) - 1 < int(nextend):
+            hdus.append(fits.ImageHDU(name=f'PAD{len(hdus)}'))
+    fits.HDUList(hdus).writeto(path, overwrite=True)
+    return path
+
+
+def test_wfc3_ir_nextend_and_exptime_gate(tmp_path: Path):
+    from st123.datamodels.hst import (
+        filter_unusable_wfc3_ir_frames,
+        is_usable_wfc3_ir_flt,
+        wfc3_ir_unusable_reason,
+    )
+
+    good = _wfc3_ir_flt(tmp_path / 'good_flt.fits', nextend=5, exptime=599.0)
+    tiny = _wfc3_ir_flt(tmp_path / 'tiny_flt.fits', nextend=5, exptime=1.7)
+    short_mef = _wfc3_ir_flt(
+        tmp_path / 'short_flt.fits',
+        nextend=1,
+        exptime=599.0,
+        with_samp_time=False,
+    )
+    uvis = _hst_flc(tmp_path / 'uvis_flc.fits', expflag='NORMAL')
+
+    assert is_usable_wfc3_ir_flt(good)
+    assert wfc3_ir_unusable_reason(tiny) is not None
+    assert 'EXPTIME' in (wfc3_ir_unusable_reason(tiny) or '')
+    assert wfc3_ir_unusable_reason(short_mef) is not None
+    assert is_usable_wfc3_ir_flt(uvis)  # non-IR always passes
+
+    kept, dropped = filter_unusable_wfc3_ir_frames(
+        [good, tiny, short_mef, uvis]
+    )
+    assert good.resolve() in [p.resolve() for p in kept]
+    assert uvis.resolve() in [p.resolve() for p in kept]
+    assert len(dropped) == 2

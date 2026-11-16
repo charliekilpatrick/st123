@@ -362,6 +362,10 @@ def _run_hst(args) -> int:
             ncores=args.ncores,
         )
     except ValueError as exc:
+        msg = str(exc)
+        if 'no science frames remain after' in msg:
+            logger.warning('%s; soft-skip', msg)
+            return 0
         logger.error('%s', exc)
         return 1
 

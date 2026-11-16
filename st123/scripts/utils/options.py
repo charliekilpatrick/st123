@@ -755,6 +755,60 @@ def add_mast_token(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
+def add_mast_timeout(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach ``--mast-timeout`` (honored by the ``download`` stage).
+
+    Sets ``astroquery.mast.conf.timeout`` for cone search / product-list
+    calls. Dense galaxy fields often need more than the astroquery default
+    of 600 s.
+    """
+    parser.add_argument(
+        '--mast-timeout',
+        dest='mast_timeout',
+        type=float,
+        default=600.0,
+        metavar='SEC',
+        help=(
+            'astroquery.mast Conf.timeout in seconds for query_region / '
+            'product-list calls (default: 600). Raise for large galaxy cones.'
+        ),
+    )
+    return parser
+
+
+def add_mosaic_qa_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """
+    Attach mosaic catastrophic-alignment QA flags.
+
+    Honored by the ``mosaic`` stage when filtering JHAT frames before
+    AstroDrizzle. ``--catastrophic-tol-mas`` loosens the hard residual gate;
+    ``--keep-catastrophic`` disables the drop entirely (debug / override).
+    """
+    group = parser.add_argument_group('mosaic QA')
+    group.add_argument(
+        '--catastrophic-tol-mas',
+        dest='catastrophic_tol_mas',
+        type=float,
+        default=200.0,
+        metavar='MAS',
+        help=(
+            'Hard residual gate (milliarcsec) for dropping catastrophically '
+            'misaligned JHAT frames before drizzle (default: 200).'
+        ),
+    )
+    group.add_argument(
+        '--keep-catastrophic',
+        dest='keep_catastrophic',
+        action='store_true',
+        help=(
+            'Do not drop JHAT frames for catastrophic alignment residual '
+            '(override; use for debugging).'
+        ),
+    )
+    return parser
+
+
 def add_catalog_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """
     Attach catalog / light-curve options.

@@ -45,6 +45,11 @@ DEFAULT_MAX_ABS_ARCSEC = 0.50
 # Prefer leaving internal gating off.
 DEFAULT_MAX_INTERNAL_ARCSEC = None
 
+# WFC3/IR flt quality gate (malformed MEFs / tiny EXPTIME poison DOLPHOT).
+WFC3_IR_MIN_NEXTEND = 5
+WFC3_IR_MIN_EXPTIME_SEC = 10.0
+WFC3_IR_MIN_EXPTIME_FRAC = 0.05
+
 __all__ = [
     'DEFAULT_MAX_ABS_ARCSEC',
     'DEFAULT_MAX_INTERNAL_ARCSEC',
@@ -52,18 +57,24 @@ __all__ = [
     'HSTDataModel',
     'HST_SCIENCE_SUFFIXES',
     'HST_CALIBRATION_NAME_MARKERS',
+    'WFC3_IR_MIN_EXPTIME_FRAC',
+    'WFC3_IR_MIN_EXPTIME_SEC',
+    'WFC3_IR_MIN_NEXTEND',
     'filter_good_hst_frames',
+    'filter_unusable_wfc3_ir_frames',
     'is_good_hst_alignment',
     'is_good_hst_expflag',
     'is_hst_science_path',
     'is_rejected_coadd',
     'is_usable_hst_coadd',
+    'is_usable_wfc3_ir_flt',
     'log_rejected_hst_frames',
     'pick_best_hst_coadd',
     'prune_bad_hst_expflag',
     'rank_hst_coadd',
     'read_expflag',
     'restore_hst_identity_cards',
+    'wfc3_ir_unusable_reason',
 ]
 
 
@@ -514,6 +525,153 @@ def filter_good_hst_frames(
             continue
         kept.append(p)
     return kept, rejected
+
+
+def _looks_like_wfc3_ir_flt(path: Path) -> bool:
+    """True for WFC3/IR science flt / jhat products (not UVIS flc)."""
+    name = path.name.lower()
+    if not (name.endswith('_flt.fits') or name.endswith('_jhat.fits')):
+        return False
+    if '_flc' in name:
+        return False
+    try:
+        with as_datamodel(path).open(memmap=True) as hdul:
+            hdr = hdul[0].header
+            inst = str(hdr.get('INSTRUME') or '').upper()
+            det = str(hdr.get('DETECTOR') or '').upper()
+            if inst and 'WFC3' not in inst:
+                return False
+            if det == 'IR':
+                return True
+            if det and det != 'IR':
+                return False
+            # WFC3 with no DETECTOR: *_flt is the IR product convention.
+            return name.endswith('_flt.fits')
+    except Exception:
+        # Fall back to name heuristic for unreadable stubs in unit tests.
+        return name.endswith('_flt.fits') and 'uvis' not in name
+
+
+def wfc3_ir_unusable_reason(
+    path: PathLike,
+    *,
+    min_nextend: int = WFC3_IR_MIN_NEXTEND,
+    min_exptime: float = WFC3_IR_MIN_EXPTIME_SEC,
+    filter_median_exptime: float | None = None,
+    min_exptime_frac: float = WFC3_IR_MIN_EXPTIME_FRAC,
+) -> str | None:
+    """
+    Return a short reason when a WFC3/IR flt is unusable, else ``None``.
+
+    Non-IR paths always return ``None`` (not filtered here).
+    """
+    p = path_of(path)
+    if not _looks_like_wfc3_ir_flt(p):
+        return None
+    try:
+        with as_datamodel(p).open(memmap=True) as hdul:
+            hdr0 = hdul[0].header
+            nextend = hdr0.get('NEXTEND')
+            if nextend is not None and int(nextend) < int(min_nextend):
+                return f'NEXTEND={nextend} < {min_nextend}'
+            if nextend is None and len(hdul) < int(min_nextend):
+                return f'n_ext={len(hdul)} < {min_nextend}'
+            names = {
+                str(hdu.name or '').upper()
+                for hdu in hdul
+                if getattr(hdu, 'name', None)
+            }
+            has_samp = any(n == 'SAMP' or n.startswith('SAMP') for n in names)
+            has_time = any(n == 'TIME' or n.startswith('TIME') for n in names)
+            has_sci = any(n == 'SCI' or n.startswith('SCI') for n in names)
+            if not (has_samp and has_time and has_sci):
+                missing = []
+                if not has_samp:
+                    missing.append('SAMP')
+                if not has_time:
+                    missing.append('TIME')
+                if not has_sci:
+                    missing.append('SCI')
+                return 'missing extension(s): ' + ','.join(missing)
+            exptime = hdr0.get('EXPTIME')
+            if exptime is None:
+                for hdu in hdul:
+                    if str(getattr(hdu, 'name', '') or '').upper().startswith(
+                        'SCI'
+                    ):
+                        exptime = hdu.header.get('EXPTIME')
+                        if exptime is not None:
+                            break
+            if exptime is not None:
+                et = float(exptime)
+                floor = float(min_exptime)
+                if filter_median_exptime is not None:
+                    floor = max(
+                        floor,
+                        float(min_exptime_frac) * float(filter_median_exptime),
+                    )
+                if et < floor:
+                    return f'EXPTIME={et:.3g}s < {floor:.3g}s'
+    except Exception as exc:
+        return f'unreadable: {exc}'
+    return None
+
+
+def is_usable_wfc3_ir_flt(path: PathLike, **kwargs) -> bool:
+    """True when *path* is not a bad WFC3/IR flt (non-IR always True)."""
+    return wfc3_ir_unusable_reason(path, **kwargs) is None
+
+
+def filter_unusable_wfc3_ir_frames(
+    paths: Sequence[PathLike],
+    *,
+    min_nextend: int = WFC3_IR_MIN_NEXTEND,
+    min_exptime: float = WFC3_IR_MIN_EXPTIME_SEC,
+    min_exptime_frac: float = WFC3_IR_MIN_EXPTIME_FRAC,
+) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """
+    Drop malformed / tiny-EXPTIME WFC3/IR flt frames from *paths*.
+
+    Returns ``(kept, dropped)`` where *dropped* is ``(path, reason)`` pairs.
+    Non-IR frames are always kept. Relative EXPTIME uses the median among
+    IR candidates in *paths* (when at least two have readable EXPTIME).
+    """
+    resolved = [path_of(p) for p in paths]
+    ir_paths = [p for p in resolved if _looks_like_wfc3_ir_flt(p)]
+    median_exptime: float | None = None
+    if len(ir_paths) >= 2:
+        exps: list[float] = []
+        for p in ir_paths:
+            try:
+                with as_datamodel(p).open(memmap=True) as hdul:
+                    et = hdul[0].header.get('EXPTIME')
+                    if et is not None and float(et) > 0:
+                        exps.append(float(et))
+            except Exception:
+                continue
+        if exps:
+            exps.sort()
+            median_exptime = float(exps[len(exps) // 2])
+    kept: list[Path] = []
+    dropped: list[tuple[Path, str]] = []
+    for p in resolved:
+        reason = wfc3_ir_unusable_reason(
+            p,
+            min_nextend=min_nextend,
+            min_exptime=min_exptime,
+            filter_median_exptime=median_exptime,
+            min_exptime_frac=min_exptime_frac,
+        )
+        if reason is None:
+            kept.append(p)
+        else:
+            dropped.append((p, reason))
+            logger.warning(
+                'Rejecting unusable WFC3/IR frame %s (%s)',
+                p.name,
+                reason,
+            )
+    return kept, dropped
 
 
 def log_rejected_hst_frames(

@@ -760,15 +760,17 @@ def run_hst_visit_alignment(
     if n_ok == 0:
         # Empty raw (all EXPFLAG rejected at link-raw) or every remaining
         # frame rejected as bad EXPFLAG: not an align algorithm failure.
-        all_expflag = bool(results) and all(
-            r.get('align_mode') == 'REJECTED_EXPFLAG'
+        all_quality_skip = bool(results) and all(
+            r.get('align_mode') in ('REJECTED_EXPFLAG', 'REJECTED_WFC3_IR')
             or str(r.get('error') or '').startswith('EXPFLAG=')
+            or str(r.get('error') or '').startswith('unusable WFC3/IR')
             for r in results
         )
-        if n_fail == 0 or all_expflag:
+        if n_fail == 0 or all_quality_skip:
             logger.warning(
                 'HST visit align: no usable science frames '
-                '(empty raw or all EXPFLAG-rejected); soft-skip'
+                '(empty raw, all EXPFLAG-rejected, or all WFC3/IR unusable); '
+                'soft-skip'
             )
             return 0
         logger.error('HST visit align produced no JHAT products')

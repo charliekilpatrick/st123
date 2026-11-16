@@ -326,12 +326,44 @@ def test_mosaic_accepts_base_dir():
     assert args.base_dir == '/b'
 
 
+def test_mosaic_catastrophic_qa_flags():
+    parser = mosaic_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--base-dir',
+            '/b',
+            '--catastrophic-tol-mas',
+            '350',
+            '--keep-catastrophic',
+        ]
+    )
+    assert args.catastrophic_tol_mas == 350.0
+    assert args.keep_catastrophic is True
+
+
 def test_download_requires_base_dir():
     parser = download_script.create_parser()
     args = parser.parse_args(
         ['--ra', '10', '--dec', '20', '--base-dir', '/data/out']
     )
     assert args.base_dir == '/data/out'
+
+
+def test_download_mast_timeout_flag():
+    parser = download_script.create_parser()
+    args = parser.parse_args(
+        [
+            '--ra',
+            '10',
+            '--dec',
+            '20',
+            '--base-dir',
+            '/data/out',
+            '--mast-timeout',
+            '1800',
+        ]
+    )
+    assert args.mast_timeout == 1800.0
 
 
 def test_link_raw_base_dir_instrument():

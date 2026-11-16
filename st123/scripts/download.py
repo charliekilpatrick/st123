@@ -12,6 +12,7 @@ from st123.scripts.utils.options import (
     add_common_runtime,
     add_filters,
     add_instruments_arg,
+    add_mast_timeout,
     add_mast_token,
     add_sky_coord_args,
     configure_logging_from_args,
@@ -239,6 +240,7 @@ def create_parser():
         ),
     )
     add_mast_token(parser)
+    add_mast_timeout(parser)
     add_common_runtime(parser, plot=False, dry_run=True)
     return parser
 
@@ -309,10 +311,14 @@ def main(argv=None) -> int:
             query_mast_jwst,
             resolve_outdir,
         )
-        from st123.stages.download.mast import normalize_filter_name
+        from st123.stages.download.mast import (
+            configure_mast_timeout,
+            normalize_filter_name,
+        )
         from st123.scripts.link_raw import link_raw_tree
         from st123.utils.helpers import parse_coord
 
+        configure_mast_timeout(getattr(args, 'mast_timeout', None))
         coord = parse_coord(args.ra, args.dec)
         if coord is None:
             return 1

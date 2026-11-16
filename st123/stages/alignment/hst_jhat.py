@@ -7140,6 +7140,7 @@ def align_hst_raw_dir(
 
     from st123.datamodels.hst import (
         filter_good_hst_frames,
+        filter_unusable_wfc3_ir_frames,
         is_good_hst_expflag,
         log_rejected_hst_frames,
         read_expflag,
@@ -7186,6 +7187,24 @@ def align_hst_raw_dir(
                         stale,
                         exc,
                     )
+
+    frames, ir_rejected = filter_unusable_wfc3_ir_frames(frames)
+    if ir_rejected:
+        log.warning(
+            'align: dropped %d unusable WFC3/IR frame(s); %d remain',
+            len(ir_rejected),
+            len(frames),
+        )
+        for bad, reason in ir_rejected:
+            skipped_expflag.append(
+                {
+                    'path': str(bad),
+                    'status': 'failed',
+                    'error': f'unusable WFC3/IR: {reason}',
+                    'outpath': None,
+                    'align_mode': 'REJECTED_WFC3_IR',
+                }
+            )
 
     n_frames = len(frames)
     ref_desc = (

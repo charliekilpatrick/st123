@@ -29,17 +29,78 @@ _MAST_SESSION_TOKEN: str | None = None
 _MAST_PUBLIC_NOTICE: bool = False
 
 # MAST product-list / download retries (issue #4: silent partial inventory).
-_HST_MAST_MAX_ATTEMPTS = 3
-_HST_MAST_RETRY_DELAY_SEC = 5.0
+# Exponential backoff for timeouts: 30s, 60s, 120s, 240s between attempts.
+_HST_MAST_MAX_ATTEMPTS = 5
+_HST_MAST_RETRY_DELAYS_SEC = (30.0, 60.0, 120.0, 240.0)
 # Cone-search (Observations.query_region) can exceed astroquery's default
 # 600s on dense fields (e.g. NGC 1808); raise and retry on timeout.
-_MAST_QUERY_TIMEOUT_SEC = 1200
-_MAST_QUERY_MAX_ATTEMPTS = 3
-_MAST_QUERY_RETRY_DELAY_SEC = 10.0
+# Overridable via :func:`configure_mast_timeout` / ``--mast-timeout``.
+_MAST_TIMEOUT_SEC = 600.0
+_MAST_QUERY_SPLIT_FLOOR_ARCMIN = 5.0
+
+
+def configure_mast_timeout(timeout_sec: float | None) -> float:
+    """
+    Set the process-wide MAST ``Conf.timeout`` budget used by query helpers.
+
+    Parameters
+    ----------
+    timeout_sec : float or None
+        Seconds for ``astroquery.mast.conf.timeout``. ``None`` / non-positive
+        keeps the current module default.
+
+    Returns
+    -------
+    float
+        Active timeout in seconds.
+    """
+    global _MAST_TIMEOUT_SEC
+    if timeout_sec is not None and float(timeout_sec) > 0:
+        _MAST_TIMEOUT_SEC = float(timeout_sec)
+    return float(_MAST_TIMEOUT_SEC)
+
+
+def _apply_mast_conf_timeout(timeout_sec: float | None = None):
+    """
+    Push timeout into ``astroquery.mast.conf``; return ``(conf, previous)``.
+
+    ``previous`` is ``None`` when conf is unavailable or the write failed.
+    """
+    try:
+        from astroquery.mast import conf as mast_conf
+    except Exception:  # pragma: no cover - older astroquery
+        return None, None
+    prev = getattr(mast_conf, 'timeout', None)
+    value = float(_MAST_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    try:
+        mast_conf.timeout = value
+    except Exception:
+        return mast_conf, None
+    return mast_conf, prev
+
+
+def _restore_mast_conf_timeout(mast_conf, prev) -> None:
+    if mast_conf is None or prev is None:
+        return
+    try:
+        mast_conf.timeout = prev
+    except Exception:
+        pass
 
 
 def _is_transient_mast_error(exc: BaseException) -> bool:
     """True for timeouts / connection failures worth retrying against MAST."""
+    # Local filesystem / permission errors must not be retried as MAST flakiness.
+    if isinstance(
+        exc,
+        (
+            PermissionError,
+            FileNotFoundError,
+            IsADirectoryError,
+            NotADirectoryError,
+        ),
+    ):
+        return False
     if isinstance(
         exc,
         (
@@ -47,7 +108,6 @@ def _is_transient_mast_error(exc: BaseException) -> bool:
             ConnectionError,
             ConnectionResetError,
             BrokenPipeError,
-            OSError,
         ),
     ):
         return True
@@ -67,7 +127,24 @@ def _is_transient_mast_error(exc: BaseException) -> bool:
         'remote end closed',
         'broken pipe',
     )
-    return any(n in text for n in needles)
+    if any(n in text for n in needles):
+        return True
+    # Narrow OSError: only network-ish errno / messages, not EACCES / ENOSPC.
+    if isinstance(exc, OSError):
+        errno = getattr(exc, 'errno', None)
+        # ECONNRESET=104, ETIMEDOUT=110, EPIPE=32, ECONNREFUSED=111 (Linux).
+        if errno in {32, 104, 110, 111}:
+            return True
+    return False
+
+
+def _mast_retry_delay(attempt: int) -> float:
+    """Backoff seconds after failed attempt ``attempt`` (1-based)."""
+    idx = max(0, int(attempt) - 1)
+    delays = _HST_MAST_RETRY_DELAYS_SEC
+    if idx < len(delays):
+        return float(delays[idx])
+    return float(delays[-1])
 
 
 def _mast_call_with_retries(label: str, fn, *args, **kwargs):
@@ -87,7 +164,7 @@ def _mast_call_with_retries(label: str, fn, *args, **kwargs):
         except Exception as exc:
             last_exc = exc
             if attempt < _HST_MAST_MAX_ATTEMPTS and _is_transient_mast_error(exc):
-                delay = _HST_MAST_RETRY_DELAY_SEC * attempt
+                delay = _mast_retry_delay(attempt)
                 logger.warning(
                     'Transient MAST error for %s (attempt %d/%d): %s; '
                     'retrying in %.1fs',
@@ -270,6 +347,64 @@ def galaxy_query_radius(
     return radius
 
 
+def _query_region_once(coord: SkyCoord, radius: u.Quantity) -> Table:
+    """Single ``Observations.query_region`` call (no retries)."""
+    with capture_output():
+        obs_table = Observations.query_region(coord, radius=radius)
+    return obs_table.filled()
+
+
+def _merge_obs_tables(tables: Sequence[Table]) -> Table:
+    """Concatenate observation tables and drop duplicate ``obsid`` rows."""
+    if not tables:
+        raise ValueError('no MAST observation tables to merge')
+    if len(tables) == 1:
+        return tables[0]
+    from astropy.table import vstack
+
+    merged = vstack(list(tables), join_type='outer')
+    if 'obsid' in merged.colnames:
+        _, uniq = np.unique(np.asarray(merged['obsid']), return_index=True)
+        merged = merged[sorted(uniq)]
+    return merged
+
+
+def _query_region_split(coord: SkyCoord, radius: u.Quantity) -> Table:
+    """
+    Split a large cone into four half-radius sub-cones and merge results.
+
+    Used when a full-radius ``query_region`` times out after retries.
+    """
+    half = radius / 2.0
+    # Offset centers by half-radius along RA/Dec (small-angle approx).
+    half_deg = float(half.to_value(u.deg))
+    ra0 = float(coord.ra.deg)
+    dec0 = float(coord.dec.deg)
+    cos_dec = max(np.cos(np.deg2rad(dec0)), 1e-6)
+    offsets = (
+        (+half_deg / cos_dec, +half_deg),
+        (+half_deg / cos_dec, -half_deg),
+        (-half_deg / cos_dec, +half_deg),
+        (-half_deg / cos_dec, -half_deg),
+    )
+    tables: list[Table] = []
+    for dra, ddec in offsets:
+        sub = SkyCoord(ra=ra0 + dra, dec=dec0 + ddec, unit='deg', frame='icrs')
+        label = (
+            f'query_region_split ra={sub.ra.deg:.5f} dec={sub.dec.deg:.5f} '
+            f'r={half}'
+        )
+        result, exc = _mast_call_with_retries(
+            label, _query_region_once, sub, half
+        )
+        if exc is not None:
+            raise TimeoutError(
+                f'MAST query_region split failed for {label}: {exc}'
+            ) from exc
+        tables.append(result)
+    return _merge_obs_tables(tables)
+
+
 def query_region(coord: SkyCoord, radius: u.Quantity) -> Table:
     """Query MAST Observations around ``coord`` and fill masked values.
 
@@ -284,54 +419,48 @@ def query_region(coord: SkyCoord, radius: u.Quantity) -> Table:
     -------
     Table
         MAST observation table with masked cells filled.
+
+    Raises
+    ------
+    TimeoutError
+        When retries (and optional cone-split) are exhausted on timeout.
     """
     # astroquery.mast uses Conf.timeout (default 600s). Dense HST cones
     # (crowded hosts) can hit that during Observations.query_region.
+    mast_conf, prev_timeout = _apply_mast_conf_timeout()
     try:
-        from astroquery.mast import conf as mast_conf
-    except Exception:  # pragma: no cover - older astroquery
-        mast_conf = None
-
-    prev_timeout = None
-    if mast_conf is not None:
-        prev_timeout = getattr(mast_conf, 'timeout', None)
+        label = (
+            f'query_region ra={coord.ra.deg:.5f} dec={coord.dec.deg:.5f} '
+            f'r={radius}'
+        )
+        result, exc = _mast_call_with_retries(
+            label, _query_region_once, coord, radius
+        )
+        if exc is None:
+            return result
+        # Large galaxy cones: split into smaller regions on timeout.
         try:
-            mast_conf.timeout = float(_MAST_QUERY_TIMEOUT_SEC)
+            radius_arcmin = float(radius.to_value(u.arcmin))
         except Exception:
-            prev_timeout = None
-
-    last_exc: Exception | None = None
-    try:
-        for attempt in range(1, _MAST_QUERY_MAX_ATTEMPTS + 1):
-            try:
-                with capture_output():
-                    obs_table = Observations.query_region(coord, radius=radius)
-                return obs_table.filled()
-            except Exception as exc:
-                last_exc = exc
-                if (
-                    attempt < _MAST_QUERY_MAX_ATTEMPTS
-                    and _is_transient_mast_error(exc)
-                ):
-                    delay = _MAST_QUERY_RETRY_DELAY_SEC * attempt
-                    logger.warning(
-                        'Transient MAST query_region error '
-                        '(attempt %d/%d): %s; retrying in %.1fs',
-                        attempt,
-                        _MAST_QUERY_MAX_ATTEMPTS,
-                        exc,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise
-        raise RuntimeError('MAST query_region failed') from last_exc
+            radius_arcmin = 0.0
+        if (
+            _is_transient_mast_error(exc)
+            and radius_arcmin > float(_MAST_QUERY_SPLIT_FLOOR_ARCMIN)
+        ):
+            logger.warning(
+                'MAST query_region timed out at r=%s; splitting into '
+                'half-radius sub-cones',
+                radius,
+            )
+            return _query_region_split(coord, radius)
+        if isinstance(exc, TimeoutError) or _is_transient_mast_error(exc):
+            raise TimeoutError(
+                f'MAST query_region failed after '
+                f'{_HST_MAST_MAX_ATTEMPTS} attempts: {exc}'
+            ) from exc
+        raise exc
     finally:
-        if mast_conf is not None and prev_timeout is not None:
-            try:
-                mast_conf.timeout = prev_timeout
-            except Exception:
-                pass
+        _restore_mast_conf_timeout(mast_conf, prev_timeout)
 
 
 def filter_hst_observations(
@@ -646,13 +775,25 @@ def collect_hst_products(obs_table: Table) -> Optional[Table]:
         Combined science-product table, or ``None`` when no products were found.
     """
     productlist = None
+    n_obs = len(obs_table)
+    n_failed = 0
     for obs in obs_table:
-        try:
-            product_list = Observations.get_product_list(obs)
-            product_list = product_list[product_list['type'] == 'S']
-        except Exception:
-            logger.error('MAST is not working currently\nTry again later...')
+        product_list, exc = _mast_call_with_retries(
+            f'get_product_list(obsid={obs.get("obsid", "?")})',
+            Observations.get_product_list,
+            obs,
+        )
+        if exc is not None or product_list is None:
+            n_failed += 1
+            logger.error(
+                'MAST get_product_list failed for obsid=%s (%d/%d failed): %s',
+                obs.get('obsid', '?'),
+                n_failed,
+                n_obs,
+                exc,
+            )
             continue
+        product_list = product_list[product_list['type'] == 'S']
 
         instrument = obs['instrument_name']
         product_list.add_column(Column([instrument] * len(product_list), name='instrument_name'))
@@ -666,6 +807,13 @@ def collect_hst_products(obs_table: Table) -> Optional[Table]:
                 productlist = Table(prod)
             else:
                 productlist.add_row(prod)
+    if n_failed:
+        logger.warning(
+            'MAST collect_hst_products: %d/%d observation(s) failed '
+            'get_product_list (partial inventory risk)',
+            n_failed,
+            n_obs,
+        )
     return productlist
 
 
@@ -1057,17 +1205,26 @@ def download_jwst_observations(
             telescope=telescope,
             instrument=instrument,
         )
-        try:
+        def _get_products():
             with capture_output():
-                raw_products = Observations.get_product_list(obs)
-            product_list = filter_jwst_products(
-                raw_products,
-                stage=stage,
-                instrument=instrument,
+                return Observations.get_product_list(obs)
+
+        raw_products, exc = _mast_call_with_retries(
+            f'jwst get_product_list(obsid={obsid})',
+            _get_products,
+        )
+        if exc is not None or raw_products is None:
+            logger.warning(
+                'could not get products for obsid=%s after retries: %s',
+                obsid,
+                exc,
             )
-        except Exception as exc:
-            logger.warning('could not get products for obsid=%s: %s', obsid, exc)
             continue
+        product_list = filter_jwst_products(
+            raw_products,
+            stage=stage,
+            instrument=instrument,
+        )
         if len(product_list) == 0:
             # Only reached for observations that looked stage-relevant.
             logger.info('[%d/%d] %s: no stage-%d science products', i, n_obs, subdir, stage)
@@ -1087,34 +1244,45 @@ def download_jwst_observations(
         if dry_run:
             n_downloaded += 1
             continue
-        try:
+
+        def _download():
             with capture_output():
-                Observations.download_products(
+                return Observations.download_products(
                     product_list, download_dir=download_dir, extension=extension
                 )
-            flat = flatten_mast_download_dir(download_dir)
-            if flat:
-                logger.debug(
-                    '[%d/%d] %s: flattened %d nested MAST product(s)',
-                    i,
-                    n_obs,
-                    subdir,
-                    len(flat),
-                )
-            # Drop MIRI subarrays/cutouts immediately so they never enter
-            # alignment or DOLPHOT staging.
-            pruned = prune_non_full_frame_miri(download_dir, remove=True)
-            if pruned:
-                logger.info(
-                    '[%d/%d] %s: removed %d non-full-frame MIRI product(s)',
-                    i,
-                    n_obs,
-                    subdir,
-                    len(pruned),
-                )
-            n_downloaded += 1
-        except Exception as exc:
-            logger.warning('download failed for obsid=%s: %s', obsid, exc)
+
+        _dl_result, dl_exc = _mast_call_with_retries(
+            f'jwst download_products(obsid={obsid})',
+            _download,
+        )
+        if dl_exc is not None:
+            logger.warning(
+                'download failed for obsid=%s after retries: %s',
+                obsid,
+                dl_exc,
+            )
+            continue
+        flat = flatten_mast_download_dir(download_dir)
+        if flat:
+            logger.debug(
+                '[%d/%d] %s: flattened %d nested MAST product(s)',
+                i,
+                n_obs,
+                subdir,
+                len(flat),
+            )
+        # Drop MIRI subarrays/cutouts immediately so they never enter
+        # alignment or DOLPHOT staging.
+        pruned = prune_non_full_frame_miri(download_dir, remove=True)
+        if pruned:
+            logger.info(
+                '[%d/%d] %s: removed %d non-full-frame MIRI product(s)',
+                i,
+                n_obs,
+                subdir,
+                len(pruned),
+            )
+        n_downloaded += 1
 
     logger.info(
         'Finished: downloaded products for %d/%d observation(s).',

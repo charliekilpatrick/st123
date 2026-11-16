@@ -2049,7 +2049,10 @@ def prepare_hst_frames(
 
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    from st123.datamodels.hst import filter_paths_for_stage
+    from st123.datamodels.hst import (
+        filter_paths_for_stage,
+        filter_unusable_wfc3_ir_frames,
+    )
 
     src_files = filter_paths_for_stage(
         [Path(p) for p in files],
@@ -2057,9 +2060,17 @@ def prepare_hst_frames(
     )
     src_files = _dedupe_paths_by_resolve(src_files)
     src_files = _drop_tiny_hst_subarrays(src_files)
+    src_files, ir_dropped = filter_unusable_wfc3_ir_frames(src_files)
+    if ir_dropped:
+        logger.warning(
+            'dolphot-prep: dropped %d unusable WFC3/IR frame(s); %d remain',
+            len(ir_dropped),
+            len(src_files),
+        )
     if not src_files:
         raise ValueError(
-            'prepare_hst_frames: no science frames remain after EXPFLAG filtering'
+            'prepare_hst_frames: no science frames remain after '
+            'EXPFLAG / WFC3-IR quality filtering'
         )
     if refimage is None:
         raise ValueError(

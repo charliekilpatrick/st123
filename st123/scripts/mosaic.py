@@ -14,6 +14,7 @@ from st123.scripts.utils.options import (
     add_common_runtime,
     add_filters,
     add_instruments_arg,
+    add_mosaic_qa_args,
     add_sky_coord_args,
     configure_logging_from_args,
     create_parser as build_parser,
@@ -202,6 +203,7 @@ def create_parser():
             'combined coadd. Bad EXPFLAG frames are always excluded.'
         ),
     )
+    add_mosaic_qa_args(parser)
     add_common_runtime(parser, ncores=True, ncores_default=4, plot=False, verbose=True)
     return parser
 
@@ -483,10 +485,18 @@ def _run_hst_mosaic(
     filters: list[str] | None = None,
 ) -> int:
     """AstroDrizzle HST frames into ``reference/group_*/ref_*`` boxes."""
-    from st123.stages.mosaic.hst_drizzle import drizzle_project, drizzle_project_boxed
+    from st123.stages.mosaic.hst_drizzle import (
+        configure_mosaic_catastrophic,
+        drizzle_project,
+        drizzle_project_boxed,
+    )
     from st123.utils.logging import _quiet_third_party_loggers
 
     _quiet_third_party_loggers()
+    configure_mosaic_catastrophic(
+        tol_mas=getattr(args, 'catastrophic_tol_mas', None),
+        keep_catastrophic=bool(getattr(args, 'keep_catastrophic', False)),
+    )
 
     from st123.scripts.utils.options import resolve_jhat_dir
 
@@ -557,23 +567,49 @@ def _run_hst_mosaic(
         return 1
     n_ok = sum(1 for r in results if r['status'] == 'ok')
     n_fail = sum(1 for r in results if r['status'] != 'ok')
+
+    def _quality_skip_error(err: object) -> bool:
+        text = str(err or '').lower()
+        return (
+            'expflag' in text
+            or 'wfc3-ir' in text
+            or 'wfc3/ir' in text
+            or 'no frames remain' in text
+        )
+
+    all_quality_skip = n_ok == 0 and n_fail > 0 and all(
+        _quality_skip_error(r.get('error')) for r in results if r['status'] != 'ok'
+    )
     for r in results:
         if r['status'] == 'ok':
+            extra = (
+                ' [catastrophic_kept]'
+                if r.get('catastrophic_kept')
+                else ''
+            )
             logger.info(
-                'OK %s/%s -> %s (%d frames)',
+                'OK %s/%s -> %s (%d frames)%s',
                 r['instrument'],
                 r['filter'],
                 r['output'],
                 len(r['frames']),
+                extra,
             )
         else:
-            logger.error(
+            log_fn = logger.warning if all_quality_skip else logger.error
+            log_fn(
                 'FAIL %s/%s: %s',
                 r['instrument'],
                 r['filter'],
                 r.get('error'),
             )
     logger.info('HST drizzle done: %d ok, %d failed', n_ok, n_fail)
+    if all_quality_skip:
+        logger.warning(
+            'HST mosaic: no usable frames after EXPFLAG / WFC3-IR filtering; '
+            'soft-skip'
+        )
+        return 0
     return 0 if n_ok and n_fail == 0 else (0 if n_ok else 1)
 
 

@@ -29,6 +29,9 @@ FRAME_L3_SOFT_TOL_ARCSEC = 0.120
 # Crowded-galaxy catalog NN (NGC 337 F606W ~316 mas) is not this residual;
 # use trusted_abs_residual_arcsec (galaxy peak / xcorr) first.
 FRAME_CATASTROPHIC_TOL_ARCSEC = 0.200
+# Upper residual cap (arcsec) for mosaic "keep least-bad" rescue when every
+# frame in an (inst, filt) group would otherwise be dropped.
+FRAME_CATASTROPHIC_KEEP_CAP_ARCSEC = 0.500
 # FFT xcorr on an empty cutout can report a 0" leftover; require this many
 # finite inner pixels before treating the lock as real.
 FRAME_IMAGE_XCORR_MIN_INNER = 200
@@ -236,18 +239,25 @@ def is_catastrophic_alignment(
     peer_n_calibrators: int | None = None,
     gaia_residual_arcsec: float | None = None,
     n_gaia: int | None = None,
+    tol_arcsec: float | None = None,
 ) -> bool:
     """
     True when the solution is a wrong lock that must not be mosaicked.
 
     Catastrophic if the residual exceeds
-    :data:`FRAME_CATASTROPHIC_TOL_ARCSEC` (200 mas), if the match count
-    is a small fraction of healthy peers **and** the residual still exceeds
-    the sparse 80 mas gate, or if a healthy Gaia 2-D histogram residual
-    exceeds 200 mas (pipeline WCS ~arcseconds off).
+    :data:`FRAME_CATASTROPHIC_TOL_ARCSEC` (200 mas, overridable via
+    *tol_arcsec*), if the match count is a small fraction of healthy peers
+    **and** the residual still exceeds the sparse 80 mas gate, or if a
+    healthy Gaia 2-D histogram residual exceeds the same hard gate
+    (pipeline WCS ~arcseconds off).
     """
+    tol = (
+        float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+        if tol_arcsec is None
+        else float(tol_arcsec)
+    )
     res = None if residual_arcsec is None else float(residual_arcsec)
-    if res is not None and res > float(FRAME_CATASTROPHIC_TOL_ARCSEC):
+    if res is not None and res > tol:
         return True
     gaia_res = (
         None if gaia_residual_arcsec is None else float(gaia_residual_arcsec)
@@ -255,7 +265,7 @@ def is_catastrophic_alignment(
     n_g = int(n_gaia or 0)
     if (
         gaia_res is not None
-        and gaia_res > float(FRAME_CATASTROPHIC_TOL_ARCSEC)
+        and gaia_res > tol
         and n_g >= int(FRAME_MIN_MATCH_HEALTHY)
     ):
         return True
@@ -335,14 +345,20 @@ def filter_catastrophic_jhat_frames(
     paths: Sequence[PathLike],
     *,
     peer_n_calibrators: int | None = None,
+    tol_arcsec: float | None = None,
+    keep_catastrophic: bool = False,
 ) -> tuple[list[Path], list[tuple[Path, dict[str, Any]]]]:
     """
     Split JHAT paths into mosaic-safe vs catastrophically misaligned.
 
     *peer_n_calibrators* defaults to the median healthy ``JWNCAL`` among
     *paths*. Frames without quality headers are kept (L3 QA is the backup).
+    *tol_arcsec* overrides :data:`FRAME_CATASTROPHIC_TOL_ARCSEC`. When
+    *keep_catastrophic* is True, every path is kept (no drops).
     """
     resolved = [Path(p).expanduser().resolve() for p in paths]
+    if keep_catastrophic:
+        return list(resolved), []
     qualities = [read_jhat_quality_headers(p) for p in resolved]
     peer = peer_n_calibrators
     if peer is None:
@@ -367,6 +383,7 @@ def filter_catastrophic_jhat_frames(
                 res if res is not None else qual.get('residual_arcsec'),
                 n_use if n_use is not None else qual.get('n_calibrators'),
                 peer_n_calibrators=peer,
+                tol_arcsec=tol_arcsec,
             )
         if flagged:
             qual['catastrophic'] = True

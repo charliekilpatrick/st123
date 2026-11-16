@@ -376,6 +376,21 @@ def test_is_transient_mast_error_detects_timeouts():
     assert _is_transient_mast_error(ConnectionError('reset'))
     assert _is_transient_mast_error(RuntimeError('Timeout limit of 600 exceeded'))
     assert not _is_transient_mast_error(ValueError('bad product row'))
+    assert not _is_transient_mast_error(PermissionError('denied'))
+    assert not _is_transient_mast_error(FileNotFoundError('/missing'))
+    assert _is_transient_mast_error(OSError(104, 'Connection reset by peer'))
+
+
+def test_configure_mast_timeout_sets_module_budget():
+    from st123.stages.download import mast as mast_mod
+
+    prev = mast_mod._MAST_TIMEOUT_SEC
+    try:
+        assert mast_mod.configure_mast_timeout(1800.0) == 1800.0
+        assert mast_mod._MAST_TIMEOUT_SEC == 1800.0
+        assert mast_mod.configure_mast_timeout(None) == 1800.0
+    finally:
+        mast_mod._MAST_TIMEOUT_SEC = prev
 
 
 def test_download_hst_retries_transient_product_list(tmp_path: Path, monkeypatch):
@@ -383,7 +398,7 @@ def test_download_hst_retries_transient_product_list(tmp_path: Path, monkeypatch
     from st123.stages.download.download import MastDownloadResult
     from st123.stages.download import mast as mast_mod
 
-    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
+    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAYS_SEC', (0.0, 0.0, 0.0, 0.0))
     obs = Table(
         {
             'obsid': [101],
@@ -431,7 +446,9 @@ def test_download_hst_marks_failed_after_product_list_retries(
     from st123.stages.download.download import MastDownloadResult
     from st123.stages.download import mast as mast_mod
 
-    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAY_SEC', 0.0)
+    monkeypatch.setattr(mast_mod, '_HST_MAST_RETRY_DELAYS_SEC', (0.0, 0.0, 0.0, 0.0))
+    # Fail fast on the bad obsid: one attempt only for this test.
+    monkeypatch.setattr(mast_mod, '_HST_MAST_MAX_ATTEMPTS', 3)
     obs = Table(
         {
             'obsid': [101, 102],

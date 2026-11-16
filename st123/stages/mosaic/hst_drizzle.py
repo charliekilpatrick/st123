@@ -32,6 +32,40 @@ logger = logging.getLogger(__name__)
 
 _HST_INSTS = frozenset({'acs', 'wfc3', 'wfpc2'})
 
+# Mosaic catastrophic residual gate (overridable via mosaic CLI /
+# :func:`configure_mosaic_catastrophic`).
+_MOSAIC_CATASTROPHIC_TOL_ARCSEC: float | None = None
+_MOSAIC_KEEP_CATASTROPHIC: bool = False
+
+
+def configure_mosaic_catastrophic(
+    *,
+    tol_mas: float | None = None,
+    keep_catastrophic: bool | None = None,
+) -> tuple[float | None, bool]:
+    """
+    Set process-wide mosaic catastrophic drop options.
+
+    Parameters
+    ----------
+    tol_mas : float or None
+        Hard residual gate in milliarcsec. ``None`` leaves the current value
+        (``None`` means use :data:`FRAME_CATASTROPHIC_TOL_ARCSEC`).
+    keep_catastrophic : bool or None
+        When True, never drop frames for catastrophic residual.
+
+    Returns
+    -------
+    tuple
+        ``(tol_arcsec, keep_catastrophic)`` active after the call.
+    """
+    global _MOSAIC_CATASTROPHIC_TOL_ARCSEC, _MOSAIC_KEEP_CATASTROPHIC
+    if tol_mas is not None:
+        _MOSAIC_CATASTROPHIC_TOL_ARCSEC = float(tol_mas) / 1000.0
+    if keep_catastrophic is not None:
+        _MOSAIC_KEEP_CATASTROPHIC = bool(keep_catastrophic)
+    return _MOSAIC_CATASTROPHIC_TOL_ARCSEC, _MOSAIC_KEEP_CATASTROPHIC
+
 
 def mask_wfc3_ir_bad_pixels(
     flt_path: Path,
@@ -3141,10 +3175,30 @@ def _collect_hst_jhat_frames(
         seen.add(key)
         uniq.append(path)
     frames = filter_paths_for_stage(uniq, stage='mosaic-collect')
+    from st123.datamodels.hst import filter_unusable_wfc3_ir_frames
+
+    frames, ir_dropped = filter_unusable_wfc3_ir_frames(frames)
+    if ir_dropped:
+        logger.warning(
+            'mosaic-collect: dropped %d unusable WFC3/IR frame(s); %d remain',
+            len(ir_dropped),
+            len(frames),
+        )
     kept, dropped = _drop_catastrophic_jhat_frames(
         frames, context=str(jhat.name)
     )
-    del dropped
+    if dropped:
+        logger.warning(
+            'mosaic-collect: catastrophic residual drop summary (%d frame(s)): %s',
+            len(dropped),
+            ', '.join(
+                f'{Path(r["path"]).name}'
+                f'({1000.0 * float(r["residual_arcsec"]):.0f}mas)'
+                if r.get('residual_arcsec') is not None
+                else Path(r['path']).name
+                for r in dropped
+            ),
+        )
     return kept
 
 
@@ -3153,13 +3207,75 @@ def _drop_catastrophic_jhat_frames(
     *,
     peer_n_calibrators: int | None = None,
     context: str = '',
+    tol_arcsec: float | None = None,
+    keep_catastrophic: bool = False,
+    keep_cap_arcsec: float | None = None,
 ) -> tuple[list[Path], list[dict]]:
-    """Exclude JHAT frames with a catastrophic alignment residual."""
-    from st123.stages.alignment.frame_qa import filter_catastrophic_jhat_frames
+    """Exclude JHAT frames with a catastrophic alignment residual.
 
-    kept, dropped = filter_catastrophic_jhat_frames(
-        list(paths), peer_n_calibrators=peer_n_calibrators
+    When every frame in *paths* would be dropped but residuals sit under
+    *keep_cap_arcsec* (default 0.5"), keep the least-bad subset so photometry
+    can still proceed (``catastrophic_kept`` on the rejected/kept records).
+    """
+    from st123.stages.alignment.frame_qa import (
+        FRAME_CATASTROPHIC_KEEP_CAP_ARCSEC,
+        filter_catastrophic_jhat_frames,
     )
+
+    effective_tol = (
+        _MOSAIC_CATASTROPHIC_TOL_ARCSEC if tol_arcsec is None else tol_arcsec
+    )
+    effective_keep = bool(keep_catastrophic) or bool(_MOSAIC_KEEP_CATASTROPHIC)
+    kept, dropped = filter_catastrophic_jhat_frames(
+        list(paths),
+        peer_n_calibrators=peer_n_calibrators,
+        tol_arcsec=effective_tol,
+        keep_catastrophic=effective_keep,
+    )
+    catastrophic_kept = False
+    if not kept and dropped:
+        cap = (
+            float(FRAME_CATASTROPHIC_KEEP_CAP_ARCSEC)
+            if keep_cap_arcsec is None
+            else float(keep_cap_arcsec)
+        )
+        eligible: list[tuple[Path, dict, float]] = []
+        for path, qual in dropped:
+            disp = qual.get('residual_arcsec')
+            if disp is None:
+                continue
+            try:
+                res = float(disp)
+            except (TypeError, ValueError):
+                continue
+            if res <= cap:
+                eligible.append((path, qual, res))
+        if eligible:
+            # Sparse fields (few frames): keep all under the cap. Otherwise
+            # keep the single least-bad frame so the coadd still forms.
+            eligible.sort(key=lambda t: t[2])
+            if len(paths) <= 3:
+                rescued = eligible
+            else:
+                rescued = eligible[:1]
+            kept = [p for p, _, _ in rescued]
+            rescued_keys = {str(p.resolve()) for p, _, _ in rescued}
+            dropped = [
+                (p, q)
+                for p, q in dropped
+                if str(p.resolve()) not in rescued_keys
+            ]
+            catastrophic_kept = True
+            logger.warning(
+                'Keeping %d least-bad catastrophic JHAT frame(s)%s '
+                '(all frames flagged; residual <= %.0f mas): %s',
+                len(kept),
+                f' ({context})' if context else '',
+                1000.0 * cap,
+                ', '.join(
+                    f'{p.name}({1000.0 * res:.0f}mas)' for p, _, res in rescued
+                ),
+            )
     rejected: list[dict] = []
     if dropped:
         names = ', '.join(p.name for p, _ in dropped)
@@ -3183,6 +3299,17 @@ def _drop_catastrophic_jhat_frames(
                     ),
                     'n_calibrators': qual.get('n_calibrators'),
                     'residual_arcsec': disp,
+                }
+            )
+    if catastrophic_kept:
+        for path in kept:
+            rejected.append(
+                {
+                    'path': str(path),
+                    'status': 'ok',
+                    'error': None,
+                    'catastrophic_kept': True,
+                    'residual_arcsec': None,
                 }
             )
     return kept, rejected
@@ -3376,17 +3503,29 @@ def _prepare_filter_drizzle(
         'assume_aligned': bool(assume_aligned),
     }
     try:
-        from st123.datamodels.hst import filter_paths_for_stage
+        from st123.datamodels.hst import (
+            filter_paths_for_stage,
+            filter_unusable_wfc3_ir_frames,
+        )
 
-        # EXPFLAG only here. ST123INT is a group stamp (unsafe per-frame);
-        # visit outliers are handled by --drop-outlier-visits.
+        # EXPFLAG + WFC3/IR MEF/EXPTIME gates. ST123INT is a group stamp
+        # (unsafe per-frame); visit outliers use --drop-outlier-visits.
         drizzle_imgs = filter_paths_for_stage(
             list(imgs),
             stage=f'mosaic-{inst}-{filt}',
         )
+        drizzle_imgs, ir_dropped = filter_unusable_wfc3_ir_frames(drizzle_imgs)
+        if ir_dropped:
+            logger.warning(
+                'mosaic %s/%s: dropped %d unusable WFC3/IR frame(s)',
+                inst,
+                filt,
+                len(ir_dropped),
+            )
         if not drizzle_imgs:
             raise RuntimeError(
-                f'No frames remain for {inst}/{filt} after EXPFLAG filtering'
+                f'No frames remain for {inst}/{filt} after EXPFLAG / '
+                f'WFC3-IR quality filtering'
             )
         if assume_aligned:
             record['harmonize'] = {
@@ -3827,6 +3966,7 @@ def _drizzle_box_groups(
         read_jhat_quality_headers(p).get('n_calibrators') for p in box_frames
     )
     filtered_ranked: list[tuple[tuple[str, str], list[Path]]] = []
+    catastrophic_kept_groups: set[tuple[str, str]] = set()
     failed_prep: list[dict] = []
     for (inst, filt), imgs in ranked:
         kept, rejected = _drop_catastrophic_jhat_frames(
@@ -3834,6 +3974,8 @@ def _drizzle_box_groups(
             peer_n_calibrators=peer_n,
             context=f'{inst}/{filt} group {group_id} box {box_id}',
         )
+        if any(r.get('catastrophic_kept') for r in rejected):
+            catastrophic_kept_groups.add((inst, filt))
         if not kept:
             suffix = _drizzle_suffix(inst, list(imgs))
             from st123.stages.mosaic.mosaic import mosaic_hst_coadd_basename
@@ -3871,7 +4013,11 @@ def _drizzle_box_groups(
                         if rejected
                         else 'catastrophic alignment residual'
                     ),
-                    'dropped_catastrophic': [r['path'] for r in rejected],
+                    'dropped_catastrophic': [
+                        r['path']
+                        for r in rejected
+                        if r.get('status') != 'ok'
+                    ],
                 }
             )
             continue
@@ -3889,6 +4035,16 @@ def _drizzle_box_groups(
             drop_outlier_visits=bool(drop_outlier_visits),
             assume_aligned=bool(assume_aligned),
         )
+        if (inst, filt) in catastrophic_kept_groups:
+            record['catastrophic_kept'] = True
+            logger.info(
+                'catastrophic_kept=True for %s/%s group %s box %s (%d frame(s))',
+                inst,
+                filt,
+                group_id,
+                box_id,
+                len(imgs),
+            )
         if record.get('status') != 'ready':
             failed_prep.append(record)
             continue
