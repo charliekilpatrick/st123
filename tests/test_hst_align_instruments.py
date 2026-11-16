@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 from astropy.io import fits
 
-from st123.alignment.hst_jhat import align_hst_raw_dir
+from st123.stages.alignment.hst_jhat import align_hst_raw_dir
 
 
 def _write_hst_raw(path: Path, instrument: str) -> Path:
@@ -42,10 +42,10 @@ def test_align_hst_raw_dir_instruments_skips_wfpc2(tmp_path: Path):
 
     with (
         patch(
-            'st123.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
+            'st123.stages.alignment.hst_jhat.align_hst_image', side_effect=_fake_align
         ),
         patch(
-            'st123.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
+            'st123.stages.alignment.hst_jhat.harmonize_hst_jhat_dir', return_value=[]
         ),
     ):
         results = align_hst_raw_dir(

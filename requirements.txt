@@ -1,4 +1,4 @@
-# Pinned dependencies for st123 (Python 3.11–3.12).
+# Pinned dependencies for st123 (Python 3.11-3.12).
 # Referenced by pyproject.toml via [tool.setuptools.dynamic] dependencies.
 # Validated with: conda create -n st123 python=3.12 pip && pip install -e .
 # Install from the repo root:
@@ -29,8 +29,8 @@ python-dateutil==2.9.0.post0
 progressbar33==2.4
 ccdproc==2.5.1
 reproject==0.21.0
-# photutils 3 breaks jwst 1.20.2 Image3 source_catalog in two ways (npixels→
-# n_pixels; single-source xypos→scalar ApertureMask). st123.utils.compatibility
+# photutils 3 breaks jwst 1.20.2 Image3 source_catalog in two ways (npixels->
+# n_pixels; single-source xypos->scalar ApertureMask). st123.utils.compatibility
 # patch_jwst_for_photutils3() bridges both. Prefer upgrading jwst when feasible.
 photutils==3.0.0
 gwcs==0.26.1
@@ -39,6 +39,11 @@ jwst==1.20.2
 drizzlepac==3.11.0
 stwcs==1.7.7
 stpsf==2.2.0
+# Pin explicitly: stpsf only requires pysiaf>=0.23.3, which can leave an
+# outdated JWST PRD (0.28.0 -> PRDOPSSOC-073) and spam
+# "LOCAL JWST PRD VERSION ... DOESN'T MATCH ... PRDOPSSOC-075" on import.
+# 0.29.0 ships PRDOPSSOC-075.
+pysiaf==0.29.0
 tables==3.11.1
 h5py==3.16.0
 tweakreg-hack==0.1.1

@@ -15,7 +15,7 @@ def test_custom_jhat_import_and_location():
     version = getattr(jhat, '__version__', '')
     # Distinguishes the repo-local build from unmodified PyPI jhat.
     assert version.endswith('+st123'), version
-    # Core API used by st123.alignment.align.
+    # Core API used by st123.stages.alignment.align.
     assert hasattr(jhat, 'st_wcs_align')
     assert hasattr(jhat, 'jwst_photclass')
     # Editable installs resolve under extdeps/; path-dep installs may land in

@@ -54,6 +54,10 @@ jobs:
           region --help
           catalog --help
 
+      - name: Ruff Unicode / name checks
+        run: |
+          ruff check st123 tests
+
       - name: Run unit tests
         run: |
           pytest tests/ -v --tb=short

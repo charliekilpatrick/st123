@@ -101,6 +101,7 @@ def test_no_main_blocks_outside_st123_scripts():
 def test_required_cli_modules_exist():
     """Preserve packaged CLI modules under st123/scripts/."""
     assert (REPO_ROOT / 'st123' / 'scripts' / 'align.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'scripts' / 'align_clinic.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'download.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'coadd_phot.py').is_file()
     assert (REPO_ROOT / 'st123' / 'scripts' / 'utils' / 'options.py').is_file()
@@ -109,9 +110,13 @@ def test_required_cli_modules_exist():
     assert not (REPO_ROOT / 'st123' / 'scripts' / 'alignment_wrap.py').exists()
     assert not (REPO_ROOT / 'st123' / 'scripts' / 'relative_align.py').exists()
     assert not (REPO_ROOT / 'st123' / 'scripts' / 'jwst_download.py').exists()
-    # Alignment library is a single module (no wrap/relative/parallel split).
-    align_pkg = REPO_ROOT / 'st123' / 'alignment'
+    # Alignment library lives under stages/ (no wrap/relative/parallel split).
+    align_pkg = REPO_ROOT / 'st123' / 'stages' / 'alignment'
     assert (align_pkg / 'align.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'stages' / 'stage.py').is_file()
+    assert (REPO_ROOT / 'st123' / 'pipelines' / 'pipeline.py').is_file()
+    assert not (REPO_ROOT / 'st123' / 'alignment').exists()
+    assert not (REPO_ROOT / 'st123' / 'mast').exists()
     for gone in (
         'relative_align.py',
         'alignment_wrap.py',

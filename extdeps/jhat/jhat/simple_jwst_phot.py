@@ -256,16 +256,15 @@ def get_GAIA_sources(ra0,dec0,radius_deg,radius_factor=1.1,
     """
     Gaia cone query for JHAT.
 
-    ESA Gaia TAP is disabled in the st123-vendored tree. This delegates to
-    ``st123.alignment.gaia_catalog.jhat_get_gaia_sources`` (CDS VizieR with
-    mirror retries).
+    Delegates to ``st123.stages.alignment.gaia_catalog.jhat_get_gaia_sources``
+    (CDS VizieR with mirror retries, ESA TAP fallback when Vizier is down).
     """
     try:
-        from st123.alignment.gaia_catalog import jhat_get_gaia_sources
+        from st123.stages.alignment.gaia_catalog import jhat_get_gaia_sources
     except ImportError as exc:
         raise RuntimeError(
-            'ESA Gaia TAP is disabled in this JHAT build. Install st123 so '
-            'Gaia queries use Vizier, or provide a local refcat file.'
+            'Install st123 so Gaia queries use Vizier (with ESA TAP fallback), '
+            'or provide a local refcat file.'
         ) from exc
     return jhat_get_gaia_sources(
         ra0,

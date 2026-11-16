@@ -81,7 +81,7 @@ def main(argv=None) -> int:
     try:
         import matplotlib.pyplot as plt
 
-        from st123.mosaic.region import (
+        from st123.stages.mosaic.region import (
             SRegionPolygon,
             illuminated_s_region_from_fits,
             save_illuminated_region_plot,

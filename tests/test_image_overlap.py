@@ -8,7 +8,7 @@ import pytest
 from shapely.geometry import Polygon
 
 from helpers import write_illuminated_fits, write_ref_with_s_region
-from st123.mosaic.image_overlap import (
+from st123.stages.mosaic.image_overlap import (
     AreaMetrics,
     ScienceFootprint,
     compute_overlap,

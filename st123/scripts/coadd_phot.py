@@ -64,7 +64,7 @@ def create_parser():
         type=float,
         default=None,
         help=(
-            'Encircled-energy fraction override (0–1, or percent >1). '
+            'Encircled-energy fraction override (0-1, or percent >1). '
             'Default: 0.90 NIRCam / 0.80 MIRI.'
         ),
     )
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
     configure_logging_from_args(args, 'coadd-phot')
     try:
-        from st123.photometry.aperture import (
+        from st123.stages.photometry.aperture import (
             forced_aperture_photometry,
             read_coords_table,
         )
@@ -141,15 +141,15 @@ def main(argv: list[str] | None = None) -> int:
         Path(outfile).parent.mkdir(parents=True, exist_ok=True)
         table.write(outfile, format='ascii.ecsv', overwrite=True)
         logger.info(
-            'Wrote forced photometry for %d source(s) → %s',
+            'Wrote forced photometry for %d source(s) -> %s',
             len(table),
             outfile,
         )
         if args.verbose and len(table):
             row = table[0]
             logger.info(
-                'First row: ra=%.6f dec=%.6f flux=%.4f±%.4f μJy '
-                'AB=%.3f±%.3f (EE=%.2f r=%.2f px apcorr=%.4f)',
+                'First row: ra=%.6f dec=%.6f flux=%.4f+/-%.4f uJy '
+                'AB=%.3f+/-%.3f (EE=%.2f r=%.2f px apcorr=%.4f)',
                 float(row['ra']),
                 float(row['dec']),
                 float(row['flux_ujy']),
